@@ -18,6 +18,7 @@ SSH命令执行CLI工具 v3.0
 import sys
 import os
 import json
+import time
 import socket
 import struct
 import argparse
@@ -26,6 +27,8 @@ import subprocess
 # 添加lib到路径
 _script_dir = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(_script_dir, 'lib'))
+
+from command_logger import log_command, log_command_error
 
 
 def _send_message(sock, data):
@@ -182,6 +185,8 @@ def main():
 
     try:
         result = None
+        mode = None  # 记录实际使用的执行模式：daemon / direct
+        start_time = time.time()
 
         # 智能判断是否使用守护进程
         # 守护进程只对密码认证有意义（Paramiko），密钥认证使用原生 SSH 不需要守护进程
@@ -202,14 +207,25 @@ def main():
                 if start_daemon_background(args.alias):
                     result = try_daemon_execute(args.alias, args.command, timeout)
 
+            if result is not None:
+                mode = 'daemon'
+
         # 仍然没有结果，使用直连（密钥认证会使用 NativeSSHClient）
         if result is None:
             result = direct_execute(args.alias, args.command, timeout)
+            # direct_execute 可能内部降级到原生 SSH
+            mode = 'native-fallback' if result.get('fallback_reason') else 'direct'
+
+        duration_ms = int((time.time() - start_time) * 1000)
+        log_command(args.alias, args.command, result, mode=mode,
+                    duration_ms=duration_ms, source='ssh_execute')
 
         print(json.dumps(result, ensure_ascii=True, indent=2))
         sys.exit(0 if result.get('success') else 1)
 
     except FileNotFoundError as e:
+        log_command_error(args.alias, args.command, f'Config not found: {e}',
+                          source='ssh_execute')
         print(json.dumps({
             'success': False,
             'exit_code': -1,
@@ -218,6 +234,8 @@ def main():
         }, ensure_ascii=True, indent=2), file=sys.stderr)
         sys.exit(1)
     except ValueError as e:
+        log_command_error(args.alias, args.command, f'Invalid alias: {e}',
+                          source='ssh_execute')
         print(json.dumps({
             'success': False,
             'exit_code': -1,
@@ -226,6 +244,8 @@ def main():
         }, ensure_ascii=True, indent=2), file=sys.stderr)
         sys.exit(1)
     except Exception as e:
+        log_command_error(args.alias, args.command, f'Execution error: {e}',
+                          source='ssh_execute')
         print(json.dumps({
             'success': False,
             'exit_code': -1,

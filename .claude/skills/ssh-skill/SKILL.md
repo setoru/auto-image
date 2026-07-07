@@ -1,12 +1,12 @@
 ---
 name: ssh-skill
-version: 3.3.1
+version: 3.4.0
 description: "CRITICAL: Use this skill for ALL SSH/server operations. NEVER run raw ssh/scp directly. Triggers: SSH, remote server, server IP/hostname/user@host, connect/login, run command on server, check server/status, deploy, upload/download, file transfer, bastion/jump host, server-to-server transfer, migrate, tunnel, port forward, database/internal service access, and Chinese terms: 服务器, 远程, 连接, 登录, 上传, 下载, 部署, 跳板机, 服务器间传输, 迁移, 隧道, 端口转发, 数据库连接, 内网访问. Provides persistent connections, pooling, jump hosts, SFTP, tunneling, and recovery. DO NOT use for local commands, localhost, or current-directory work."
 allowed-tools: Bash, Read, Write, Glob
 keywords: SSH,服务器,远程,连接,命令,上传,下载,文件传输,跳板机,批量,集群,deploy,部署,运维,登录,执行,查看,检查,管理,操作,访问,传输,迁移,服务器间,tunnel,隧道,端口转发,数据库,内网
 ---
 
-# SSH Skill v3.3.1
+# SSH Skill v3.4.0
 
 高性能 SSH 操作技能，支持守护进程长连接、自动连接复用、跳板机、批量并发、服务器间直接传输、自动错误恢复。
 
@@ -41,7 +41,7 @@ python ~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py list-servers
 
 展示 SSH Skill 的帮助文档。以 Markdown 格式输出以下内容：
 
-**SSH Skill v3.3.1 - 高性能 SSH 操作技能**
+**SSH Skill v3.4.0 - 高性能 SSH 操作技能**
 
 **核心特点：**
 - 守护进程长连接：首次连接后自动启动守护进程，后续命令响应时间从 ~0.45s 降至 ~0.12s
@@ -52,6 +52,7 @@ python ~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py list-servers
 - 跳板机支持：通过 ProxyJump 自动处理多级跳板机
 - 批量并发操作：支持对多台服务器并发执行命令
 - 自动错误恢复：SSH 连接断开自动重连（最多 3 次）
+- 命令执行日志：每条执行的命令自动归档到对应服务器的 .log 文件（执行了什么、返回了什么），直接打开即可查看
 
 **快捷命令：**
 - `/ssh-skill list` - 列出所有已配置的服务器
@@ -428,6 +429,76 @@ python "SCRIPTS/ssh_execute.py" DEV-002 "free -m"
   "stderr": ""
 }
 ```
+
+## 命令执行日志（按服务器归档）
+
+每一条通过 `ssh_execute.py` 或 `ssh_cluster.py` 执行的命令都会**自动追加归档到「该服务器对应的文件」**中，包含**执行了什么命令**以及**返回是啥**（stdout/stderr/退出码/是否成功/耗时）。直接用编辑器 / `less` / `cat` 打开即可查看，**无需任何查看命令**。
+
+### 文件位置
+
+```
+<项目根目录>/logs/
+├── prod-web-01.log      # prod-web-01 这台机器执行过的每条命令
+├── dev-02.log           # dev-02 这台机器执行过的每条命令
+└── ...
+```
+
+- 默认归档到**项目根目录下的 `logs/`**（自动识别 git 仓库根，与 `.claude/` 同级；非 git 仓库时为当前目录的 `logs/`，且会避开 `.claude` 目录）。即落在 `<project>/logs`，而不是 `<project>/.claude/logs`。
+- **一台服务器一个文件**：文件名就是别名（含非法字符的别名会被转义为 `_`，文件内容里仍保留真实别名）。集群批量执行时，每台主机各追加到自己的文件。
+- 可用环境变量 `SSH_SKILL_LOG_DIR` 覆盖目录（支持 `~` 和相对/绝对路径）。
+- 每个文件基于大小自动滚动（默认单文件 10MB，保留 5 个历史文件 `<别名>.log.1`、`.2` …）。
+- 单条命令的 stdout/stderr 超过 64KB 会自动截断并在文件中标注。
+
+### 文件格式（人类可读纯文本）
+
+每条命令以一个分隔块的形式追加到文件末尾：
+
+```
+================================================================================
+2026-07-07 14:49:07 | prod-web-01 | daemon | 120ms | ssh_execute
+$ whoami && hostname
+--------------------------------------------------------------------------------
+exit 0 (success)
+--------------------------------------------------------------------------------
+[stdout]
+root
+web-01
+--------------------------------------------------------------------------------
+[stderr]
+(empty)
+================================================================================
+```
+
+失败的命令同样记录（含退出码、stderr、异常信息）。
+
+### 直接查看（不需要命令）
+
+```bash
+# 看某台服务器的全部命令历史
+less logs/prod-web-01.log
+
+# 追踪最新执行的命令
+tail -f logs/prod-web-01.log
+
+# 列出所有有记录的服务器
+ls logs/
+
+# 只看失败（含 stderr）的段落
+grep -n -A8 "failed" logs/prod-web-01.log
+```
+
+### 配置环境变量
+
+| 变量 | 默认 | 说明 |
+|------|------|------|
+| `SSH_SKILL_LOG_DIR` | `logs`（项目根目录下） | 日志目录，支持 `~` 和相对/绝对路径 |
+| `SSH_SKILL_LOG_MAX_BYTES` | `10485760` (10MB) | 单文件大小上限，超过则滚动 |
+| `SSH_SKILL_LOG_BACKUP_COUNT` | `5` | 每个文件保留的历史滚动文件数量 |
+| `SSH_SKILL_LOG_TRUNCATE_BYTES` | `65536` (64KB) | 单条 stdout/stderr 截断阈值 |
+| `SSH_SKILL_LOG_DISABLE` | （空） | 置为任意非空值则完全关闭记录 |
+
+> 日志记录不会影响命令本身的执行：即便日志写入失败，命令结果也会正常返回。
+
 
 ## 故障排查
 

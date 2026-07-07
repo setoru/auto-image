@@ -25,11 +25,13 @@ SSH批量操作CLI工具 v3.0
 import sys
 import os
 import json
+import time
 import argparse
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), 'lib'))
 
 from cluster import SSHCluster
+from command_logger import log_command
 
 
 def main():
@@ -66,11 +68,22 @@ def main():
             sys.exit(1)
 
         if args.health_check:
+            start_time = time.time()
             health = cluster.health_check_all(
                 check_command=args.command,
                 parallel=args.parallel,
                 timeout=args.timeout
             )
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # 记录每个主机的健康检查结果
+            for name, status in health.items():
+                log_command(name, args.command, {
+                    'success': bool(status),
+                    'exit_code': 0 if status else 1,
+                    'stdout': '' ,
+                    'stderr': '' if status else 'health check failed',
+                }, mode='health-check', duration_ms=duration_ms, source='ssh_cluster')
 
             output = {
                 'success': True,
@@ -84,11 +97,22 @@ def main():
             sys.exit(0 if all(health.values()) else 1)
 
         else:
+            start_time = time.time()
             results = cluster.execute_all(
                 args.command,
                 parallel=args.parallel,
                 timeout=args.timeout
             )
+            duration_ms = int((time.time() - start_time) * 1000)
+
+            # 记录每个主机执行的命令及其返回
+            for name, result in results.items():
+                log_command(name, args.command, {
+                    'success': result.success,
+                    'exit_code': result.exit_code,
+                    'stdout': result.stdout,
+                    'stderr': result.stderr,
+                }, mode='cluster', duration_ms=duration_ms, source='ssh_cluster')
 
             output = {
                 'success': all(r.success for r in results.values()),
