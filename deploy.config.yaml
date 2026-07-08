@@ -1,0 +1,39 @@
+# ============================================================
+# Deploy 统一配置
+# 作用：deploy-guide / deploy-install / deploy-verify 三个 agent 共用
+# 位置：项目根目录 deploy.config.yaml（与 .claude/ 同级，和 agents 隔离）
+# ============================================================
+# 占位符（agent 运行时按本次软件替换）：
+#   {{software}}  软件名，小写、连字符分隔，如 nginx / redis / postgresql
+#   {{version}}   软件版本号，如 1.25.3；无法确定时取 unknown_version
+# ============================================================
+# 路径规则：所有文件都位于 output_dir 下。
+#   deploy-install 的输入 = output_dir + install_file
+#   deploy-verify  的输入 = output_dir + verify_file
+#   下游输入由 output_dir 与指南文件名派生，三端自动对齐，无需手动同步。
+# ============================================================
+
+# 公共：输出根目录（指南与结果都放在此目录下，按软件/版本分子目录）
+output_dir: "deploy/{{software}}/{{version}}"
+
+# 软件版本无法确定时的占位值
+unknown_version: "latest"
+
+# --- deploy-guide 输出文件名（位于 output_dir 下） ---
+install_file: "{{software}}-install.md"
+verify_file: "{{software}}-verify.md"
+target_os: "ubuntu"
+default_ubuntu_version: "auto"                 # auto = 自动探测当前机器
+clone_workdir_prefix: "/tmp/deploy-guide-"      # git clone 临时目录前缀（仅阅读文档）
+
+# --- deploy-install 输出文件名（位于 output_dir 下；输入 = output_dir + install_file） ---
+install_result_file: "{{software}}-install-result.md"
+install_issues_file: "{{software}}-install-issues.md"
+
+# --- deploy-verify 输出文件名（位于 output_dir 下；输入 = output_dir + verify_file） ---
+verify_result_file: "{{software}}-verify-result.md"
+verify_issues_file: "{{software}}-verify-issues.md"
+
+# --- 运行时（install / verify 共用） ---
+default_server_alias: ""                       # 默认目标机器别名；留空则要求 prompt 提供
+ssh_skill_scripts: ".claude/skills/ssh-skill/scripts"
