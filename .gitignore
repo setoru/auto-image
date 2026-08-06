@@ -1,2 +1,8 @@
 # ssh-skill 命令执行审计日志（运行时产物）
 /logs/
+
+# 仓库根共享凭证（ecs-skill + ims-skill），含 AK/SK 明文
+/scope.yaml
+
+# deploy-install 运行时元数据（临时产物，不含密码，但不属于交付产物）
+/deploy/**/*-install-meta.json
