@@ -228,6 +228,9 @@ python "~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py" find "<关�
 # 创建配置
 python "~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py" create --alias <别名> --host <IP> --user <用户名> --key <密钥文件> --environment <环境>
 
+# 创建配置（密码认证）
+python "~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py" create --alias <别名> --host <IP> --user <用户名> --password <密码> --environment <环境>
+
 # 更新配置（只更新提供的字段，其他字段保持不变）
 python "~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py" update <别名> --description "新描述" --tags tag1 tag2 tag3
 python "~/.claude/skills/ssh-skill/scripts/ssh_config_manager_v3.py" update <别名> --environment production --location "新位置"
