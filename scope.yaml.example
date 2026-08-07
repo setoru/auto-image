@@ -1,0 +1,56 @@
+# 仓库根共享 scope 配置范本（脱密）。复制为 scope.yaml 后填入真实值。
+# scope.yaml 已被 .gitignore 忽略。
+#
+# 这是 ecs-skill 与 ims-skill 的唯一凭证源。
+# 顶层 ak/sk/region/project_id 共享；各 skill 的段（ecs_create / ims_create）共存。
+#
+# 优先级（高 → 低）：
+#   AK/SK : HUAWEICLOUD_SDK_AK / _SK 环境变量  >  下方 ak/sk
+#   region: HUAWEICLOUD_SDK_REGION             >  下方 region
+#   project_id: HUAWEICLOUD_SDK_PROJECT_ID     >  下方 project_id（可省略，SDK 按 region 自动推导）
+#   规格  : CLI --flavor/--image/--name/...    >  下方 ecs_create.server
+
+ak: <YOUR_AK>
+sk: <YOUR_SK>
+region: cn-north-4
+# project_id 可省略——SDK 会按 region 经 IAM 自动推导。
+# project_id: <YOUR_PROJECT_ID>
+
+# ┌──────────────────────────────────────────────────────────────────┐
+# │ ecs-skill 段                                                    │
+# │ 只读顶层认证 + ecs_create.server；网络/密钥/安全组都放 server 内 │
+# │ （region/VPC 级静态）。                                         │
+# └──────────────────────────────────────────────────────────────────┘
+ecs_create:
+  server:
+    name: ecs-example            # 可省略 → 自动 ecs-<rand>；CLI --name 可覆盖
+    imageRef: <UBUNTU_24_04_IMAGE_ID>  # Ubuntu 24.04 公共镜像 ID（区域绑定）；CLI --image 可覆盖
+    flavorRef: c7.xlarge.2       # 4 vCPU/8 GB 计算型；CLI --flavor 可覆盖。注意：规格库存按 AZ 变化，售罄会报 Ecs.0018
+    vpcid: <YOUR_VPC_ID>         # 如 d66ca4f8-...
+    availability_zone: ""        # 留空 → 华为自选有货的 AZ；CLI --az 可覆盖
+    nics:
+      - subnet_id: <YOUR_SUBNET_ID>
+    root_volume:
+      volumetype: SSD            # 系统盘类型；CLI --disk-type 可覆盖（SSD/GPSSD/SAS...）
+      size: 40                   # 系统盘大小 GB；不给则退到镜像最小磁盘要求（Ubuntu 24.04 为 10 GB，偏小）
+    # 登录鉴权方式为密钥对与密码二选一。留空 key_name + 留空/不写 password → 自动生成强密码。
+    key_name: ""                 # 已有密钥对时填入；CLI --key 可覆盖。留空走密码通道。
+    key_file: ""                 # 密钥对对应的本地私钥路径（如 ~/.ssh/ecs_key.pem）。deploy-install 消费此字段注册 ssh-skill 的 IdentityFile；ecs-skill 不感知此字段。
+    password: ""                 # 固定密码（如 ScopePwd@@123456）；CLI --password / 环境变量 ECS_ADMIN_PASSWORD 可覆盖
+    security_groups:
+      - id: <YOUR_SG_ID>         # 须对调用方出口 IP 放行 22
+    # 默认带 EIP（公网可达）。--no-eip 时不注入；下面的 publicip 作为模板。
+    publicip:
+      eip:
+        iptype: 5_bgp
+        bandwidth:
+          sharetype: PER          # PER 独享 / WHOLE 共享
+          size: 5                 # Mbit/s；CLI --bandwidth 可覆盖
+          chargemode: traffic     # 按流量计费
+
+# ┌──────────────────────────────────────────────────────────────────┐
+# │ ims-skill 段                                                    │
+# │ ims_create 可选——不做企业项目管理时整段可省略。                │
+# └──────────────────────────────────────────────────────────────────┘
+ims_create:
+  enterprise_project_id: ""      # 企业项目 ID；留空/不写 → 不下发

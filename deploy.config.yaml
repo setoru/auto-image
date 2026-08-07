@@ -1,6 +1,6 @@
 # ============================================================
 # Deploy 统一配置
-# 作用：deploy-guide / deploy-install / deploy-verify 三个 agent 共用
+# 作用：deploy-guide / deploy-install / deploy-verify / deploy-archive 四个 agent 共用
 # 位置：项目根目录 deploy.config.yaml（与 .claude/ 同级，和 agents 隔离）
 # ============================================================
 # 占位符（agent 运行时按本次软件替换）：
@@ -29,11 +29,19 @@ clone_workdir_prefix: "/tmp/deploy-guide-"      # git clone 临时目录前缀�
 # --- deploy-install 输出文件名（位于 output_dir 下；输入 = output_dir + install_file） ---
 install_result_file: "{{software}}-install-result.md"
 install_issues_file: "{{software}}-install-issues.md"
+install_meta_file: "{{software}}-install-meta.json"
 
 # --- deploy-verify 输出文件名（位于 output_dir 下；输入 = output_dir + verify_file） ---
 verify_result_file: "{{software}}-verify-result.md"
 verify_issues_file: "{{software}}-verify-issues.md"
 
-# --- 运行时（install / verify 共用） ---
+# --- deploy-archive 输出文件名（位于 output_dir 下） ---
+archive_result_file: "{{software}}-archive-result.md"
+deploy_list_file: "{{software}}-deploy-list.md"
+archive_issues_file: "{{software}}-archive-issues.md"
+
+# --- 运行时（install / verify / archive 共用） ---
 default_server_alias: ""                       # 默认目标机器别名；留空则要求 prompt 提供
 ssh_skill_scripts: ".claude/skills/ssh-skill/scripts"
+ims_skill_scripts: ".claude/skills/ims-skill/scripts"
+ecs_skill_scripts: ".claude/skills/ecs-skill/scripts"

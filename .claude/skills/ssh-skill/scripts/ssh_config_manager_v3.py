@@ -262,7 +262,8 @@ class SSHConfigManager:
                    environment: str = "development",
                    description: str = "",
                    tags: Optional[List[str]] = None,
-                   location: str = "") -> bool:
+                   location: str = "",
+                   password: Optional[str] = None) -> bool:
         """
         创建新的 Host 配置（带注释元数据）
 
@@ -277,6 +278,7 @@ class SSHConfigManager:
             description: 描述
             tags: 标签列表
             location: 物理位置
+            password: 登录密码（写入注释元数据，供 paramiko 密码认证使用）
 
         Returns:
             是否成功创建
@@ -301,6 +303,9 @@ class SSHConfigManager:
 
         if location:
             comment_lines.append(f"# location: {location}\n")
+
+        if password:
+            comment_lines.append(f"# password: {password}\n")
 
         now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
         comment_lines.append(f"# created_at: {now}\n")
@@ -872,7 +877,8 @@ def cmd_create(args):
             environment=args.environment,
             description=args.description or "",
             tags=args.tags or [],
-            location=args.location or ""
+            location=args.location or "",
+            password=args.password
         )
 
         if success:
@@ -1030,6 +1036,7 @@ def main():
     create_parser.add_argument('--description', help='描述')
     create_parser.add_argument('--tags', nargs='+', help='标签列表')
     create_parser.add_argument('--location', help='物理位置')
+    create_parser.add_argument('--password', help='登录密码（写入注释元数据，供密码认证使用）')
 
     # update 命令
     update_parser = subparsers.add_parser('update', help='更新服务器配置')
