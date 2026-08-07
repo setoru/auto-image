@@ -1,20 +1,17 @@
-以下是根据 `deploy-verify` 格式调整后的 `rpm-verify` Skill 设计文档，与 `rpm-guide` 和 `rpm-build` 完全对齐。
-
-```markdown
 ---
 name: rpm-verify
-description: 读取 rpm-guide 生成的验证指南（verify-guide.md），通过 ssh-skill 在指定远程机器上执行只读验证（不安装/不修改），输出验证结果。输入/输出由 deploy.config.yaml 配置（支持 {{software}}/{{version}} 占位符）。当用户要求「验证 RPM 是否构建正确」「远程验证 RPM 安装」「检查 RPM 包功能」时使用。触发词：rpm验证、验证rpm、检查rpm包、rpm verify、verify rpm、rpm功能验证、rpm安装验证。
+description: 读取 rpm-guide 生成的验证指南（verify-guide.md），通过 ssh-skill 在远程机器上安装 RPM 包并执行验证（安装 + 只读检查），输出验证结果。输入/输出由 deploy.config.yaml 配置（支持 {{software}}/{{version}} 占位符）。当用户要求「验证 RPM 是否构建正确」「远程验证 RPM 安装」「检查 RPM 包功能」时使用。触发词：rpm验证、验证rpm、检查rpm包、rpm verify、verify rpm、rpm功能验证、rpm安装验证。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
 # RPM Verify Agent
 
-读取 rpm-guide 生成的《RPM 验证指南》，通过 **ssh-skill** 在指定远程机器上执行**只读**验证，输出验证结果。不与软件安装过程耦合，仅检查 RPM 包本身的完整性、文件清单、服务状态与基本功能。
+读取 rpm-guide 生成的《RPM 验证指南》，通过 **ssh-skill** 在指定远程机器上执行验证，输出验证结果。需要安装rpm包，检查 RPM 包本身的完整性、文件清单、服务状态与基本功能。
 
 ## 核心原则
 
 - **必须通过 ssh-skill 操作远程机器**：所有远程命令一律使用 `ssh_execute.py` 等脚本，**禁止**直接写 `ssh`/`scp`。用服务器**别名**标识目标机器。
-- **验证只读，不安装/不修改**：只运行验证类命令（文件存在性、服务状态查询、端口监听、功能探活、日志抽查等）。**不得**执行任何安装、修改配置、启动/停止服务、写文件等变更操作。若验证指南中含变更类命令，**跳过**并记为「跳过（非验证类）」。
+- **验证采用只读检查**：安装后，只执行查询、状态检查、端口探测、功能测试等只读命令，**不再执行额外的安装或配置变更**（除了最初安装 RPM 这一步）。
 - **全量执行、不失败即停**：验证需**逐项全部执行**并记录每项结果，最后汇总；单项失败不中断后续检查，以给出完整健康画像。
 - **对比实际 vs 期望**：验证指南每条命令带 `# 期望:` 注释。执行后取实际 stdout，与期望比对判定 ✅/❌（按关键字/子串匹配，忽略空白与大小写差异）。
 - **非交互执行**：远程命令必须非交互；`systemctl status`/`journalctl` 类命令自动补 `--no-pager`。
