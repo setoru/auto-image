@@ -31,6 +31,7 @@ from ecs_ops import (  # noqa: E402
     PASSWORD_SPECIAL_CHARS,
     build_change_os_request,
     build_create_request,
+    build_delete_request,
     decide_ready_ip,
     fixed_ip,
     generate_password,
@@ -1058,6 +1059,113 @@ def test_mask_password_adminpass_key():
     assert masked["os_change"]["adminpass"] == "******", \
         f"adminpass 应掩码，实得 {masked['os_change']['adminpass']!r}"
     assert masked["os_change"]["imageid"] == "img-1", "其他字段不应被改"
+
+
+# ---- delete：请求构造（缝 A）----
+def test_delete_requires_instance_id():
+    """空 instance_id → ValueError 点名缺失标识。"""
+    try:
+        build_delete_request("")
+        raise AssertionError("空 instance_id 应抛 ValueError")
+    except ValueError as e:
+        assert "id" in str(e).lower() or "标识" in str(e), f"报错应提及 id/标识，实得：{e}"
+
+
+def test_delete_request_carries_server_id():
+    """instance_id 落到 servers[0].id。"""
+    req = build_delete_request("srv-abc")
+    servers = req.body.servers
+    assert servers and servers[0].id == "srv-abc", \
+        f"servers[0].id 应为 srv-abc，实得 {servers!r}"
+
+
+def test_delete_cascade_publicip_true():
+    """delete_publicip 恒为 True（释放绑定的 EIP）。"""
+    req = build_delete_request("srv-1")
+    assert req.body.delete_publicip is True, \
+        f"delete_publicip 应恒为 True，实得 {req.body.delete_publicip!r}"
+
+
+def test_delete_cascade_volume_true():
+    """delete_volume 恒为 True（删除数据盘 + 系统盘随实例默认删除）。"""
+    req = build_delete_request("srv-1")
+    assert req.body.delete_volume is True, \
+        f"delete_volume 应恒为 True，实得 {req.body.delete_volume!r}"
+
+
+def test_delete_request_single_server():
+    """servers 列表只有一条（一次删一台）。"""
+    req = build_delete_request("srv-1")
+    assert len(req.body.servers) == 1, \
+        f"servers 应只有 1 条，实得 {len(req.body.servers)} 条"
+
+
+# ---- delete --dry-run 端到端（缝 B）----
+def test_delete_dry_run_by_id():
+    """delete --dry-run --id：stdout 纯 JSON、dry_run:true、action:delete、退出码 0。"""
+    code, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--id", "srv-1"])
+    assert code == 0, f"退出码应为 0，实得 {code!r}"
+    assert payload.get("ok") is True, f"ok 应为 True，实得 {payload.get('ok')!r}"
+    assert payload.get("action") == "delete", f"action 实得 {payload.get('action')!r}"
+    assert payload.get("dry_run") is True, f"dry_run 应为 True，实得 {payload.get('dry_run')!r}"
+    assert payload.get("region") == "cn-north-4", f"region 实得 {payload.get('region')!r}"
+
+
+def test_delete_dry_run_id_reaches_request():
+    """--id 落到 request.body.servers[0].id。"""
+    _, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--id", "srv-abc"])
+    body = ((payload.get("request") or {}).get("body")) or {}
+    servers = body.get("servers") or []
+    assert servers and servers[0].get("id") == "srv-abc", \
+        f"servers[0].id 应为 srv-abc，实得 {servers!r}"
+
+
+def test_delete_dry_run_cascade_flags():
+    """dry-run 输出中 delete_publicip=True、delete_volume=True。"""
+    _, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--id", "srv-1"])
+    body = ((payload.get("request") or {}).get("body")) or {}
+    assert body.get("delete_publicip") is True, \
+        f"delete_publicip 应为 True，实得 {body.get('delete_publicip')!r}"
+    assert body.get("delete_volume") is True, \
+        f"delete_volume 应为 True，实得 {body.get('delete_volume')!r}"
+
+
+def test_delete_dry_run_by_name():
+    """delete --dry-run --name：dry-run 不触网，输出 name + cascade info。"""
+    code, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--name", "web-01"])
+    assert code == 0, f"退出码应为 0，实得 {code!r}"
+    assert payload.get("ok") is True
+    assert payload.get("action") == "delete"
+    assert payload.get("dry_run") is True
+    assert payload.get("name") == "web-01", f"name 实得 {payload.get('name')!r}"
+
+
+def test_delete_dry_run_name_cascade_flags():
+    """--name 的 dry-run 也显示 cascade flags。"""
+    _, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--name", "web-01"])
+    cascade = payload.get("cascade") or {}
+    assert cascade.get("delete_publicip") is True, \
+        f"cascade.delete_publicip 应为 True，实得 {cascade!r}"
+    assert cascade.get("delete_volume") is True, \
+        f"cascade.delete_volume 应为 True，实得 {cascade!r}"
+
+
+def test_delete_requires_id_or_name():
+    """delete 不给 --id 也不给 --name → argparse 报错（退出码 2）。"""
+    code, _ = run_cli(make_cli_scope(), ["delete", "--dry-run"])
+    assert code == 2, f"不给 --id/--name 应被 argparse 拒绝（退出码 2），实得 {code!r}"
+
+
+def test_delete_id_and_name_mutually_exclusive():
+    """同时给 --id 和 --name → argparse 报错（退出码 2）。"""
+    code, _ = run_cli(make_cli_scope(), ["delete", "--dry-run", "--id", "srv-1", "--name", "web-01"])
+    assert code == 2, f"同时给 --id/--name 应被拒绝（退出码 2），实得 {code!r}"
+
+
+def test_delete_dry_run_no_network():
+    """dry-run 全程不触网（socket 层设陷阱——run_cli 已内置 _no_network）。"""
+    code, payload = run_cli(make_cli_scope(), ["delete", "--dry-run", "--id", "srv-1"])
+    assert code == 0 and payload is not None, "dry-run 不应触网且应正常输出"
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -17,7 +17,7 @@ from typing import Any
 from huaweicloudsdkecs.v2 import CreateServersRequest, ListServersDetailsRequest
 
 from ecs_client import DEFAULT_SCOPE_PATH, build_client, load_scope_config, resolve_credentials
-from ecs_ops import build_change_os_request, build_create_request, decide_ready_ip, fixed_ip, floating_ip, mask_password
+from ecs_ops import build_change_os_request, build_create_request, build_delete_request, decide_ready_ip, fixed_ip, floating_ip, mask_password
 
 LOGS_DIR = Path(__file__).resolve().parent.parent / "logs"
 DEFAULT_POLL_TIMEOUT = 600
@@ -398,6 +398,124 @@ def cmd_change_os(args: argparse.Namespace) -> int:
 
 
 # ----------------------------------------------------------------------------
+# 删除
+# ----------------------------------------------------------------------------
+def poll_until_deleted(client, *, server_id, timeout, interval, trace) -> str:
+    """轮询直至实例从列表消失（或超时）。返回 status：DELETED 或 TIMEOUT。
+
+    ERROR 态不提前退出——删除过程中实例可能短暂进入 ERROR，
+    继续轮询直至消失或超时。
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        srv = show_server(client, server_id=server_id)
+        status = str(getattr(srv, "status", "") or "").upper() if srv else "GONE"
+        trace.append({"t": time.strftime("%H:%M:%S"), "status": status})
+        if srv is None:
+            return "DELETED"
+        time.sleep(interval)
+    return "TIMEOUT"
+
+
+# ssh 别名清理提醒——delete 成功和幂等 NOT_FOUND 都附带。
+_SSH_ALIAS_HINT = "如该机器注册过 ssh 别名，请另行用 ssh-skill 清理。"
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    scope = load_scope_config(Path(args.scope))
+    creds = resolve_credentials(scope)
+
+    # --dry-run：不触网，仅预览将删什么
+    if args.dry_run:
+        if args.id:
+            req = build_delete_request(args.id)
+            emit({
+                "ok": True, "action": "delete", "dry_run": True, "region": creds.region,
+                "id": args.id, "request": _jsonable(req),
+                "note": "未调用 API；实际执行将删除 ECS + 系统盘 + EIP + 数据盘。",
+            })
+        else:
+            # --name 的 dry-run 无法解析 id（不触网），输出 cascade 预览。
+            emit({
+                "ok": True, "action": "delete", "dry_run": True, "region": creds.region,
+                "name": args.name,
+                "cascade": {"delete_publicip": True, "delete_volume": True},
+                "note": "未调用 API；实际执行将先查询 name→id 再删除 ECS + 系统盘 + EIP + 数据盘。",
+            })
+        return 0
+
+    client = build_client(creds)
+
+    # 解析目标并确认存在：--id 直接查，--name 先按名找。
+    # 两条路径最终都拿到 server 对象或判定不存在（幂等成功）。
+    if args.id:
+        pre = show_server(client, server_id=args.id)
+        if pre is None:
+            emit({"ok": True, "action": "delete", "id": args.id,
+                  "status": "NOT_FOUND", "note": "目标 ECS 不存在，视为已删除。",
+                  "hint": _SSH_ALIAS_HINT})
+            return 0
+    else:
+        pre = find_server_by_name(client, name=args.name)
+        if pre is None:
+            emit({"ok": True, "action": "delete", "name": args.name,
+                  "status": "NOT_FOUND", "note": "目标 ECS 不存在，视为已删除。",
+                  "hint": _SSH_ALIAS_HINT})
+            return 0
+
+    instance_id = str(getattr(pre, "id", "") or "")
+    server_name = str(getattr(pre, "name", "") or "")
+    server_ip = floating_ip(pre) or fixed_ip(pre) or ""
+
+    req = build_delete_request(instance_id)
+    log_file = new_log_path(f"ecs-delete-{instance_id[:8] or 'unknown'}")
+    trace: list[dict[str, Any]] = []
+    log_payload: dict[str, Any] = {
+        "action": "delete", "id": instance_id, "name": server_name,
+        "ip": server_ip, "region": creds.region,
+        "request": _jsonable(req), "poll_trace": trace,
+    }
+
+    # 提交删除（华为异步：返回 job_id，后台删除实例+盘+EIP）
+    try:
+        resp = client.delete_servers(req)
+    except Exception as exc:
+        result = {"ok": False, "action": "delete", "id": instance_id, "name": server_name,
+                  "error": f"DeleteServers 调用失败：{exc}"}
+        result["log"] = write_log(log_file, {**log_payload, "final": result, "error_detail": str(exc)})
+        emit(result)
+        return 1
+
+    job_id = getattr(resp, "job_id", "") or ""
+    print(f"[ecs] delete submitted id={instance_id} name={server_name}"
+          f"（轮询中；中断可用 show --id 复查）",
+          file=sys.stderr, flush=True)
+
+    # 轮询直至实例消失
+    status = poll_until_deleted(
+        client, server_id=instance_id, timeout=args.timeout,
+        interval=args.poll_interval, trace=trace,
+    )
+
+    deleted = status == "DELETED"
+    result: dict[str, Any] = {
+        "ok": deleted, "action": "delete", "id": instance_id, "name": server_name,
+        "ip": server_ip, "status": status, "job_id": job_id,
+        "region": creds.region,
+    }
+    if deleted:
+        result["hint"] = _SSH_ALIAS_HINT
+    else:
+        result["error"] = f"轮询超时（{args.timeout}s）仍未删除"
+        result["hint"] = "删除可能仍在进行，稍后用 `show --id` 复查。"
+
+    log_payload["final"] = result
+    result["log"] = write_log(log_file, log_payload)
+    emit(result)
+    return 0 if deleted else 1
+
+
+# ----------------------------------------------------------------------------
 # CLI
 # ----------------------------------------------------------------------------
 def build_parser() -> argparse.ArgumentParser:
@@ -445,6 +563,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_changos.add_argument("--poll-interval", dest="poll_interval", type=int, default=DEFAULT_POLL_INTERVAL, help=f"轮询间隔秒（默认 {DEFAULT_POLL_INTERVAL}）")
     p_changos.add_argument("--port-grace", dest="port_grace", type=int, default=DEFAULT_PORT_GRACE, help=f"ACTIVE 后探 22 宽限秒（默认 {DEFAULT_PORT_GRACE}）")
     p_changos.set_defaults(func=cmd_change_os)
+
+    p_delete = sub.add_parser("delete", help="删除一台 ECS（实例 + 系统盘 + EIP + 数据盘级联清理）")
+    target_del = p_delete.add_mutually_exclusive_group(required=True)
+    target_del.add_argument("--id", help="ECS server id")
+    target_del.add_argument("--name", help="ECS 名称（精确匹配）")
+    p_delete.add_argument("--dry-run", action="store_true", help="仅打印将删除什么，不调 API")
+    p_delete.add_argument("--timeout", type=int, default=DEFAULT_POLL_TIMEOUT, help=f"轮询删除完成超时秒（默认 {DEFAULT_POLL_TIMEOUT}）")
+    p_delete.add_argument("--poll-interval", dest="poll_interval", type=int, default=DEFAULT_POLL_INTERVAL, help=f"轮询间隔秒（默认 {DEFAULT_POLL_INTERVAL}）")
+    p_delete.set_defaults(func=cmd_delete)
 
     return parser
 
