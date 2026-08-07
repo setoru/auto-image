@@ -401,17 +401,20 @@ def cmd_change_os(args: argparse.Namespace) -> int:
 # 删除
 # ----------------------------------------------------------------------------
 def poll_until_deleted(client, *, server_id, timeout, interval, trace) -> str:
-    """轮询直至实例从列表消失（或超时）。返回 status：DELETED 或 TIMEOUT。
+    """轮询直至实例已删除（或超时）。返回 status：DELETED 或 TIMEOUT。
+
+    华为云删除后实例不会立即从 API 消失，而是以 DELETED 状态保留一段时间，
+    因此 DELETED 状态即视为删除成功。实例彻底从列表消失（None）同样判定成功。
 
     ERROR 态不提前退出——删除过程中实例可能短暂进入 ERROR，
-    继续轮询直至消失或超时。
+    继续轮询直至 DELETED / 消失 / 超时。
     """
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         srv = show_server(client, server_id=server_id)
         status = str(getattr(srv, "status", "") or "").upper() if srv else "GONE"
         trace.append({"t": time.strftime("%H:%M:%S"), "status": status})
-        if srv is None:
+        if srv is None or status == "DELETED":
             return "DELETED"
         time.sleep(interval)
     return "TIMEOUT"

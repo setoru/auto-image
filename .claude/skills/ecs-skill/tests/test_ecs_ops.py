@@ -1168,6 +1168,73 @@ def test_delete_dry_run_no_network():
     assert code == 0 and payload is not None, "dry-run 不应触网且应正常输出"
 
 
+# ---- poll_until_deleted：删除轮询判定 ----
+@contextlib.contextmanager
+def _patch_show_server(*statuses):
+    """临时把 ecs.show_server 替换为按序吐出 status 的替身，结束后还原。
+
+    与仓库既有 _isolate_env / _no_network 同一 contextmanager 范式。
+    status 为 None → 该轮返回 None（实例从 API 消失）；否则返回 SimpleNamespace(status=...)。
+    耗尽后重复最后一个状态（用于「始终不变」场景）。
+    """
+    states = [None if s is None else SimpleNamespace(status=s) for s in statuses]
+    counter = [0]
+    orig = ecs.show_server
+
+    def _mock(client, *, server_id):
+        i = min(counter[0], len(states) - 1)
+        counter[0] += 1
+        return states[i]
+
+    ecs.show_server = _mock
+    try:
+        yield
+    finally:
+        ecs.show_server = orig
+
+
+def test_poll_until_deleted_returns_on_deleted_status():
+    """华为云删除后实例以 DELETED 状态保留在 API → 检测到 DELETED 应立即判定成功。
+
+    回归 bug：旧逻辑只认「实例从 API 查不到（None）」为成功，而 DELETED 状态会
+    一直非 None，导致轮询空转至超时（实网删除 ~10s 完成，却空等 600s）。
+    """
+    with _patch_show_server("DELETED"):
+        trace = []
+        status = ecs.poll_until_deleted(
+            client=None, server_id="srv-1", timeout=10, interval=0, trace=trace)
+        assert status == "DELETED", f"DELETED 状态应判定为已删除，实得 {status!r}"
+        assert len(trace) == 1, f"应只轮询一次即返回，实得 {len(trace)} 次"
+
+
+def test_poll_until_deleted_transitions_active_to_deleted():
+    """先 ACTIVE 再 DELETED → 在 DELETED 那一轮返回，不超时。"""
+    with _patch_show_server("ACTIVE", "DELETED"):
+        trace = []
+        status = ecs.poll_until_deleted(
+            client=None, server_id="srv-1", timeout=10, interval=0, trace=trace)
+        assert status == "DELETED", f"应在 DELETED 时返回，实得 {status!r}"
+        assert len(trace) == 2, f"应轮询两次（ACTIVE→DELETED），实得 {len(trace)} 次"
+
+
+def test_poll_until_deleted_returns_when_gone():
+    """show_server 返回 None（实例彻底从 API 消失）→ 仍判定 DELETED（兼容）。"""
+    with _patch_show_server(None):
+        trace = []
+        status = ecs.poll_until_deleted(
+            client=None, server_id="srv-1", timeout=10, interval=0, trace=trace)
+        assert status == "DELETED", f"实例消失应判定为已删除，实得 {status!r}"
+
+
+def test_poll_until_deleted_timeout_when_never_deleted():
+    """始终 ACTIVE（删除请求未生效）→ 超时返回 TIMEOUT。"""
+    with _patch_show_server("ACTIVE"):
+        trace = []
+        status = ecs.poll_until_deleted(
+            client=None, server_id="srv-1", timeout=0.3, interval=0, trace=trace)
+        assert status == "TIMEOUT", f"持续 ACTIVE 应超时，实得 {status!r}"
+
+
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
 
 if __name__ == "__main__":
