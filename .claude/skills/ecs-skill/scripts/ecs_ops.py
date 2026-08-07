@@ -21,6 +21,8 @@ from huaweicloudsdkecs.v2 import (
     ChangeServerOsWithCloudInitRequest,
     CreateServersRequest,
     CreateServersRequestBody,
+    DeleteServersRequest,
+    DeleteServersRequestBody,
     PrePaidServer,
     PrePaidServerEip,
     PrePaidServerEipBandwidth,
@@ -28,6 +30,7 @@ from huaweicloudsdkecs.v2 import (
     PrePaidServerPublicip,
     PrePaidServerRootVolume,
     PrePaidServerSecurityGroup,
+    ServerId,
 )
 
 # root_volume 默认：仅当 scope 完全没给时注入（只对低风险字段配硬默认）
@@ -445,3 +448,27 @@ def build_change_os_request(scope: dict[str, Any], args: Namespace) -> ChangeSer
     )
     body = ChangeServerOsWithCloudInitRequestBody(os_change=os_change)
     return ChangeServerOsWithCloudInitRequest(server_id=instance_id, body=body)
+
+
+# ----------------------------------------------------------------------------
+# 删除（delete）请求构造
+# ----------------------------------------------------------------------------
+def build_delete_request(instance_id: str) -> DeleteServersRequest:
+    """构造 ``DeleteServersRequest``（删除 ECS + 系统盘 + EIP + 数据盘）。
+
+    纯逻辑：把 resolved instance_id 映射成 typed request，不触网。
+
+    - instance_id 必填（由 cmd_delete 在调用前从 --id 或 --name 解析）。
+    - ``delete_publicip`` 恒为 True——释放绑定的 EIP，不解绑悬挂。
+    - ``delete_volume`` 恒为 True——删除数据盘；系统盘随实例默认删除。
+    - 一次删一台（servers 列表只含一条）。
+    """
+    sid = (instance_id or "").strip()
+    if not sid:
+        raise ValueError("delete 需要 --id 或 --name（目标 ECS 标识）。")
+    body = DeleteServersRequestBody(
+        delete_publicip=True,
+        delete_volume=True,
+        servers=[ServerId(id=sid)],
+    )
+    return DeleteServersRequest(body=body)
