@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / authorized_keys），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -124,11 +124,16 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 ```
 探测失败则**停止并报告**（网络/认证问题）。
 
-### 3. 历史记录清理（通过 ssh-skill）
+### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）：
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**UniAgent 身份** → **运行痕迹** → **身份凭证**。身份凭证类的删除让镜像不含可识别或可登录的残留——change-os 重启后 cloud-init 会为新机器重新生成 host key 并注入密码。
 
 ```bash
+# —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
+service uniagentd stop 2>/dev/null || true
+rm -f /etc/uniagentd/uniagentd.sn || true
+rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
+# —— 运行痕迹清理 ——
 # bash_history（root + 普通用户，遍历 /home/*/.bash_history + /root/.bash_history）
 cat /dev/null > /root/.bash_history
 for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
@@ -136,14 +141,19 @@ for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
 apt-get clean
 # /tmp 临时文件（排除系统运行时文件）
 find /tmp -mindepth 1 -delete 2>/dev/null || true
-# authorized_keys（root + 普通用户）
-cat /dev/null > /root/.ssh/authorized_keys 2>/dev/null || true
-for f in /home/*/.ssh/authorized_keys; do [ -f "$f" ] && cat /dev/null > "$f"; done
+# —— 身份凭证清理 ——
+# SSH 用户密钥（root + 普通用户，全删——authorized_keys / known_hosts / id_rsa 等一并清除）
+rm -rf /root/.ssh/*
+rm -rf /home/*/.ssh/*
+# SSH host key（删除后 cloud-init 在 change-os 重启时为新机器重新生成）
+rm -f /etc/ssh/ssh_host_*
+# root 密码清理（删除部署期密码 + 锁定账户；change-os 时 cloud-init 用 --password 注入新密码解锁）
+passwd -d root && passwd -l root
 # sync 确保落盘
 sync
 ```
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块（含 service stop）均带 `|| true`（未安装不阻塞）；身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -215,8 +225,8 @@ Write 自动建父目录。
 
 ## 执行明细
 
-### 1. 历史记录清理
-- 命令：cat /dev/null > /root/.bash_history ...
+### 1. 机器清理
+- 命令：service uniagentd stop ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：0 | 状态：✅
 - 输出摘要：...
 
@@ -268,7 +278,7 @@ Write 自动建父目录。
 （从 verify-result.md 端口检查项 + install 指南配置段提取：端口号 + 协议 + 用途）
 
 ## 打包结果
-- 历史清理：✅
+- 清理（运行痕迹 + 身份凭证）：✅
 - 制镜像：✅（<耗时>）
 - 切换 OS：✅（<耗时>）
 ```
