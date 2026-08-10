@@ -126,7 +126,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**UniAgent 身份** → **运行痕迹** → **身份凭证**。身份凭证类的删除让镜像不含可识别或可登录的残留——change-os 重启后 cloud-init 会为新机器重新生成 host key 并注入密码。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**UniAgent 身份** → **运行痕迹** → **身份凭证 + cloud-init 重置**。身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
@@ -149,6 +149,8 @@ rm -rf /home/*/.ssh/*
 rm -f /etc/ssh/ssh_host_*
 # root 密码清理（删除部署期密码 + 锁定账户；change-os 时 cloud-init 用 --password 注入新密码解锁）
 passwd -d root && passwd -l root
+# 重置 cloud-init 状态（使 change-os 重启时全量重跑：重新生成 host key + 注入密码解锁 root）
+cloud-init clean
 # sync 确保落盘
 sync
 ```
