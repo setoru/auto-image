@@ -16,6 +16,10 @@ tools: Read, Write, Bash, WebFetch, WebSearch, Glob, Grep
 - **明确不空泛**：禁止使用「等」「相关」「适当的」「按需配置」「视情况」等模糊词。每条命令必须可直接复制执行；每个配置项必须给出具体字段名与示例值。
 - **面向 Ubuntu**：默认 Ubuntu 20.04/22.04/24.04 LTS。
 - **安装方式：优先官方预编译二进制，禁止源码编译**：优先从软件**官方渠道**获取预编译二进制安装——官网下载页、GitHub Releases 资产、项目官方包仓库（如官方 apt/yum 源）。**不得采用源码自行编译安装**（`./configure && make && make install`、`go build`、`cargo build`、`cmake` 源码构建等）。文档给出多种方式时选官方二进制那条，跳过源码编译章节；文档只给源码编译时，去查官方二进制下载页 / Releases 资产，确无官方二进制则明确标注并说明，仍不写源码编译步骤。
+- **验证项必须可机器判定**：每个必选验证项必须是一个自包含的只读 shell 断言；通过时退出码为 0 且输出 `VERIFY_PASS: <检查项>`，不通过时退出码非 0 且输出实际值。`# 期望:` 只用于报告展示，不承载「或」「无错误」等判定逻辑。
+- **组合条件必须在一个验证项内完成**：HTTP/HTTPS 二选一、允许多个状态码等逻辑必须封装在同一个 shell 断言中，不得拆成多个均需通过的检查项。
+- **成功结论必须有正向证据**：必选项必须覆盖适用的运行载体状态（systemd、SysV、容器或进程）和至少一项核心功能或产品特征；纯 CLI 软件则验证二进制版本和最小功能。仅端口开放、任意 HTTP 重定向或日志中没有错误，不能单独证明安装成功。
+- **必选验证与诊断信息分离**：只有标为 `required` 的验证项参与整体结论；日志查看等辅助检查标为 `diagnostic`，默认只记录结果，不因关键字匹配阻断流水线。只有能精确断言目标版本致命错误的日志检查才可标为 `required`。
 
 ## 允许的只读命令（仅限这些类别）
 
@@ -145,6 +149,17 @@ rm -rf "$WORKDIR"
 - 中文为主，命令与字段名保留英文原文
 - 验证内容**必须独立成文**，不得只作为 install 文件的一节，也不得与 install 文件合并
 
+### 验证指南的机器判定约定
+
+- 每个自动检查项使用独立的 `bash` 代码块；新格式代码块第一行标记 `# 验证类型: required` 或 `# 验证类型: diagnostic`。
+- `required` 代码块必须作为一个整体执行，并自行完成所有条件判断。成功分支输出 `VERIFY_PASS: <检查项>` 并返回 0；失败分支输出实际状态并返回非 0。
+- `diagnostic` 代码块只采集只读诊断信息，不要求输出 `VERIFY_PASS:`，其退出码和输出不参与整体成功判定。
+- 每个代码块保留一条具体的 `# 期望:`，用于结果报告；deploy-verify 不解析其中的自然语言逻辑。
+- 多个可接受结果、协议回退或其他 any-of 条件必须写在同一个 `required` 代码块中。不得用两条独立命令再写「二者其一通过」。
+- 失败分支必须打印实际值或原始检查输出，不能只输出「失败」，以便 verify 报告直接用于排障。
+- HTTP 检查必须设置连接与总超时，并验证目标版本允许的状态码、跳转路径或响应特征。`curl` 连接失败、状态码 `000`、非预期 3xx、4xx、5xx 均须返回非 0；不得只以端口可连接作为通过条件。
+- 下方模板只定义结构，不要求机械保留所有章节。必须按目标软件的实际部署形态选择检查：systemd、SysV、容器或进程使用对应的状态命令；纯 CLI 软件删除服务和端口章节。不得为凑齐模板而编造不适用的服务名、端口或路径。
+
 ### 文件一：`<install_file>` 模板
 
 ```markdown
@@ -208,51 +223,83 @@ sudo systemctl enable --now <service>   # 开机自启并立即启动
 
 ## 1. 版本与二进制
 ```bash
-<软件> --version
+# 验证类型: required
 # 期望: <具体版本>
+actual="$(<软件> --version 2>&1)" || { printf '%s\n' "$actual"; exit 1; }
+case "$actual" in
+  *"<具体版本>"*) printf '%s\n' "$actual"; echo "VERIFY_PASS: 版本与二进制" ;;
+  *) printf '版本不符合预期: %s\n' "$actual"; exit 1 ;;
+esac
 ```
 
-## 2. 服务状态
+## 2. 服务状态（按实际部署形态生成；不适用时删除本节）
 ```bash
-sudo systemctl status <service>
+# 验证类型: required
 # 期望: active (running)
-
-sudo systemctl is-enabled <service>
-# 期望: enabled
+if sudo systemctl is-active --quiet <service>; then
+  echo "VERIFY_PASS: 服务正在运行"
+else
+  sudo systemctl status <service> --no-pager || true
+  exit 1
+fi
 ```
 
-## 3. 端口与监听
 ```bash
-ss -tlnp | grep <端口>
+# 验证类型: required
+# 期望: enabled
+if sudo systemctl is-enabled --quiet <service>; then
+  echo "VERIFY_PASS: 服务已启用"
+else
+  sudo systemctl is-enabled <service> || true
+  exit 1
+fi
+```
+
+## 3. 端口与监听（软件不监听端口时删除本节）
+```bash
+# 验证类型: required
 # 期望: LISTEN <端口>
+actual="$(ss -H -ltnp 'sport = :<端口>' 2>&1)" || { printf '%s\n' "$actual"; exit 1; }
+if [ -n "$actual" ]; then
+  printf '%s\n' "$actual"
+  echo "VERIFY_PASS: 端口正在监听"
+else
+  echo "未发现监听端口 <端口>"
+  exit 1
+fi
 ```
 
 ## 4. 功能性验证
-# 针对该软件核心功能给一条命令及期望输出
 ```bash
-<功能验证命令>           # 如 redis-cli ping
+# 验证类型: required
 # 期望: <期望响应，如 PONG>
+actual="$(<功能验证命令> 2>&1)" || { printf '%s\n' "$actual"; exit 1; }
+case "$actual" in
+  *"<期望响应>"*) printf '%s\n' "$actual"; echo "VERIFY_PASS: 核心功能可用" ;;
+  *) printf '功能响应不符合预期: %s\n' "$actual"; exit 1 ;;
+esac
 ```
 
-## 5. 日志检查（可选）
+## 5. 日志检查（诊断，不参与整体结论）
 ```bash
+# 验证类型: diagnostic
+# 期望: 记录最近 20 行服务日志，供排障使用
 sudo journalctl -u <service> --no-pager -n 20
-# 期望: 无 ERROR / FATAL
 ```
 
 ## 判定标准
-以上 1~4 项全部符合期望输出，即视为安装完成并可用。
+所有 `required` 检查项均返回 0 且输出 `VERIFY_PASS:`，即视为安装完成并可用。`diagnostic` 检查项只记录信息，不参与整体结论。
 ```
 
-## 验证指南常见陷阱
+## 生成验证指南前的核对清单
 
-以下模式来自历次部署的实测反馈，写验证指南时逐条检查是否命中：
+以下模式来自历次部署的实测反馈。生成验证指南前逐条核对，具体命令仍须遵守上面的机器判定约定：
 
 1. **多平台安装脚本取错分支**：安装脚本含发行版条件分支（如 `if [ -f /etc/redhat-release ]`）时，服务名、路径、管理命令在 Ubuntu 分支和 CentOS 分支不同。验证命令中的服务名/路径必须取 Ubuntu 分支的值，不是脚本里第一个出现的值。
-2. **HTTP 探活默认接受重定向**：Web 服务在未初始化、未登录、未激活等状态下，根路径常返回 3xx 重定向而非 200。HTTP 检查的期望值写「2xx 或 3xx 重定向均视为通过，5xx 为失败」，不要只写 200。
-3. **Web 面板可能强制 HTTPS**：管理面板类软件可能强制 HTTPS，HTTP 请求被 reset。验证命令同时给出 HTTP 和 HTTPS 两种写法，标注「二者其一可达即为通过」。
-4. **文件路径须目标版本确认**：验证命令引用的文件路径必须在目标版本的官方文档中明确出现，不从旧版文档、社区帖子、通用惯例推断。
-5. **日志检查须区分系统噪声与真实错误**：组件 healthcheck、框架周期性探测等机制会产生包含 FATAL / ERROR 关键字的日志噪声（如 pg_isready 以默认用户连数据库报 role not exist）。日志检查的期望值应明确哪些错误模式属于此类噪声可忽略，而非笼统写「无 FATAL / ERROR」。
+2. **Web 中间态须纳入精确断言**：未初始化、未登录或未激活时可能返回重定向。只接受目标版本明确允许的状态码和跳转路径，或跟随有限次重定向后验证目标产品特征；不得把任意 3xx 都视为成功。
+3. **HTTP/HTTPS 回退须合并判定**：管理面板可能强制 HTTPS，导致 HTTP 请求被 reset。静态资料无法确认协议时，在同一个 `required` 代码块内依次探测 HTTPS 和 HTTP，并验证最终状态及产品特征；任一满足完整条件才输出 `VERIFY_PASS:`。
+4. **文件路径须由目标版本权威来源确认**：路径可依据目标版本的官方文档、官方安装脚本、包文件清单或官方仓库配置确认，不从旧版文档、社区帖子或通用惯例推断。无法确认时不得作为必选验证项。
+5. **日志噪声须精确豁免并由正向检查兜底**：healthcheck、框架周期性探测可能产生 FATAL / ERROR 日志（如 pg_isready 以默认用户连接导致 role not exist）。若日志检查参与成功判定，豁免必须限定到具体组件和完整错误模式，并同时要求服务健康或核心功能检查通过；禁止全局扫描后笼统要求「无 FATAL / ERROR」。
 
 ## 禁止事项
 
