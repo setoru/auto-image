@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / 密码复杂度配置 / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -126,7 +126,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**云 Agent（UniAgent + HostGuard）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类：**云 Agent（UniAgent + HostGuard）** → **运行痕迹** → **密码策略** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份；密码策略为镜像打安全基线，确保后续改密强制复杂度校验；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
@@ -147,6 +147,11 @@ for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
 apt-get clean
 # /tmp 临时文件（排除系统运行时文件）
 find /tmp -mindepth 1 -delete 2>/dev/null || true
+# —— 密码复杂度配置（镜像安全基线）——
+apt-get install -y libpam-pwquality
+# 写入 PAM 密码复杂度规则（幂等：先删旧行，再在 pam_unix.so 前插入确保 PAM 链顺序正确）
+sed -i '/pam_pwquality\.so/d' /etc/pam.d/common-password
+sed -i '/pam_unix\.so/i password requisite pam_pwquality.so retry=3 minclass=2 minlen=8 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1' /etc/pam.d/common-password
 # —— 身份凭证清理 ——
 # SSH 用户密钥（root + 普通用户，全删——authorized_keys / known_hosts / id_rsa 等一并清除）
 rm -rf /root/.ssh/*
@@ -161,7 +166,7 @@ cloud-init clean
 sync
 ```
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 service stop / dpkg -P）均带 `|| true`（未安装不阻塞）；身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 service stop / dpkg -P）均带 `|| true`（未安装不阻塞）；密码策略块（`apt-get install` / `sed`）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像缺安全基线或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -234,7 +239,7 @@ Write 自动建父目录。
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：service uniagentd stop ... /etc/init.d/hostguard stop + dpkg -P hostguard ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：service uniagentd stop ... /etc/init.d/hostguard stop + dpkg -P hostguard ... apt-get install libpam-pwquality + sed common-password ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：0 | 状态：✅
 - 输出摘要：...
 
