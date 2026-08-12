@@ -1,6 +1,6 @@
 ---
 name: deploy-install
-description: 读取 deploy-guide 生成的安装指南（<软件>-install.md），通过 ssh-skill 在指定远程机器上执行软件安装，输出安装结果与问题。输入/输出文件由项目根目录的 deploy.config.yaml 配置（支持 {{software}}/{{version}} 占位符）。当用户要求「按部署指南在服务器上安装」「执行安装」「远程安装某软件」时使用。触发词：执行安装、远程安装、部署执行、在服务器上安装、install runner、run install、ssh 安装、按指南安装。
+description: 读取 deploy-guide 生成的安装指南（<软件>-install.md），通过 ssh-skill 在指定远程机器上执行系统更新（dist-upgrade 补齐安全补丁）与软件安装，输出安装结果与问题。输入/输出文件由项目根目录的 deploy.config.yaml 配置（支持 {{software}}/{{version}} 占位符）。当用户要求「按部署指南在服务器上安装」「执行安装」「远程安装某软件」时使用。触发词：执行安装、远程安装、部署执行、在服务器上安装、install runner、run install、ssh 安装、按指南安装。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -202,7 +202,21 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 进入步骤 3（正常安装流程）。
 
-### 3. 解析安装指南，提取待执行命令
+### 3. 系统更新（安全补丁）
+
+在安装任何软件之前，先更新系统包到最新——确保后续依赖安装、验证、打包都基于最新系统，避免镜像因版本过旧导致安全扫描失败。
+
+通过 ssh-skill 执行：
+```bash
+python <ssh_skill_scripts>/ssh_execute.py <别名> "export DEBIAN_FRONTEND=noninteractive && apt-get -y update && apt-get -y -o Dpkg::Options::=\"--force-confold\" dist-upgrade" --timeout 600
+```
+
+- `DEBIAN_FRONTEND=noninteractive`：抑制所有交互提示
+- `--force-confold`：升级时保留旧配置文件，防止 sshd 等关键配置被覆盖导致机器失联
+- **失败（exit_code != 0）→ 停止后续安装**，标记整体失败，进入问题报告
+- 记录命令、退出码、stdout/stderr 摘要（dist-upgrade 输出较长，截断到升级包数 + 关键变更）
+
+### 4. 解析安装指南，提取待执行命令
 
 从安装指南按章节顺序提取 ```` ```bash ```` 命令块：
 
@@ -214,7 +228,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 每条命令保留原文，标注所属步骤。若命令块含源码编译（`./configure && make`、`make install`、`go build`、`cargo build`、`cmake` 构建等），**停止并报告**。
 
-### 4. 逐条执行（通过 ssh-skill）
+### 5. 逐条执行（通过 ssh-skill）
 
 按顺序执行每条命令：
 ```bash
@@ -227,7 +241,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "<命令>" --timeout <秒>
 python <ssh_skill_scripts>/ssh_execute.py <别名> "sudo systemctl status <service> --no-pager || true"
 ```
 
-### 5. 生成结果文件
+### 6. 生成结果文件
 
 用 **Write** 写入 `install_result_file`；若存在问题，**另写** `install_issues_file`。Write 自动建父目录。
 
@@ -287,6 +301,11 @@ meta.json 是 deploy 编排层消费的结构化元数据（instance_id 传递�
 - 完整命令日志：`logs/<别名>.log`
 
 ## 执行明细
+
+### 0. 系统更新（dist-upgrade）
+- 命令：`apt-get -y update && apt-get -y dist-upgrade`
+- 退出码：0 | 状态：✅
+- stdout 摘要：升级 N 个包
 
 ### 1. 依赖安装
 - 命令：`sudo apt install -y ...`
