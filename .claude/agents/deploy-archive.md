@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -126,13 +126,19 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**UniAgent 身份** → **运行痕迹** → **身份凭证 + cloud-init 重置**。身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**云 Agent（UniAgent + HostGuard）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
 service uniagentd stop 2>/dev/null || true
 rm -f /etc/uniagentd/uniagentd.sn || true
 rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
+# —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
+/etc/init.d/hostguard stop 2>/dev/null || true
+dpkg -P hostguard 2>/dev/null || true
+# 残留兜底（dpkg -P 成功后通常已清理；失败时手动删除）
+rm -rf /usr/local/hostguard 2>/dev/null || true
+rm -f /etc/init.d/hostguard 2>/dev/null || true
 # —— 运行痕迹清理 ——
 # bash_history（root + 普通用户，遍历 /home/*/.bash_history + /root/.bash_history）
 cat /dev/null > /root/.bash_history
@@ -155,7 +161,7 @@ cloud-init clean
 sync
 ```
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块（含 service stop）均带 `|| true`（未安装不阻塞）；身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 service stop / dpkg -P）均带 `|| true`（未安装不阻塞）；身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -228,7 +234,7 @@ Write 自动建父目录。
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：service uniagentd stop ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：service uniagentd stop ... /etc/init.d/hostguard stop + dpkg -P hostguard ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：0 | 状态：✅
 - 输出摘要：...
 
