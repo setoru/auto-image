@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / 密码复杂度配置 / python3-pip 卸载 / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -126,7 +126,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类：**云 Agent（UniAgent + HostGuard）** → **运行痕迹** → **安全基线（密码策略 + 卸载 pip）** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份；安全基线两项各自消除一类交付缺陷——密码策略确保后续改密强制复杂度校验，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份；安全基线两项各自消除一类交付缺陷——密码策略确保后续改密强制复杂度校验，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
@@ -139,14 +139,6 @@ dpkg -P hostguard 2>/dev/null || true
 # 残留兜底（dpkg -P 成功后通常已清理；失败时手动删除）
 rm -rf /usr/local/hostguard 2>/dev/null || true
 rm -f /etc/init.d/hostguard 2>/dev/null || true
-# —— 运行痕迹清理 ——
-# bash_history（root + 普通用户，遍历 /home/*/.bash_history + /root/.bash_history）
-cat /dev/null > /root/.bash_history
-for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
-# apt 缓存
-apt-get clean
-# /tmp 临时文件（排除系统运行时文件）
-find /tmp -mindepth 1 -delete 2>/dev/null || true
 # —— 安全基线：密码复杂度配置 ——
 apt-get install -y libpam-pwquality
 # 写入 PAM 密码复杂度规则（幂等：先删旧行，再在 pam_unix.so 前插入确保 PAM 链顺序正确）
@@ -157,6 +149,16 @@ sed -i '/pam_unix\.so/i password requisite pam_pwquality.so retry=3 minclass=2 m
 # dist-upgrade 取不到修复，镜像扫描必然报 High。交付镜像不预装 pip，直接卸载消除该扫描项。
 # 未安装时 apt-get purge 返回 0，故不加 || true——真失败（源不可用）应当阻塞。
 apt-get purge -y python3-pip
+# —— 运行痕迹清理 ——
+# 顺序约束：本块必须排在全部 apt 操作之后。apt-get install 会把 .deb 重新下载进
+# /var/cache/apt/archives，若 apt-get clean 先跑，装包产生的缓存会重新落盘、清理落空。
+# bash_history（root + 普通用户，遍历 /home/*/.bash_history + /root/.bash_history）
+cat /dev/null > /root/.bash_history
+for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
+# apt 缓存
+apt-get clean
+# /tmp 临时文件（排除系统运行时文件）
+find /tmp -mindepth 1 -delete 2>/dev/null || true
 # —— 身份凭证清理 ——
 # SSH 用户密钥（root + 普通用户，全删——authorized_keys / known_hosts / id_rsa 等一并清除）
 rm -rf /root/.ssh/*
@@ -244,7 +246,7 @@ Write 自动建父目录。
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：service uniagentd stop ... /etc/init.d/hostguard stop + dpkg -P hostguard ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：service uniagentd stop ... /etc/init.d/hostguard stop + dpkg -P hostguard ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：0 | 状态：✅
 - 输出摘要：...
 
