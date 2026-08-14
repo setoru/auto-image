@@ -108,11 +108,18 @@ agent 会自行按配置路径读 install 指南、经 ssh-skill 在目标机安
 
 用 **Agent** 调用（subagent_type: `deploy-verify`），prompt 传入：软件名、version、**步骤 2 确定的目标服务器别名**（创建路径下使用 meta.json 的 `server_alias`）。
 
-agent 按 verify 指南**只读验证**，产出 `verify-result.md`（及 `verify-issues.md`）。捕获其整体结论（✅ 全部通过 / ⚠️ 部分 / ❌ 失败）。
+agent 按 verify 指南**只读验证**，产出 `verify-result.md`（及 `verify-issues.md`）。捕获其整体结论（✅ 全部通过 / ⚠️ 无法判定 / ❌ 失败）及**结论原因**（软件验证失败 / 基础设施异常 / 验证指南无效）。
 
 完成后：**用 Read 校验 `<verify-result.md>` 已落盘**；缺失则记为失败，并在汇总中如实标注。
 
-> **verify 未全部通过则不执行步骤 4（archive）**：archive 的前提是软件已装好且验证通过。verify 结论非 ✅（⚠️ 部分通过或 ❌ 失败）或产物缺失时，编排层跳过 archive，直接进入步骤 5 汇总，并在汇总中如实标注「archive 因 verify 未通过而跳过」。
+> **verify 非 ✅ 则不执行步骤 4（archive）**：archive 的前提是软件已装好且验证通过。verify 结论非 ✅（⚠️ 无法判定或 ❌ 失败）或产物缺失时，编排层跳过 archive，直接进入步骤 5 汇总。
+>
+> **跳过原因必须按 verify 的「结论原因」字段如实归因，不得一律写成「验证未通过」**：
+> - 原因「软件验证失败」→ 写「archive 因软件验证失败而跳过」
+> - 原因「基础设施异常」（SSH 传输/命令超时/前提未满足/永久连接故障）→ 写「archive 因基础设施异常跳过——软件是否装好未能判定，需排除环境问题后重跑 verify」
+> - 原因「验证指南无效」→ 写「archive 因验证指南不符合契约而跳过，需重跑 deploy-guide 重新生成指南」
+>
+> 把基础设施异常或指南问题写成软件未装好，与 deploy-verify 的判定语义冲突。
 
 ### 步骤 4 — deploy-archive（打包归档）
 
@@ -144,7 +151,7 @@ agent 依次执行「清理 → 制镜像 → 切换 OS → 输出交付清单�
 |------|------|------|
 | deploy-guide（生成指南） | ✅/❌ | <install.md> / <verify.md> |
 | deploy-install（远程安装） | ✅/⚠️/❌ | <install-result.md> (+ issues) + <install-meta.json> |
-| deploy-verify（远程验证） | ✅/⚠️/❌ | <verify-result.md> (+ issues) |
+| deploy-verify（远程验证） | ✅/⚠️无法判定/❌ | <verify-result.md> (+ issues) |
 | deploy-archive（打包归档） | ✅/❌/⊘跳过 | <archive-result.md> / <deploy-list.md> (+ issues) |
 
 ## 关键问题摘要

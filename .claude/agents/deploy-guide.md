@@ -161,7 +161,7 @@ rm -rf "$WORKDIR"
 - 失败分支必须打印实际值或原始检查输出，不能只输出「失败」，以便 verify 报告直接用于排障。
 - HTTP 检查必须设置连接与总超时，并验证目标版本允许的状态码、跳转路径或响应特征。`curl` 连接失败、状态码 `000`、非预期 3xx、4xx、5xx 均须返回非 0；不得只以端口可连接作为通过条件。
 - `curl --fail` 不会把 3xx 当成失败，不能用 `curl -f` 的退出码代替重定向判定；必须显式检查状态码与 `Location`，或跟随有限次重定向后验证最终页面的产品特征。
-- 网络探测命令必须使用具体限制：`curl` 至少设置 `--connect-timeout 5 --max-time 10 --max-redirs 3`；其他可能等待网络或服务响应的命令使用明确的总超时。禁止只写“设置超时”而不写参数值。
+- 网络探测命令必须使用具体限制：`curl` 至少设置 `--connect-timeout 5 --max-time 10 --max-redirs 3`；其他可能等待网络或服务响应的命令用 `timeout 10 <命令>` 包裹（数据库连接、集群健康查询等耗时更久的检查可放宽到 `timeout 30`，但必须写出数值）。禁止只写“设置超时”而不写参数值。
 - 下方模板只定义结构，不要求机械保留所有章节。必须按目标软件的实际部署形态选择检查：systemd、SysV、容器或进程使用对应的状态命令；纯 CLI 软件删除服务和端口章节。不得为凑齐模板而编造不适用的服务名、端口或路径。
 - 写入验证指南前必须自检：契约标记存在；每个 `bash` 代码块都有合法的验证类型；至少有一个 `required` 检查；至少一个 `required` 检查调用软件自身核心功能、健康端点或验证目标产品特征；网络检查包含具体超时参数。任一条件不满足时不得输出指南。
 
@@ -250,7 +250,17 @@ else
 fi
 ```
 
-> 若目标版本官方安装步骤明确要求服务开机自启，再额外生成“开机自启”检查，并只接受精确输出 `enabled`；对 `static` 单元删除该检查，不能把 `static` 当作 `enabled`。
+```bash
+# 验证类型: required
+# 期望: enabled（enabled-runtime / indirect / generated / alias 同样视为已自启）
+state="$(systemctl is-enabled <service> 2>&1)"
+case "$state" in
+  enabled|enabled-runtime|indirect|generated|alias)
+    printf '%s\n' "$state"; echo "VERIFY_PASS: 服务已设置开机自启" ;;
+  *)
+    printf '开机自启状态不符合预期: %s\n' "$state"; exit 1 ;;
+esac
+```
 
 ## 3. 端口与监听（软件不监听端口时删除本节）
 ```bash
@@ -269,7 +279,7 @@ else
 fi
 ```
 
-## 4. 功能性验证
+## 4. 功能性验证（非 Web 软件用本节；Web 服务改用下方 Web 入口节，不要两节都留）
 ```bash
 # 验证类型: required
 # 期望: <期望响应，如 PONG>
@@ -280,17 +290,17 @@ case "$actual" in
 esac
 ```
 
-### 4.x Web 入口（仅 Web 服务生成；替换产品特征）
+## 5. Web 入口（仅 Web 服务生成；替换产品特征。非 Web 软件删除本节）
 ```bash
 # 验证类型: required
 # 期望: HTTPS 或 HTTP 任一协议在最多 3 次重定向内返回 2xx，且响应包含 <产品特征>
 details=""
 for url in "https://127.0.0.1:<端口>/" "http://127.0.0.1:<端口>/"; do
-  response="$(curl -k -sS -L --max-redirs 3 --connect-timeout 5 --max-time 10 \
-    -o - -w '\n%{http_code}' "$url" 2>&1)" || {
-    details="${details}${details:+; }$url: curl 连接失败"
+  if ! response="$(curl -k -sS -L --max-redirs 3 --connect-timeout 5 --max-time 10 \
+    -o - -w '\n%{http_code}' "$url" 2>&1)"; then
+    details="${details}${details:+; }$url: $(printf '%s' "$response" | tr '\n' ' ')"
     continue
-  }
+  fi
   status="$(printf '%s\n' "$response" | sed -n '$p')"
   case "$status" in
     2??)
@@ -307,7 +317,7 @@ echo "Web 入口未通过：$details"
 exit 1
 ```
 
-## 5. 日志检查（诊断，不参与整体结论）
+## 6. 日志检查（诊断，不参与整体结论）
 ```bash
 # 验证类型: diagnostic
 # 期望: 记录最近 20 行服务日志，供排障使用
@@ -328,6 +338,7 @@ journalctl -u <service> --no-pager -n 20
 4. **文件路径须由目标版本权威来源确认**：路径可依据目标版本的官方文档、官方安装脚本、包文件清单或官方仓库配置确认，不从旧版文档、社区帖子或通用惯例推断。无法确认时不得作为必选验证项。
 5. **日志噪声须精确豁免并由正向检查兜底**：healthcheck、框架周期性探测可能产生 FATAL / ERROR 日志（如 pg_isready 以默认用户连接导致 role not exist）。若日志检查参与成功判定，豁免必须限定到具体组件和完整错误模式，并同时要求服务健康或核心功能检查通过；禁止全局扫描后笼统要求「无 FATAL / ERROR」。
 6. **日志正向证据不能依赖 tail 窗口**：迁移完成、启动成功等一次性日志可能被周期性请求挤出 `--tail=N` 窗口；不得把“窗口内出现迁移关键字”作为必选条件。应使用当前状态、健康端点或可重复的核心功能检查。
+7. **开机自启检查须匹配单元类型**：`systemctl is-enabled` 对 socket 激活或被依赖拉起的单元返回 `static`，此类单元没有 `[Install]` 段、无法被 enable。目标服务为 `static` 时删除「开机自启」检查块，不得把 `static` 当作失败；`enabled-runtime`、`indirect`、`generated`、`alias` 均属已自启，不得只接受精确 `enabled`。
 
 ## 禁止事项
 
