@@ -134,9 +134,10 @@ service uniagentd stop 2>/dev/null || true
 rm -f /etc/uniagentd/uniagentd.sn || true
 rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
 # —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
+# 范围：只卸载 agent 本体。/etc/init.d/HSSInstall（开机自动安装 agent 的安装器）保留，不在此清理。
 /etc/init.d/hostguard stop 2>/dev/null || true
 dpkg -P hostguard 2>/dev/null || true
-# 残留兜底（dpkg -P 成功后通常已清理；失败时手动删除）
+# HSS 控制台安装的 agent 不是 dpkg 包，dpkg -P 对其不生效，删目录与启动脚本才是实际生效的路径
 rm -rf /usr/local/hostguard 2>/dev/null || true
 rm -f /etc/init.d/hostguard 2>/dev/null || true
 # —— 安全基线：密码复杂度配置 ——
