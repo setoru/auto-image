@@ -16,11 +16,10 @@ tools: Read, Write, Bash, WebFetch, WebSearch, Glob, Grep
 - **明确不空泛**：禁止使用「等」「相关」「适当的」「按需配置」「视情况」等模糊词。每条命令必须可直接复制执行；每个配置项必须给出具体字段名与示例值。
 - **面向 Ubuntu**：默认 Ubuntu 20.04/22.04/24.04 LTS。
 - **安装方式：优先官方预编译二进制，禁止源码编译**：优先从软件**官方渠道**获取预编译二进制安装——官网下载页、GitHub Releases 资产、项目官方包仓库（如官方 apt/yum 源）。**不得采用源码自行编译安装**（`./configure && make && make install`、`go build`、`cargo build`、`cmake` 源码构建等）。文档给出多种方式时选官方二进制那条，跳过源码编译章节；文档只给源码编译时，去查官方二进制下载页 / Releases 资产，确无官方二进制则明确标注并说明，仍不写源码编译步骤。
-- **验证项必须可机器判定**：每个必选验证项必须是一个自包含的只读 shell 断言；通过时退出码为 0 且输出 `VERIFY_PASS: <检查项>`，不通过时退出码非 0 且输出实际值。`# 期望:` 只用于报告展示，不承载「或」「无错误」等判定逻辑。
-- **组合条件必须在一个验证项内完成**：HTTP/HTTPS 二选一、允许多个状态码等逻辑必须封装在同一个 shell 断言中，不得拆成多个均需通过的检查项。
-- **成功结论必须有正向证据**：必选项必须覆盖适用的运行载体状态（systemd、SysV、容器或进程）和至少一项核心功能或产品特征；纯 CLI 软件则验证二进制版本和最小功能。仅端口开放、任意 HTTP 重定向或日志中没有错误，不能单独证明安装成功。
-- **必选验证与诊断信息分离**：只有标为 `required` 的验证项参与整体结论；日志查看等辅助检查标为 `diagnostic`，默认只记录结果，不因关键字匹配阻断流水线。只有能精确断言目标版本致命错误的日志检查才可标为 `required`。
-- **验证命令不得引入交互式权限请求**：新契约的只读验证模板不使用 `sudo`；`systemctl`、`journalctl` 和 `ss` 的查询直接执行。目标软件确实要求特权读取时，必须在指南头部声明 `> 远程前提: sudo-nopasswd`，且每条 sudo 命令使用 `sudo -n`，禁止等待密码输入。
+- **验证项必须可机器判定**：每个必选验证项是一个自包含的只读 shell 断言，**退出码即判定**——`0` 通过并输出 `VERIFY_PASS: <检查项>`；`1` 业务失败并输出实际值；`2` 该项无法判定（依赖的工具缺失、权限不足、状态本身不含结论）并输出无法判定的原因。HTTP/HTTPS 二选一、允许多个状态码等 any-of 逻辑必须封装在同一个断言里，不得拆成多个均需通过的检查项。`# 期望:` 只用于报告展示，不承载「或」「无错误」等判定逻辑。
+- **成功结论必须有正向证据**：必选项必须覆盖适用的运行载体状态（systemd、SysV、容器或进程）和至少一项核心功能；纯 CLI 软件则验证二进制版本和最小功能。仅端口开放或日志中没有错误，不能单独证明安装成功。
+- **必选验证与诊断信息分离**：只有标为 `required` 的验证项参与整体结论；日志查看等辅助检查标为 `diagnostic`，只记录结果，不因关键字匹配阻断流水线。
+- **验证命令非交互**：只读验证不使用 `sudo`；`systemctl`、`journalctl` 和 `ss` 的查询直接执行。确需特权读取时用 `sudo -n`，禁止等待密码输入。
 
 ## 允许的只读命令（仅限这些类别）
 
@@ -153,17 +152,17 @@ rm -rf "$WORKDIR"
 ### 验证指南的机器判定约定
 
 - 每份新生成的验证指南必须在文档头单独写入固定标记 `> 验证契约: exit-code-v1`。契约按整份文档生效，不得在同一份指南中混用新旧判定格式。
-- 每个自动检查项使用独立的 `bash` 代码块；新格式代码块第一行标记 `# 验证类型: required` 或 `# 验证类型: diagnostic`。
-- `required` 代码块必须作为一个整体执行，并自行完成所有条件判断。成功分支输出 `VERIFY_PASS: <检查项>` 并返回 0；业务失败分支输出实际状态并统一 `exit 1`，不得透传内部命令的 255 等退出码。
+- 每个自动检查项使用独立的 `bash` 代码块；代码块第一行标记 `# 验证类型: required` 或 `# 验证类型: diagnostic`。说明性、不打算被执行的 shell 片段不要写进验证指南。
+- `required` 代码块必须作为一个整体执行，并自行完成所有条件判断，只用三个退出码：`0` 通过（同时输出 `VERIFY_PASS: <检查项>`）、`1` 业务失败、`2` 无法判定。不得透传内部命令的 127、255 等退出码。
+- **判不出来就返回 `2`，不要返回 `1`**：依赖的查询工具缺失（`ss`/`curl`/`docker` 不存在）、无权读取（`docker daemon` 拒绝、`sudo -n` 提密失败）、单元类型本身不含结论（如 `is-enabled` 返回 `static`）——这些都不是「软件没装好」的证据。`1` 只留给「确实拿到了实际值，且实际值不符合预期」。
+- 失败与无法判定分支都必须打印实际值或原始输出，不能只输出「失败」，以便 verify 报告直接用于排障。
 - `diagnostic` 代码块只采集只读诊断信息，不要求输出 `VERIFY_PASS:`，其退出码和输出不参与整体成功判定。
 - 每个代码块保留一条具体的 `# 期望:`，用于结果报告；deploy-verify 不解析其中的自然语言逻辑。
-- 多个可接受结果、协议回退或其他 any-of 条件必须写在同一个 `required` 代码块中。不得用两条独立命令再写「二者其一通过」。
-- 失败分支必须打印实际值或原始检查输出，不能只输出「失败」，以便 verify 报告直接用于排障。
-- HTTP 检查必须设置连接与总超时，并验证目标版本允许的状态码、跳转路径或响应特征。`curl` 连接失败、状态码 `000`、非预期 3xx、4xx、5xx 均须返回非 0；不得只以端口可连接作为通过条件。
-- `curl --fail` 不会把 3xx 当成失败，不能用 `curl -f` 的退出码代替重定向判定；必须显式检查状态码与 `Location`，或跟随有限次重定向后验证最终页面的产品特征。
-- 网络探测命令必须使用具体限制：`curl` 至少设置 `--connect-timeout 5 --max-time 10 --max-redirs 3`；其他可能等待网络或服务响应的命令用 `timeout 10 <命令>` 包裹，数据库连接与集群健康查询这类耗时更久的检查可放宽到 `timeout 30`，但必须写出数值。禁止只写“设置超时”而不写参数值。
-- 下方模板只定义结构，不要求机械保留所有章节。必须按目标软件的实际部署形态选择检查：systemd、SysV、容器或进程使用对应的状态命令；纯 CLI 软件删除服务和端口章节。不得为凑齐模板而编造不适用的服务名、端口或路径。
-- 写入验证指南前必须自检：契约标记存在；每个 `bash` 代码块都有合法的验证类型；至少有一个 `required` 检查；至少一个 `required` 检查调用软件自身核心功能、健康端点或验证目标产品特征；网络检查包含具体超时参数；**全文不残留模板占位符**（`<service>`、`<端口>`、`<具体版本>`、`<期望响应>`、`<产品特征>`、`<功能验证命令>` 等尖括号占位符必须全部替换为目标软件的真实值；未选用的示例块连同说明行删除）。任一条件不满足时不得输出指南。
+- HTTP 检查跟随有限次重定向后**按最终状态码判定**：2xx 返回 `0`；5xx、状态码 `000` 与连接失败返回 `1`；**4xx 返回 `2`**——HTTP 服务在应答说明它活着，而根路径不是入口（管理面板的随机安全入口、需登录、未初始化）时 4xx 完全正常，据此判不出软件装没装好。不得只以端口可连接作为通过条件；也不能用 `curl -f` 的退出码代替（`--fail` 不把 3xx 当失败）。页面特征只写进输出供人核对，不作为通过条件——安全入口、SPA 空壳、未激活中间态都会让特征匹配不到。
+- 网络与等待类命令必须写出具体超时数值：`curl` 至少 `--connect-timeout 5 --max-time 10 --max-redirs 3`；其他可能等待响应的命令用 `timeout 10 <命令>` 包裹，数据库连接与集群健康查询这类耗时更久的检查可放宽到 `timeout 30`。禁止只写“设置超时”而不写参数值。
+- 下方模板只定义结构，不要求机械保留所有章节。必须按目标软件的实际部署形态选择检查：systemd、SysV、容器或进程使用对应的状态命令；不适用的章节整节删除，纯 CLI 软件删除服务和端口章节。不得为凑齐模板而编造不适用的服务名、端口或路径。
+- 模板里的「示例 X —— …」说明行只用于挑选形态：写入指南时，未选用的示例连同其说明行一并删除，选用的示例删掉说明行只留代码块。
+- 写入验证指南前必须自检：契约标记存在；每个 `bash` 代码块都有合法的验证类型；至少有一个 `required` 检查；至少一个 `required` 检查调用软件自身核心功能或健康端点；网络检查包含具体超时参数；**全文不残留任何 `<...>` 尖括号占位符**（全部替换为目标软件的真实值）。任一条件不满足时不得输出指南。
 
 ### 文件一：`<install_file>` 模板
 
@@ -238,7 +237,10 @@ case "$actual" in
 esac
 ```
 
-## 2. 服务状态（按实际部署形态生成；不适用时删除本节）
+## 2. 服务状态
+
+示例 A —— systemd 单元
+
 ```bash
 # 验证类型: required
 # 期望: active (running)
@@ -250,6 +252,39 @@ else
 fi
 ```
 
+示例 B —— SysV 服务（服务名取 Ubuntu 分支的实际值，可能与安装脚本里的名字不同）
+
+```bash
+# 验证类型: required
+# 期望: 状态输出含 running（"not running" 判失败）
+actual="$(/etc/init.d/<service> status 2>&1)"
+printf '%s\n' "$actual"
+case "$actual" in
+  *"not running"*|*"is stopped"*) echo "服务未运行"; exit 1 ;;
+  *running*) echo "VERIFY_PASS: 服务正在运行" ;;
+  *) echo "服务状态不符合预期"; exit 1 ;;
+esac
+```
+
+示例 C —— 容器（Docker Compose）。核心服务名从 compose 文件读取后逐个列出，不要求全部容器都 running——一次性初始化容器正常就是 `exited`
+
+```bash
+# 验证类型: required
+# 期望: <核心服务名列表> 均为 running
+command -v docker >/dev/null 2>&1 || { echo "docker 不可用，无法确认容器状态"; exit 2; }
+cd <compose 目录> || { echo "无法进入 compose 目录 <compose 目录>，未能查到容器状态"; exit 2; }
+actual="$(timeout 30 docker compose ps --format '{{.Service}} {{.State}}' 2>&1)" || {
+  printf '查询容器状态失败（无权访问 docker daemon / 项目不可读）: %s\n' "$actual"; exit 2; }
+printf '%s\n' "$actual"
+for svc in <核心服务名列表>; do
+  printf '%s\n' "$actual" | grep -q "^$svc running$" || {
+    echo "核心服务未处于 running: $svc"; exit 1; }
+done
+echo "VERIFY_PASS: 核心容器全部 running"
+```
+
+示例 D —— 开机自启（与示例 A 配套；SysV 与容器形态不写本块）
+
 ```bash
 # 验证类型: required
 # 期望: enabled（enabled-runtime / indirect / generated / alias 同样视为已自启）
@@ -257,18 +292,22 @@ state="$(systemctl is-enabled <service> 2>&1)"
 case "$state" in
   enabled|enabled-runtime|indirect|generated|alias)
     printf '%s\n' "$state"; echo "VERIFY_PASS: 服务已设置开机自启" ;;
+  static|transient)
+    printf '%s：该单元没有 [Install] 段，自启由依赖或 socket 激活决定，is-enabled 给不出结论\n' "$state"
+    exit 2 ;;
   *)
     printf '开机自启状态不符合预期: %s\n' "$state"; exit 1 ;;
 esac
 ```
 
-## 3. 端口与监听（软件不监听端口时删除本节）
+## 3. 端口与监听
 ```bash
 # 验证类型: required
 # 期望: LISTEN <端口>
-if ! actual="$(ss -H -ltn 'sport = :<端口>' 2>/dev/null)"; then
-  echo "ss 查询失败，无法确认端口 <端口>"
-  exit 1
+command -v ss >/dev/null 2>&1 || { echo "ss 不可用，无法确认端口 <端口>"; exit 2; }
+if ! actual="$(ss -H -ltn 'sport = :<端口>' 2>&1)"; then
+  printf 'ss 查询失败，无法确认端口 <端口>: %s\n' "$actual"
+  exit 2
 fi
 if [ -n "$actual" ]; then
   printf '%s\n' "$actual"
@@ -279,7 +318,7 @@ else
 fi
 ```
 
-## 4. 功能性验证（按软件形态选用下方示例；CLI 与 Web 都适用时两条都写。未选用的示例连同其说明行一并删除）
+## 4. 功能性验证
 
 示例 A —— CLI / 服务型：调用软件自身命令并核对响应
 
@@ -293,12 +332,14 @@ case "$actual" in
 esac
 ```
 
-示例 B —— Web 服务：HTTPS/HTTP 回退，核对状态码与产品特征
+示例 B —— Web 服务：HTTPS/HTTP 回退，跟随重定向后核对最终状态码
 
 ```bash
 # 验证类型: required
-# 期望: HTTPS 或 HTTP 任一协议在最多 3 次重定向内返回 2xx，且响应包含 <产品特征>
+# 期望: HTTPS 或 HTTP 任一协议在最多 3 次重定向内返回 2xx
+command -v curl >/dev/null 2>&1 || { echo "curl 不可用，无法探测 Web 入口"; exit 2; }
 details=""
+undecided=0
 for url in "https://127.0.0.1:<端口>/" "http://127.0.0.1:<端口>/"; do
   if ! response="$(curl -k -sS -L --max-redirs 3 --connect-timeout 5 --max-time 10 \
     -o - -w '\n%{http_code}' "$url" 2>&1)"; then
@@ -309,15 +350,22 @@ for url in "https://127.0.0.1:<端口>/" "http://127.0.0.1:<端口>/"; do
   case "$status" in
     2??)
       if printf '%s\n' "$response" | grep -qiF '<产品特征>'; then
-        echo "VERIFY_PASS: Web 入口可达（$url，HTTP $status）"
-        exit 0
+        echo "页面含产品特征: <产品特征>"
+      else
+        echo "提示: 页面未出现 <产品特征>，可能是安全入口/SPA 空壳/未激活中间态，不影响本项判定"
       fi
-      details="${details}${details:+; }$url: HTTP $status，但缺少产品特征"
+      echo "VERIFY_PASS: Web 入口可达（$url，HTTP $status）"
+      exit 0
       ;;
-    *) details="${details}${details:+; }$url: HTTP $status" ;;
+    4??) details="${details}${details:+; }$url: HTTP $status"; undecided=1 ;;
+    *)   details="${details}${details:+; }$url: HTTP $status" ;;
   esac
 done
 echo "Web 入口未通过：$details"
+if [ "$undecided" -eq 1 ]; then
+  echo "HTTP 服务在应答但根路径返回 4xx：可能是随机安全入口、需登录或未初始化，无法据此判定安装结果"
+  exit 2
+fi
 exit 1
 ```
 
@@ -329,20 +377,17 @@ journalctl -u <service> --no-pager -n 20
 ```
 
 ## 判定标准
-所有 `required` 检查项均返回 0 且输出 `VERIFY_PASS:`，即视为安装完成并可用。`diagnostic` 检查项只记录信息，不参与整体结论。
+所有 `required` 检查项均返回 `0` 且输出 `VERIFY_PASS:`，即视为安装完成并可用。返回 `2` 的检查项表示该项无法判定，需人工确认后才能下结论，不代表软件未装好。`diagnostic` 检查项只记录信息，不参与整体结论。
 ```
 
 ## 生成验证指南前的核对清单
 
 以下模式来自历次部署的实测反馈。生成验证指南前逐条核对，具体命令仍须遵守上面的机器判定约定：
 
-1. **多平台安装脚本取错分支**：安装脚本含发行版条件分支（如 `if [ -f /etc/redhat-release ]`）时，服务名、路径、管理命令在 Ubuntu 分支和 CentOS 分支不同。验证命令中的服务名/路径必须取 Ubuntu 分支的值，不是脚本里第一个出现的值。
-2. **Web 中间态须纳入精确断言**：未初始化、未登录或未激活时可能返回重定向。只接受目标版本明确允许的状态码和跳转路径，或跟随有限次重定向后验证目标产品特征；不得把任意 3xx 都视为成功。
-3. **HTTP/HTTPS 回退须合并判定**：管理面板可能强制 HTTPS，导致 HTTP 请求被 reset。静态资料无法确认协议时，在同一个 `required` 代码块内依次探测 HTTPS 和 HTTP，并验证最终状态及产品特征；任一满足完整条件才输出 `VERIFY_PASS:`。
-4. **文件路径须由目标版本权威来源确认**：路径可依据目标版本的官方文档、官方安装脚本、包文件清单或官方仓库配置确认，不从旧版文档、社区帖子或通用惯例推断。无法确认时不得作为必选验证项。
-5. **日志噪声须精确豁免并由正向检查兜底**：healthcheck、框架周期性探测可能产生 FATAL / ERROR 日志（如 pg_isready 以默认用户连接导致 role not exist）。若日志检查参与成功判定，豁免必须限定到具体组件和完整错误模式，并同时要求服务健康或核心功能检查通过；禁止全局扫描后笼统要求「无 FATAL / ERROR」。
-6. **日志正向证据不能依赖 tail 窗口**：迁移完成、启动成功等一次性日志可能被周期性请求挤出 `--tail=N` 窗口；不得把“窗口内出现迁移关键字”作为必选条件。应使用当前状态、健康端点或可重复的核心功能检查。
-7. **开机自启检查须匹配单元类型**：`systemctl is-enabled` 对 socket 激活或被依赖拉起的单元返回 `static`，此类单元没有 `[Install]` 段、无法被 enable。目标服务为 `static` 时删除「开机自启」检查块，不得把 `static` 当作失败；`enabled-runtime`、`indirect`、`generated`、`alias` 均属已自启，不得只接受精确 `enabled`。
+1. **多平台安装脚本取错分支**：安装脚本含发行版条件分支（如 `if [ -f /etc/redhat-release ]`）时，服务名、路径、管理命令在 Ubuntu 分支和 CentOS 分支不同。验证命令中的服务名/路径必须取 Ubuntu 分支的值，不是脚本里第一个出现的值；Ubuntu 分支走 sysvinit 时用 §2 示例 B。
+2. **运行时行为不要写死成通过条件**：是否强制 HTTPS、入口是不是随机安全路径、未激活时重定向到哪里、页面是不是 SPA 空壳——这些静态读文档确认不了。协议用 §4 示例 B 的 HTTPS/HTTP 回退覆盖，判定只依赖最终状态码；入口路径与页面特征不作为通过条件。
+3. **文件路径须由目标版本权威来源确认**：路径可依据目标版本的官方文档、官方安装脚本、包文件清单或官方仓库配置确认，不从旧版文档、社区帖子或通用惯例推断。无法确认时不得作为必选验证项。
+4. **日志检查一律标 `diagnostic`**：healthcheck 与框架周期性探测会产生无害的 FATAL / ERROR（如 pg_isready 以默认用户连接导致 role not exist）；一次性的启动、迁移成功日志又会被挤出 `--tail=N` 窗口。日志两个方向都不可靠，只作诊断信息记录，正向证据交给服务状态与核心功能检查。
 
 ## 禁止事项
 

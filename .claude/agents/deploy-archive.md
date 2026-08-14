@@ -296,7 +296,7 @@ Write 自动建父目录。
 - 切换 OS：✅（<耗时>）
 ```
 
-> 「已安装软件」与「需放通端口」段：agent 用 **Read** 读取同目录下的 `<software>-install-result.md` 与 `<software>-verify-result.md`（路径由 `output_dir` + 对应文件名派生），提取相关信息填入。若文件不存在则在对应段写「（install-result.md 不存在，待人工补充）」。
+> 「已安装软件」与「需放通端口」段：agent 用 **Read** 读取同目录下的 `<software>-install-result.md` 与 `<software>-verify-result.md`（路径由 `output_dir` + 对应文件名派生），提取相关信息填入。verify-result.md 按验证指南的实际章节渲染，**端口检查项不保证存在**（纯 CLI 或容器形态的指南可以没有端口章节）：找不到端口检查项时改从 install 指南的配置段取端口，两处都取不到则写「（verify/install 产物中无端口信息，待人工补充）」。文件不存在则在对应段写「（<文件名> 不存在，待人工补充）」。
 
 ### 问题清单模板（`archive_issues_file`，仅有问题时生成）
 
