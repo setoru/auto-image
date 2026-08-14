@@ -20,6 +20,7 @@ tools: Read, Write, Bash, WebFetch, WebSearch, Glob, Grep
 - **组合条件必须在一个验证项内完成**：HTTP/HTTPS 二选一、允许多个状态码等逻辑必须封装在同一个 shell 断言中，不得拆成多个均需通过的检查项。
 - **成功结论必须有正向证据**：必选项必须覆盖适用的运行载体状态（systemd、SysV、容器或进程）和至少一项核心功能或产品特征；纯 CLI 软件则验证二进制版本和最小功能。仅端口开放、任意 HTTP 重定向或日志中没有错误，不能单独证明安装成功。
 - **必选验证与诊断信息分离**：只有标为 `required` 的验证项参与整体结论；日志查看等辅助检查标为 `diagnostic`，默认只记录结果，不因关键字匹配阻断流水线。只有能精确断言目标版本致命错误的日志检查才可标为 `required`。
+- **验证命令不得引入交互式权限请求**：新契约的只读验证模板不使用 `sudo`；`systemctl`、`journalctl` 和 `ss` 的查询直接执行。目标软件确实要求特权读取时，必须在指南头部声明 `> 远程前提: sudo-nopasswd`，且每条 sudo 命令使用 `sudo -n`，禁止等待密码输入。
 
 ## 允许的只读命令（仅限这些类别）
 
@@ -153,15 +154,16 @@ rm -rf "$WORKDIR"
 
 - 每份新生成的验证指南必须在文档头单独写入固定标记 `> 验证契约: exit-code-v1`。契约按整份文档生效，不得在同一份指南中混用新旧判定格式。
 - 每个自动检查项使用独立的 `bash` 代码块；新格式代码块第一行标记 `# 验证类型: required` 或 `# 验证类型: diagnostic`。
-- `required` 代码块必须作为一个整体执行，并自行完成所有条件判断。成功分支输出 `VERIFY_PASS: <检查项>` 并返回 0；失败分支输出实际状态并返回非 0。
+- `required` 代码块必须作为一个整体执行，并自行完成所有条件判断。成功分支输出 `VERIFY_PASS: <检查项>` 并返回 0；业务失败分支输出实际状态并统一 `exit 1`，不得透传内部命令的 255 等退出码。
 - `diagnostic` 代码块只采集只读诊断信息，不要求输出 `VERIFY_PASS:`，其退出码和输出不参与整体成功判定。
 - 每个代码块保留一条具体的 `# 期望:`，用于结果报告；deploy-verify 不解析其中的自然语言逻辑。
 - 多个可接受结果、协议回退或其他 any-of 条件必须写在同一个 `required` 代码块中。不得用两条独立命令再写「二者其一通过」。
 - 失败分支必须打印实际值或原始检查输出，不能只输出「失败」，以便 verify 报告直接用于排障。
 - HTTP 检查必须设置连接与总超时，并验证目标版本允许的状态码、跳转路径或响应特征。`curl` 连接失败、状态码 `000`、非预期 3xx、4xx、5xx 均须返回非 0；不得只以端口可连接作为通过条件。
 - `curl --fail` 不会把 3xx 当成失败，不能用 `curl -f` 的退出码代替重定向判定；必须显式检查状态码与 `Location`，或跟随有限次重定向后验证最终页面的产品特征。
+- 网络探测命令必须使用具体限制：`curl` 至少设置 `--connect-timeout 5 --max-time 10 --max-redirs 3`；其他可能等待网络或服务响应的命令使用明确的总超时。禁止只写“设置超时”而不写参数值。
 - 下方模板只定义结构，不要求机械保留所有章节。必须按目标软件的实际部署形态选择检查：systemd、SysV、容器或进程使用对应的状态命令；纯 CLI 软件删除服务和端口章节。不得为凑齐模板而编造不适用的服务名、端口或路径。
-- 写入验证指南前必须自检：契约标记存在；每个 `bash` 代码块都有合法的验证类型；至少有一个 `required` 检查；至少一个 `required` 检查调用软件自身核心功能、健康端点或验证目标产品特征。任一条件不满足时不得输出指南。
+- 写入验证指南前必须自检：契约标记存在；每个 `bash` 代码块都有合法的验证类型；至少有一个 `required` 检查；至少一个 `required` 检查调用软件自身核心功能、健康端点或验证目标产品特征；网络检查包含具体超时参数。任一条件不满足时不得输出指南。
 
 ### 文件一：`<install_file>` 模板
 
@@ -240,30 +242,24 @@ esac
 ```bash
 # 验证类型: required
 # 期望: active (running)
-if sudo systemctl is-active --quiet <service>; then
+if systemctl is-active --quiet <service>; then
   echo "VERIFY_PASS: 服务正在运行"
 else
-  sudo systemctl status <service> --no-pager || true
+  systemctl status <service> --no-pager || true
   exit 1
 fi
 ```
 
-```bash
-# 验证类型: required
-# 期望: enabled
-if sudo systemctl is-enabled --quiet <service>; then
-  echo "VERIFY_PASS: 服务已启用"
-else
-  sudo systemctl is-enabled <service> || true
-  exit 1
-fi
-```
+> 若目标版本官方安装步骤明确要求服务开机自启，再额外生成“开机自启”检查，并只接受精确输出 `enabled`；对 `static` 单元删除该检查，不能把 `static` 当作 `enabled`。
 
 ## 3. 端口与监听（软件不监听端口时删除本节）
 ```bash
 # 验证类型: required
 # 期望: LISTEN <端口>
-actual="$(ss -H -ltnp 'sport = :<端口>' 2>&1)" || { printf '%s\n' "$actual"; exit 1; }
+if ! actual="$(ss -H -ltn 'sport = :<端口>' 2>/dev/null)"; then
+  echo "ss 查询失败，无法确认端口 <端口>"
+  exit 1
+fi
 if [ -n "$actual" ]; then
   printf '%s\n' "$actual"
   echo "VERIFY_PASS: 端口正在监听"
@@ -284,11 +280,38 @@ case "$actual" in
 esac
 ```
 
+### 4.x Web 入口（仅 Web 服务生成；替换产品特征）
+```bash
+# 验证类型: required
+# 期望: HTTPS 或 HTTP 任一协议在最多 3 次重定向内返回 2xx，且响应包含 <产品特征>
+details=""
+for url in "https://127.0.0.1:<端口>/" "http://127.0.0.1:<端口>/"; do
+  response="$(curl -k -sS -L --max-redirs 3 --connect-timeout 5 --max-time 10 \
+    -o - -w '\n%{http_code}' "$url" 2>&1)" || {
+    details="${details}${details:+; }$url: curl 连接失败"
+    continue
+  }
+  status="$(printf '%s\n' "$response" | sed -n '$p')"
+  case "$status" in
+    2??)
+      if printf '%s\n' "$response" | grep -qiF '<产品特征>'; then
+        echo "VERIFY_PASS: Web 入口可达（$url，HTTP $status）"
+        exit 0
+      fi
+      details="${details}${details:+; }$url: HTTP $status，但缺少产品特征"
+      ;;
+    *) details="${details}${details:+; }$url: HTTP $status" ;;
+  esac
+done
+echo "Web 入口未通过：$details"
+exit 1
+```
+
 ## 5. 日志检查（诊断，不参与整体结论）
 ```bash
 # 验证类型: diagnostic
 # 期望: 记录最近 20 行服务日志，供排障使用
-sudo journalctl -u <service> --no-pager -n 20
+journalctl -u <service> --no-pager -n 20
 ```
 
 ## 判定标准
@@ -304,6 +327,7 @@ sudo journalctl -u <service> --no-pager -n 20
 3. **HTTP/HTTPS 回退须合并判定**：管理面板可能强制 HTTPS，导致 HTTP 请求被 reset。静态资料无法确认协议时，在同一个 `required` 代码块内依次探测 HTTPS 和 HTTP，并验证最终状态及产品特征；任一满足完整条件才输出 `VERIFY_PASS:`。
 4. **文件路径须由目标版本权威来源确认**：路径可依据目标版本的官方文档、官方安装脚本、包文件清单或官方仓库配置确认，不从旧版文档、社区帖子或通用惯例推断。无法确认时不得作为必选验证项。
 5. **日志噪声须精确豁免并由正向检查兜底**：healthcheck、框架周期性探测可能产生 FATAL / ERROR 日志（如 pg_isready 以默认用户连接导致 role not exist）。若日志检查参与成功判定，豁免必须限定到具体组件和完整错误模式，并同时要求服务健康或核心功能检查通过；禁止全局扫描后笼统要求「无 FATAL / ERROR」。
+6. **日志正向证据不能依赖 tail 窗口**：迁移完成、启动成功等一次性日志可能被周期性请求挤出 `--tail=N` 窗口；不得把“窗口内出现迁移关键字”作为必选条件。应使用当前状态、健康端点或可重复的核心功能检查。
 
 ## 禁止事项
 

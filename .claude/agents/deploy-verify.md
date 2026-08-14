@@ -17,6 +17,7 @@ tools: Read, Write, Bash, Glob, Grep
 - **新格式以可执行断言判定**：`exit-code-v1` 指南中，含 `# 验证类型: required` 的代码块作为一个整体执行；仅当 `exit_code = 0` 且 stdout 含 `VERIFY_PASS:` 时通过。`# 期望:` 只用于报告展示，不解析其中的自然语言逻辑。
 - **诊断项不阻断流水线**：含 `# 验证类型: diagnostic` 的代码块全量执行并记录，但不计入通过率，也不影响整体结论。
 - **兼容旧格式指南**：仅当整份指南没有验证契约标记时，才逐条执行命令并按期望关键字/子串匹配；旧指南须重新生成后才能使用新契约。
+- **基础设施异常不等同于软件失败**：`required` 或 `legacy` 项的远端执行结果为 `exit_code=-1`，或为 `255`、stdout 为空且 stderr 命中下方列出的 SSH 传输错误时，先原样重试一次；重试仍为基础设施异常则记为 `⚠️ 无法判定`，不计入通过或失败，不得下结论说软件未安装。远端命令自身有输出并返回 255 时，按业务失败处理；`diagnostic` 项只记录异常，不触发重试或改变整体结论。
 - **非交互执行**：远程命令必须非交互。新格式代码块必须已包含所需的 `--no-pager` 等参数并原样执行；仅旧格式的 `systemctl status`/`journalctl` 命令可补 `--no-pager`，以避免分页器干扰输出判断。
 - **明确不空泛**：结果必须具体到检查项、命令、期望、实际、判定；未通过项给出差异与建议。
 
@@ -99,6 +100,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 - 未知契约：文档存在 `> 验证契约:`，但值不是 `exit-code-v1` 时停止执行，写入结果文件并将整体结论记为 ❌ 失败；不得猜测或回退。
 - 每项记录：章节、验证类型、完整代码块或命令、期望输出。含变更类命令（安装/修改/启停服务/写文件）的项**跳过**并标注「跳过（非验证类）」。
 - `exit-code-v1` 指南未解析出任何 `required` 检查项，或旧指南未解析出任何有效检查项时，视为验证指南无效，整体结论记为 ❌ 失败；不得以 0/0 判定为通过。
+- 契约标记位于首个二级标题 `##` 之前，按 `^\s*>\s*验证契约\s*:\s*exit-code-v1\s*$` 匹配；只接受半角 ASCII 冒号，不接受全角 `：` 或出现在正文代码块中的同名文本。
 
 ### 4. 逐项执行验证（通过 ssh-skill）
 
@@ -115,13 +117,15 @@ DEPLOY_VERIFY_EOF
 python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --timeout <秒>
 ```
 - `<<'DEPLOY_VERIFY_EOF'` 的引号不得省略；它确保代码块中的单双引号、换行、`$变量` 和 `$()` 不在本地 shell 提前展开。远端收到的命令内容必须与指南代码块一致。
-- `required`：仅当 `exit_code = 0` 且 stdout 含 `VERIFY_PASS:` 时记为 ✅；退出码非 0 或缺少成功标记均记为 ❌。不得再用 `# 期望:` 文本覆盖该结果。
+- 基础设施异常识别：`exit_code=-1` 直接命中；`exit_code=255` 仅在 stdout 为空，且 stderr 包含 `Connection timed out`、`Operation timed out`、`Connection refused`、`Connection reset`、`Connection closed`、`Broken pipe`、`No route to host`、`Network is unreachable`、`Could not resolve hostname`、`Permission denied`、`Host key verification failed`、`kex_exchange_identification`、`channel open failed`、`SSHException` 或 `Execution error` 时命中。
+- 基础设施异常重试：仅对 `required` 和 `legacy` 项使用完全相同的命令和超时立即重试一次。第二次成功则按第二次结果判定；第二次返回普通业务失败则记为 ❌；只有第二次仍命中基础设施异常才记为 ⚠️ 无法判定，并记录两次 stderr。`diagnostic` 项不重试。
+- `required`：先排除并处理基础设施异常；其余结果仅当 `exit_code = 0` 且 stdout 含 `VERIFY_PASS:` 时记为 ✅，否则记为 ❌。不得再用 `# 期望:` 文本覆盖该结果。
 - `diagnostic`：记录 stdout、stderr 和 `exit_code`，判定记为 ℹ️ 诊断信息；不计入通过数和总数，不影响整体结论。
 - 旧格式：维持实际 stdout 与期望关键字/子串匹配；命令非零退出记为 ⚠️ 命令出错。报告中标注「旧格式兼容判定」，便于后续迁移。
 - 所有类型都记录：检查项、命令、期望、实际 stdout/stderr（超长截断）、`exit_code`、判定。
 - 新格式代码块不得改写；仅旧格式的 `systemctl status`/`journalctl` 类命令补 `--no-pager`。
 - **单项失败不中断**，继续执行其余检查项。
-- 全部执行完后只汇总必选检查项与旧格式检查项的通过数/总数；诊断项单独统计。必选/旧格式检查项全部通过时整体结论为 ✅，部分通过时为 ⚠️，全部失败或没有有效检查项时为 ❌。
+- 全部执行完后只汇总必选检查项与旧格式检查项的通过数/总数；诊断项单独统计。存在至少一个软件失败项时整体结论为 ❌；没有软件失败但存在基础设施异常时为 ⚠️；所有必选/旧格式检查项均通过且无基础设施异常时才为 ✅。基础设施异常必须明确标注“无法判定”，archive 仅在整体结论为 ✅ 时继续。
 
 ### 5. 生成结果文件
 
@@ -145,56 +149,31 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 > 软件：<software> <version> | 目标机器：<server alias> | 验证日期：<YYYY-MM-DD> | 验证指南：<verify_guide>
 
 ## 整体结论
-- 状态：✅ 全部通过 / ⚠️ 部分通过 / ❌ 失败
+- 状态：✅ 全部通过 / ⚠️ 无法判定 / ❌ 失败
+- 结论原因：无 / 软件验证失败 / 基础设施异常 / 验证指南无效
 - 验证契约：exit-code-v1 / legacy
-- 必选检查项：N 通过 / M 总数
+- 可判定检查项：N 通过 / M 项（M = 通过项 + 软件失败项）
+- 软件失败项：F 项
+- 基础设施异常：I 项（无法判定，不计入通过/失败）
 - 诊断项：D 项（不参与整体结论）
 - 完整命令日志：`logs/<别名>.log`
 
 ## 验证明细
 
-### 1. 版本与二进制
-- 类型：required / 旧格式兼容
+按验证指南解析出的代码块顺序逐项生成以下条目；不要添加指南中不存在的章节或检查项：
+
+### <检查项标题>
+- 类型：required / diagnostic / legacy
 - 命令：`<完整验证命令或代码块>`
 - 期望：<expected>
-- 实际：<actual stdout>
+- 实际 stdout：<actual stdout>
+- 实际 stderr：<actual stderr>
 - 退出码：<exit_code>
-- 判定：✅/❌
-
-### 2. 服务状态
-- 类型：required / 旧格式兼容
-- 命令：`<完整验证命令或代码块>`
-- 期望：<expected>
-- 实际：<actual>
-- 退出码：<exit_code>
-- 判定：✅/❌
-
-### 3. 端口与监听
-- 类型：required / 旧格式兼容
-- 命令：`<完整验证命令或代码块>`
-- 期望：LISTEN <端口>
-- 实际：<actual>
-- 退出码：<exit_code>
-- 判定：✅/❌
-
-### 4. 功能性验证
-- 类型：required / 旧格式兼容
-- 命令：`<完整验证命令或代码块>`
-- 期望：<期望响应>
-- 实际：<actual>
-- 退出码：<exit_code>
-- 判定：✅/❌
-
-### 5. 日志检查（诊断）
-- 类型：diagnostic
-- 命令：`<完整诊断命令或代码块>`
-- 期望：记录最近日志，供排障使用
-- 实际：<actual>
-- 退出码：<exit_code>
-- 判定：ℹ️ 诊断信息（不参与整体结论）
+- 重试：未执行 / 第 1 次 / 第 2 次
+- 判定：✅ 通过 / ❌ 软件失败 / ⚠️ 无法判定 / ℹ️ 诊断信息
 
 ## 未通过项
-（无则写「无」；有则逐条列：检查项 / 命令 / 期望 / 实际 / 差异 / 建议）
+（无则写「无」；有则逐条列：检查项 / 类型 / 命令 / 期望 / 实际 / 退出码 / 判定 / 差异 / 建议。基础设施异常必须写明“无法判定”，不得写成软件未安装。）
 ```
 
 ### 问题文件模板（`verify_issues_file`，仅有未通过项时生成）
@@ -205,10 +184,15 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 > 软件：<software> <version> | 目标机器：<server alias> | 验证日期：<YYYY-MM-DD>
 
 ## 未通过 1
-- 检查项：2. 服务状态
+- 检查项：<检查项标题>
+- 类型：required / legacy
 - 命令：...
 - 期望：...
-- 实际：...
+- 实际 stdout：...
+- 实际 stderr：...
+- 退出码：...
+- 重试：...
+- 判定：❌ 软件失败 / ⚠️ 无法判定
 - 差异：...
 - 可能原因与建议：...
 ```
