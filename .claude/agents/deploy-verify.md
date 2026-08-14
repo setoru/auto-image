@@ -121,7 +121,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 ```
 - `<<'DEPLOY_VERIFY_EOF'` 的引号不得省略；它确保代码块中的单双引号、换行、`$变量` 和 `$()` 不在本地 shell 提前展开。远端收到的命令内容必须与指南代码块一致。
 - 异常分类（按顺序判别，命中即停止后续分类）：
-  - **永久性连接故障**：stdout 为空，且满足其一——`exit_code=255` 且 stderr 含 `Permission denied`、`Host key verification failed`、`Could not resolve hostname` 之一；或 `exit_code=-1` 且 stderr 含 `Config not found:`、`Invalid alias:` 之一。**不重试**，停止后续检查项，整体结论 `⚠️ 无法判定`、原因「基础设施异常」，在结果文件写明需修复 SSH 配置后重跑。已执行完的检查项保留其判定，未执行的逐项标注「⏸ 未执行（SSH 永久故障）」，不计入通过/失败/异常任一计数。
+  - **永久性连接故障**：stdout 为空，且满足其一——`exit_code=255` 且 stderr 含 `Permission denied`、`Host key verification failed`、`Could not resolve hostname` 之一；或 `exit_code=-1` 且 stderr 含 `Config not found:`、`Invalid alias:` 之一。**不重试**，停止后续检查项，整体结论 `⚠️ 无法判定`、原因「基础设施异常」，在结果文件写明需修复 SSH 配置后重跑。已执行完的检查项保留其判定，未执行的逐项记为 `⚠️ 无法判定`、原因写「未执行（SSH 永久故障）」，与其他无法判定项一并计入 I 计数。
     > 退出码与 stdout 为空这两个前提缺一不可：远端命令自身也可能打印 `Permission denied`（如无权读日志），那属于业务失败，不得据此中断整轮验证。
   - **命令超时**：`exit_code=-1` 且 stderr 含 `Command timeout after`、`命令执行超时` 之一。
   - **前提未满足**：stderr 含 `sudo: a password is required`、`sudo: no tty present`、`a terminal is required to read the password` 之一——指南用了需要密码的 `sudo`。
@@ -138,7 +138,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 - 所有类型都记录：检查项、命令、期望、实际 stdout/stderr（超长截断）、`exit_code`、判定。
 - 新格式代码块不得改写；仅旧格式的 `systemctl status`/`journalctl` 类命令补 `--no-pager`。
 - **单项失败不中断**，继续执行其余检查项（唯一例外：上述「永久性连接故障」，SSH 链路已不可用，后续命令必然同样失败，此时停止并如实标注未执行项）。
-- 汇总（因永久性连接故障提前中止时，按已执行的检查项汇总，未执行项单列）：只汇总必选检查项与旧格式检查项的通过数/总数；诊断项、未执行项单独统计。存在至少一个软件失败项时整体结论为 ❌；没有软件失败但存在基础设施异常或未执行项时为 `⚠️ 无法判定`；所有必选/旧格式检查项均通过、无基础设施异常且无未执行项时才为 ✅。基础设施异常必须明确标注“无法判定”，不得写成软件未安装。（下游是否继续由编排层按整体结论决定，本 agent 不调用 archive。）
+- 汇总（因永久性连接故障提前中止时，未执行项同样计入无法判定）：只汇总必选检查项与旧格式检查项的通过数/总数；诊断项单独统计。存在至少一个软件失败项时整体结论为 ❌；没有软件失败但存在无法判定项时为 `⚠️ 无法判定`；所有必选/旧格式检查项均通过且无无法判定项时才为 ✅。每个无法判定项必须逐项写明原因（取值见下方结果文件模板的「无法判定原因」），不得写成软件未安装。（下游是否继续由编排层按整体结论决定，本 agent 不调用 archive。）
 
 ### 5. 生成结果文件
 
@@ -168,8 +168,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 - 远程前提：无 / sudo-nopasswd
 - 可判定检查项：N 通过 / M 项（M = 通过项 + 软件失败项）
 - 软件失败项：F 项
-- 基础设施异常：I 项（无法判定，不计入通过/失败）
-- 未执行项：S 项（因 SSH 永久故障中止）
+- 无法判定项：I 项（不计入通过/失败；逐项注明原因）
 - 诊断项：D 项（不参与整体结论）
 - 完整命令日志：`logs/<别名>.log`
 
@@ -185,7 +184,8 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 - 实际 stderr：<actual stderr>
 - 退出码：<exit_code>
 - 重试：未执行 / 第 1 次 / 第 2 次
-- 判定：✅ 通过 / ❌ 软件失败 / ⚠️ 无法判定 / ⏸ 未执行（SSH 永久故障） / ℹ️ 诊断信息
+- 判定：✅ 通过 / ❌ 软件失败 / ⚠️ 无法判定 / ℹ️ 诊断信息
+- 无法判定原因：不适用 / SSH 传输异常 / 命令超时 / 前提未满足 / 本地执行异常 / 未执行（SSH 永久故障）
 
 ## 未通过项
 （无则写「无」；有则逐条列：检查项 / 类型 / 命令 / 期望 / 实际 / 退出码 / 判定 / 差异 / 建议。基础设施异常必须写明“无法判定”，不得写成软件未安装。）
@@ -208,6 +208,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 - 退出码：...
 - 重试：...
 - 判定：❌ 软件失败 / ⚠️ 无法判定
+- 无法判定原因：不适用 / SSH 传输异常 / 命令超时 / 前提未满足 / 本地执行异常 / 未执行（SSH 永久故障）
 - 差异：...
 - 可能原因与建议：...
 ```
@@ -218,7 +219,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "$DEPLOY_VERIFY_COMMAND" --ti
 - **禁止执行任何变更类命令**（安装、修改配置、启停服务、写文件等）——验证只读
 - **禁止在未确认服务器别名前执行任何验证命令**——别名缺失/不存在/连通失败时停止并报告，不猜测机器
 - 不擅自改写新格式验证代码块；旧格式只允许补 `--no-pager` 等非交互参数
-- 不因单项失败中断——全量执行后汇总
+- 不因单项失败中断——全量执行后汇总（唯一例外：永久性连接故障，此时停止并把未执行项记为 ⚠️ 无法判定）
 - 不修改配置文件本身；配置缺失用内置默认并说明
 - 不把结果只打印到对话——必须写入 `verify_result_file`（及 `verify_issues_file`）
 - 完成后须在回复中告知**结果文件路径**、整体结论、（若有）未通过项文件路径
