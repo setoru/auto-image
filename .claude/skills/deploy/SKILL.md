@@ -44,7 +44,7 @@ deploy-archive  清理 → 制镜像 → 切换 OS → archive-result.md + deplo
 
 | 步骤 | 子 agent | 必须产出（落盘到 output_dir） | 进入下一步前的校验 |
 |------|----------|-------------------------------|--------------------|
-| 1 guide | deploy-guide | `<install.md>`、`<verify.md>` | Read 两文件；任一缺失 → 终止整条 |
+| 1 guide | deploy-guide | `<install.md>`、`<verify.md>` | Read 两文件并确认 verify 头部为 `> 验证契约: exit-code-v1`；任一缺失/契约错误 → 终止整条 |
 | 2 install | deploy-install | `<install-result.md>`（有问题另出 `<install-issues.md>`）、`<install-meta.json>` | Read `install-result.md` + `<install-meta.json>`；result 缺失记失败，**仍继续步骤 3**。meta.json 缺失记警告（instance_id 取不到，可能影响步骤 4） |
 | 3 verify | deploy-verify | `<verify-result.md>`（未通过项另出 `<verify-issues.md>`） | Read `verify-result.md`；缺失记失败。**verify 未通过 → 不执行步骤 4** |
 | 4 archive | deploy-archive | `<archive-result.md>`、`<deploy-list.md>` | Read 两文件；任一缺失 → 记失败 |
@@ -82,7 +82,7 @@ deploy-archive  清理 → 制镜像 → 切换 OS → archive-result.md + deplo
 
 完成后（产物校验 = 强制铁律第 3 条）：
 - **捕获 deploy-guide 实际使用的 `software` / `version`**（其回复中会告知）→ 作为步骤 2、3、4 的固定入参。
-- **用 Read 校验 `<install.md>` 与 `<verify.md>` 已落盘**（路径 = output_dir + 配置文件名）。两者齐备方可进入步骤 2。
+- **用 Read 校验 `<install.md>` 与 `<verify.md>` 已落盘**（路径 = output_dir + 配置文件名），并确认 `<verify.md>` 在首个二级标题前包含精确标记 `> 验证契约: exit-code-v1`。任一文件缺失或契约标记缺失/错误，都视为 guide 失败，停止整条流水线；这里只检查产物门禁，不解析或执行验证代码块。
 - **任一缺失 / guide 失败 → 停止整条流水线**，报告原因（后续阶段无输入，无法进行）。
 
 ### 步骤 2 — deploy-install（远程安装）
