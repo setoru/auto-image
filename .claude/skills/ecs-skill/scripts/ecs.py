@@ -91,11 +91,22 @@ def find_server_by_name(client, *, name: str) -> Any | None:
     return None
 
 
-def poll_until_ready(client, *, server_id, timeout, interval, trace, has_eip) -> tuple[Any | None, str, str | None]:
+def _obj_id(obj: Any) -> str:
+    """取对象/字典形态的 id 字段（API 返回结构两种形态都可能出现）。"""
+    if isinstance(obj, dict):
+        return str(obj.get("id", "") or "")
+    return str(getattr(obj, "id", "") or "")
+
+
+def poll_until_ready(client, *, server_id, timeout, interval, trace, has_eip,
+                     expect_image_id: str | None = None) -> tuple[Any | None, str, str | None]:
     """轮询直至 ACTIVE + 可达 IP 出现（或超时/错误）。
 
     has_eip=True 时，ACTIVE 后仍需公网浮动 IP 出现才算地址就绪——
     浮动 IP 迟迟不来时继续轮询直至超时，**绝不回退私网**。
+    expect_image_id 非空时，还要求镜像元数据已变为该镜像才算就绪——
+    change-os 提交后旧系统仍 ACTIVE + 22 通，仅凭状态/端口会在换盘
+    完成前误判；镜像 ID 已切换是换盘发生的正向证据。
     返回 (server, status, ip)。
     """
     deadline = time.monotonic() + timeout
@@ -105,8 +116,11 @@ def poll_until_ready(client, *, server_id, timeout, interval, trace, has_eip) ->
         status = str(getattr(srv, "status", "UNKNOWN") or "UNKNOWN").upper() if srv else "PENDING"
         last = srv
         ip, _ = decide_ready_ip(srv, has_eip)
-        trace.append({"t": time.strftime("%H:%M:%S"), "status": status, "ip": ip or ""})
-        if status == "ACTIVE" and ip:
+        image_now = _obj_id(getattr(srv, "image", None)) if srv else ""
+        trace.append({"t": time.strftime("%H:%M:%S"), "status": status,
+                      "ip": ip or "", "image": image_now})
+        if status == "ACTIVE" and ip and (
+                expect_image_id is None or image_now == expect_image_id):
             return srv, "ACTIVE", ip
         if status in ("ERROR", "FAILED"):
             return srv, status, None
@@ -115,10 +129,6 @@ def poll_until_ready(client, *, server_id, timeout, interval, trace, has_eip) ->
 
 
 def summarize_server(server: Any) -> dict[str, Any]:
-    def _id(obj):
-        if isinstance(obj, dict):
-            return obj.get("id", "")
-        return getattr(obj, "id", "") or ""
     ip = floating_ip(server) or fixed_ip(server)
     return {
         "id": getattr(server, "id", ""),
@@ -126,8 +136,8 @@ def summarize_server(server: Any) -> dict[str, Any]:
         "status": str(getattr(server, "status", "UNKNOWN") or "UNKNOWN").upper(),
         "ip": ip,
         "ip_type": "floating" if (ip and ip == floating_ip(server)) else "private",
-        "flavor": _id(getattr(server, "flavor", None)),
-        "image": _id(getattr(server, "image", None)),
+        "flavor": _obj_id(getattr(server, "flavor", None)),
+        "image": _obj_id(getattr(server, "image", None)),
     }
 
 
@@ -361,10 +371,14 @@ def cmd_change_os(args: argparse.Namespace) -> int:
           f"（轮询中；中断请用 show --id 复查）",
           file=sys.stderr, flush=True)
 
-    # 轮询 ACTIVE + 探 22（复用 create 的 poll_until_ready / wait_for_port）
+    # 轮询 ACTIVE + 探 22（复用 create 的 poll_until_ready / wait_for_port）。
+    # 就绪判定要求镜像元数据已变为目标镜像：change-os 提交后旧系统仍
+    # ACTIVE + 22 通，仅凭状态/端口会误判；镜像 ID 已切换 = 换盘正向证据。
+    # 限制：用同一镜像重装时旧新 ID 相同，该证据失效，判定退回状态+端口。
     server, status, ip = poll_until_ready(
         client, server_id=instance_id, timeout=args.timeout,
         interval=args.poll_interval, trace=trace, has_eip=has_eip,
+        expect_image_id=image_id,
     )
     if status == "ACTIVE" and ip:
         port_open = wait_for_port(ip, 22, grace=args.port_grace,

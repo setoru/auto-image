@@ -1170,21 +1170,24 @@ def test_delete_dry_run_no_network():
 
 # ---- poll_until_deleted：删除轮询判定 ----
 @contextlib.contextmanager
-def _patch_show_server(*statuses):
-    """临时把 ecs.show_server 替换为按序吐出 status 的替身，结束后还原。
+def _patch_show_server(*states):
+    """临时把 ecs.show_server 替换为按序吐状态的替身，结束后还原。
 
     与仓库既有 _isolate_env / _no_network 同一 contextmanager 范式。
-    status 为 None → 该轮返回 None（实例从 API 消失）；否则返回 SimpleNamespace(status=...)。
+    元素形态：None → 该轮返回 None（实例从 API 消失）；
+    SimpleNamespace → 完整 server 桩原样返回（含 image/addresses）；
+    其余 → 包成 SimpleNamespace(status=...)。
     耗尽后重复最后一个状态（用于「始终不变」场景）。
     """
-    states = [None if s is None else SimpleNamespace(status=s) for s in statuses]
+    mocked = [s if isinstance(s, SimpleNamespace) else
+              (None if s is None else SimpleNamespace(status=s)) for s in states]
     counter = [0]
     orig = ecs.show_server
 
     def _mock(client, *, server_id):
-        i = min(counter[0], len(states) - 1)
+        i = min(counter[0], len(mocked) - 1)
         counter[0] += 1
-        return states[i]
+        return mocked[i]
 
     ecs.show_server = _mock
     try:
@@ -1233,6 +1236,55 @@ def test_poll_until_deleted_timeout_when_never_deleted():
         status = ecs.poll_until_deleted(
             client=None, server_id="srv-1", timeout=0.3, interval=0, trace=trace)
         assert status == "TIMEOUT", f"持续 ACTIVE 应超时，实得 {status!r}"
+
+
+# ---- poll_until_ready：change-os 就绪判定（镜像翻转正向证据） ----
+def _os_server(status, image_id, *entries):
+    """伪造带状态、镜像元数据与地址的 server（poll_until_ready 的查询桩）。"""
+    return SimpleNamespace(
+        status=status, image=SimpleNamespace(id=image_id),
+        addresses={"net": list(entries)},
+    )
+
+
+def test_poll_until_ready_image_flip_regression():
+    """回归：change-os 提交后旧系统仍 ACTIVE + IP 可达，镜像未换不得判就绪。"""
+    with _patch_show_server(
+        _os_server("ACTIVE", "img-old", _addr_entry("10.0.0.5", "fixed")),
+        _os_server("SHUTOFF", "img-old", _addr_entry("10.0.0.5", "fixed")),
+        _os_server("ACTIVE", "img-new", _addr_entry("10.0.0.5", "fixed")),
+    ):
+        trace = []
+        server, status, ip = ecs.poll_until_ready(
+            client=None, server_id="srv-1", timeout=5, interval=0, trace=trace,
+            has_eip=False, expect_image_id="img-new")
+        assert status == "ACTIVE", f"应在镜像切换后就绪，实得 {status!r}"
+        assert ip == "10.0.0.5", f"应取私网 IP，实得 {ip!r}"
+        stale = [t for t in trace if t.get("status") == "ACTIVE" and t.get("image") == "img-old"]
+        assert stale, "旧镜像 + ACTIVE 的轮询点不得判就绪（回归点）"
+
+
+def test_poll_until_ready_image_never_flips_timeout():
+    """镜像始终未切换（仍是旧镜像）→ 走到超时，不误判就绪。"""
+    with _patch_show_server(
+        _os_server("ACTIVE", "img-old", _addr_entry("10.0.0.5", "fixed")),
+    ):
+        status = ecs.poll_until_ready(
+            client=None, server_id="srv-1", timeout=0.3, interval=0.05, trace=[],
+            has_eip=False, expect_image_id="img-new")[1]
+        assert status == "TIMEOUT", f"镜像未换应超时，实得 {status!r}"
+
+
+def test_poll_until_ready_without_expect_keeps_create_semantics():
+    """不传 expect_image_id（create 路径）→ ACTIVE + IP 即就绪，行为不变。"""
+    with _patch_show_server(
+        _os_server("ACTIVE", "img-old", _addr_entry("10.0.0.5", "fixed")),
+    ):
+        server, status, ip = ecs.poll_until_ready(
+            client=None, server_id="srv-1", timeout=5, interval=0, trace=[],
+            has_eip=False)
+        assert status == "ACTIVE", f"首轮 ACTIVE 应即就绪，实得 {status!r}"
+        assert ip == "10.0.0.5", f"应取私网 IP，实得 {ip!r}"
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
