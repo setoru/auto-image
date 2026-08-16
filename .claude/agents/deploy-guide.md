@@ -166,7 +166,7 @@ rm -rf "$WORKDIR"
 
 ### 文件一：`<install_file>` 模板
 
-```markdown
+````markdown
 # <软件名> Ubuntu 部署指南
 
 > 适用：Ubuntu <版本> | 文档来源：<URL或仓库地址@分支> | 生成日期：<YYYY-MM-DD>
@@ -214,11 +214,11 @@ sudo systemctl enable --now <service>   # 开机自启并立即启动
   - `field = value` —— 含义：xxx
 
 > 安装完成后的验证方法见独立文档：`<verify_file>`
-```
+````
 
 ### 文件二：`<verify_file>` 模板（独立验证文档）
 
-```markdown
+````markdown
 # <软件名> 安装验证指南
 
 > 适用：Ubuntu <版本> | 配套部署指南：`<install_file>` | 生成日期：<YYYY-MM-DD>
@@ -356,7 +356,7 @@ journalctl -u <service> --no-pager -n 20
 
 ## 判定标准
 所有 `required` 检查项均返回 `0` 且输出 `VERIFY_PASS:`，即视为安装完成并可用。返回 `2` 的检查项表示该项无法判定，需人工确认后才能下结论，不代表软件未装好。`diagnostic` 检查项只记录信息，不参与整体结论。
-```
+````
 
 ## 生成验证指南前的核对清单
 
