@@ -160,7 +160,7 @@ rm -rf "$WORKDIR"
 
 ### 文件一：`<install_filename>` 模板（RPM 制作指南）
 
-```markdown
+````markdown
 # <软件名> RPM 制作指南（Huawei Cloud Euler）
 
 > 适用：Huawei Cloud Euler (openEuler) | 文档来源：<URL或仓库地址@分支> | 生成日期：<YYYY-MM-DD>
@@ -246,11 +246,11 @@ rpmbuild -ba ~/rpmbuild/SPECS/<软件>.spec
 - 如构建时提示缺少文件，请检查 SOURCES 目录下源码包名称是否与 SPEC 中 `Source0` 一致。
 
 > RPM 安装后的验证方法见独立文档：`<verify_filename>`
-```
+````
 
 ### 文件二：`<verify_filename>` 模板（RPM 安装验证指南）
 
-```markdown
+````markdown
 # <软件名> RPM 安装验证指南
 
 > 适用：Huawei Cloud Euler | 配套制作指南：`<install_filename>` | 生成日期：<YYYY-MM-DD>
@@ -297,7 +297,7 @@ journalctl -u <service> --no-pager -n 20
 
 ## 判定标准
 以上 1~5 项全部符合期望，即视为 RPM 包制作成功且安装后运行正常。
-```
+````
 
 ## 禁止事项
 

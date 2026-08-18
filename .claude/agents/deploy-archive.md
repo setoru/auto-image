@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -126,14 +126,42 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分三类：**UniAgent 身份** → **运行痕迹** → **身份凭证**。身份凭证类的删除让镜像不含可识别或可登录的残留——change-os 重启后 cloud-init 会为新机器重新生成 host key 并注入密码。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份（两块均为**先杀进程再删身份文件**——agent 带守护自拉起，进程不死会在删文件后重新落盘，故块尾 `pgrep` 复验，仍在运行即清理未完成）；安全基线两项各自消除一类交付缺陷——密码策略确保后续改密强制复杂度校验，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
+# 顺序约束：先杀进程再删身份文件。uniagentd 带守护自拉起，service stop 单独可能停不净，
+# 存活进程会在删文件后重新落盘 .sn 与日志目录，使清理落空——停进程用尽手段后强杀、等待、再删文件、复验。
+systemctl stop uniagentd 2>/dev/null || true
 service uniagentd stop 2>/dev/null || true
+pkill -9 uniagentd 2>/dev/null || true
+sleep 1
 rm -f /etc/uniagentd/uniagentd.sn || true
 rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
+if pgrep -q uniagentd; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
+# —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
+# 范围：只卸载 agent 本体。/etc/init.d/HSSInstall（开机自动安装 agent 的安装器）保留，不在此清理。
+/etc/init.d/hostguard stop 2>/dev/null || true
+dpkg -P hostguard 2>/dev/null || true
+# HSS 控制台安装的 agent 不是 dpkg 包，dpkg -P 对其不生效，删目录与启动脚本才是实际生效的路径
+rm -rf /usr/local/hostguard 2>/dev/null || true
+rm -f /etc/init.d/hostguard 2>/dev/null || true
+# 同 UniAgent：删文件后强杀残留并复验（hostguard 亦带 watchdog 自拉起）
+pkill -9 hostguard 2>/dev/null || true
+if pgrep -q hostguard; then echo "hostguard 仍在运行"; else echo "hostguard 已停止"; fi
+# —— 安全基线：密码复杂度配置 ——
+apt-get install -y libpam-pwquality
+# 写入 PAM 密码复杂度规则（幂等：先删旧行，再在 pam_unix.so 前插入确保 PAM 链顺序正确）
+sed -i '/pam_pwquality\.so/d' /etc/pam.d/common-password
+sed -i '/pam_unix\.so/i password requisite pam_pwquality.so retry=3 minclass=2 minlen=8 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1' /etc/pam.d/common-password
+# —— 安全基线：卸载 python3-pip ——
+# 该包的漏洞修复版本带 +esm 后缀，只存在于 Ubuntu Pro 的 ESM 源；免费源候选版本恒等于已装版本，
+# dist-upgrade 取不到修复，镜像扫描必然报 High。交付镜像不预装 pip，直接卸载消除该扫描项。
+# 未安装时 apt-get purge 返回 0，故不加 || true——真失败（源不可用）应当阻塞。
+apt-get purge -y python3-pip
 # —— 运行痕迹清理 ——
+# 顺序约束：本块必须排在全部 apt 操作之后。apt-get install 会把 .deb 重新下载进
+# /var/cache/apt/archives，若 apt-get clean 先跑，装包产生的缓存会重新落盘、清理落空。
 # bash_history（root + 普通用户，遍历 /home/*/.bash_history + /root/.bash_history）
 cat /dev/null > /root/.bash_history
 for f in /home/*/.bash_history; do [ -f "$f" ] && cat /dev/null > "$f"; done
@@ -149,11 +177,13 @@ rm -rf /home/*/.ssh/*
 rm -f /etc/ssh/ssh_host_*
 # root 密码清理（删除部署期密码 + 锁定账户；change-os 时 cloud-init 用 --password 注入新密码解锁）
 passwd -d root && passwd -l root
+# 重置 cloud-init 状态（使 change-os 重启时全量重跑：重新生成 host key + 注入密码解锁 root）
+cloud-init clean
 # sync 确保落盘
 sync
 ```
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块（含 service stop）均带 `|| true`（未安装不阻塞）；身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；安全基线块（`apt-get install` / `sed` / `apt-get purge`）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -226,7 +256,7 @@ Write 自动建父目录。
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：service uniagentd stop ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：systemctl/service stop uniagentd + pkill -9 + 删身份文件 + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：0 | 状态：✅
 - 输出摘要：...
 
@@ -283,7 +313,7 @@ Write 自动建父目录。
 - 切换 OS：✅（<耗时>）
 ```
 
-> 「已安装软件」与「需放通端口」段：agent 用 **Read** 读取同目录下的 `<software>-install-result.md` 与 `<software>-verify-result.md`（路径由 `output_dir` + 对应文件名派生），提取相关信息填入。若文件不存在则在对应段写「（install-result.md 不存在，待人工补充）」。
+> 「已安装软件」与「需放通端口」段：agent 用 **Read** 读取同目录下的 `<software>-install-result.md` 与 `<software>-verify-result.md`（路径由 `output_dir` + 对应文件名派生），提取相关信息填入。verify-result.md 按验证指南的实际章节渲染，**端口检查项不保证存在**（纯 CLI 或容器形态的指南可以没有端口章节）：找不到端口检查项时改从 install 指南的配置段取端口，两处都取不到则写「（verify/install 产物中无端口信息，待人工补充）」。文件不存在则在对应段写「（<文件名> 不存在，待人工补充）」。
 
 ### 问题清单模板（`archive_issues_file`，仅有问题时生成）
 

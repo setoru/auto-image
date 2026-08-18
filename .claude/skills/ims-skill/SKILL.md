@@ -12,7 +12,7 @@ keywords: 华为云, ims, 镜像, 制镜像, image, system disk, 系统盘, crea
 
 **就绪 = job SUCCESS**：`show_job` 返回 `SUCCESS` 时 `entities.image_id` 即出现——此刻镜像已可使用。不额外轮询 image status。
 
-**职责边界**：只做**系统盘镜像**（ECS 类型），**不**做整机镜像（WholeImage，需 CBR vault_id）、**不**按名称查找源 ECS（接受 `--instance-id`）、**不**自动停机、**不**接 deploy 流水线、**不**提供 `delete`。
+**职责边界**：只做**系统盘镜像**（ECS 类型），**不**做整机镜像（WholeImage，需 CBR vault_id）、**不**按名称查找源 ECS（接受 `--instance-id`）、**不**自动停机、**不**做 deploy 编排、**不**提供 `delete`。
 
 > 路径：本 skill 当前在仓库内开发，命令用仓库相对路径。迁到 `~/.claude/skills/` 后，把下列命令前缀换成 `~/.claude/skills/ims-skill/`。
 
