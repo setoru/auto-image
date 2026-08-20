@@ -138,7 +138,7 @@ pkill -9 uniagentd 2>/dev/null || true
 sleep 1
 rm -f /etc/uniagentd/uniagentd.sn || true
 rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
-if pgrep -q uniagentd; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
+if pgrep -x uniagentd >/dev/null 2>&1; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
 # —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
 # 范围：只卸载 agent 本体。/etc/init.d/HSSInstall（开机自动安装 agent 的安装器）保留，不在此清理。
 /etc/init.d/hostguard stop 2>/dev/null || true
@@ -148,7 +148,7 @@ rm -rf /usr/local/hostguard 2>/dev/null || true
 rm -f /etc/init.d/hostguard 2>/dev/null || true
 # 同 UniAgent：删文件后强杀残留并复验（hostguard 亦带 watchdog 自拉起）
 pkill -9 hostguard 2>/dev/null || true
-if pgrep -q hostguard; then echo "hostguard 仍在运行"; else echo "hostguard 已停止"; fi
+if pgrep -x hostguard >/dev/null 2>&1; then echo "hostguard 仍在运行"; else echo "hostguard 已停止"; fi
 # —— 安全基线：密码复杂度配置 ——
 apt-get install -y libpam-pwquality
 # 写入 PAM 密码复杂度规则（幂等：先删旧行，再在 pam_unix.so 前插入确保 PAM 链顺序正确）
