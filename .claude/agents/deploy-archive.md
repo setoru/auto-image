@@ -138,7 +138,7 @@ pkill -9 uniagentd 2>/dev/null || true
 sleep 1
 rm -f /etc/uniagentd/uniagentd.sn || true
 rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
-if pgrep -q uniagentd; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
+if pgrep -x uniagentd >/dev/null 2>&1; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
 # —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
 # 范围：只卸载 agent 本体。/etc/init.d/HSSInstall（开机自动安装 agent 的安装器）保留，不在此清理。
 /etc/init.d/hostguard stop 2>/dev/null || true
@@ -148,7 +148,7 @@ rm -rf /usr/local/hostguard 2>/dev/null || true
 rm -f /etc/init.d/hostguard 2>/dev/null || true
 # 同 UniAgent：删文件后强杀残留并复验（hostguard 亦带 watchdog 自拉起）
 pkill -9 hostguard 2>/dev/null || true
-if pgrep -q hostguard; then echo "hostguard 仍在运行"; else echo "hostguard 已停止"; fi
+if pgrep -x hostguard >/dev/null 2>&1; then echo "hostguard 仍在运行"; else echo "hostguard 已停止"; fi
 # —— 安全基线：密码复杂度配置 ——
 apt-get install -y libpam-pwquality
 # 写入 PAM 密码复杂度规则（幂等：先删旧行，再在 pam_unix.so 前插入确保 PAM 链顺序正确）
@@ -159,6 +159,8 @@ sed -i '/pam_unix\.so/i password requisite pam_pwquality.so retry=3 minclass=2 m
 # dist-upgrade 取不到修复，镜像扫描必然报 High。交付镜像不预装 pip，直接卸载消除该扫描项。
 # 未安装时 apt-get purge 返回 0，故不加 || true——真失败（源不可用）应当阻塞。
 apt-get purge -y python3-pip
+# 卸载后复验（「查得到才失败」正写法，规则见上方「判定表达式先核对退出码三态」）
+if dpkg -l python3-pip >/dev/null 2>&1; then echo "FAIL: python3-pip 仍已安装"; exit 1; else echo "python3-pip 复验通过：未安装"; fi
 # —— 运行痕迹清理 ——
 # 顺序约束：本块必须排在全部 apt 操作之后。apt-get install 会把 .deb 重新下载进
 # /var/cache/apt/archives，若 apt-get clean 先跑，装包产生的缓存会重新落盘、清理落空。
@@ -183,7 +185,12 @@ cloud-init clean
 sync
 ```
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；安全基线块（`apt-get install` / `sed` / `apt-get purge`）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功，否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+**判定表达式先核对退出码三态**（写任何复验/判定前适用）：命令退出码分成功（0）/ 未命中（1）/ 出错（2+，如选项不存在），而 `if`、`&&`、`$?` 只有二值视角。三条纪律：
+1. 「未命中」常是目标达成（`dpkg -l` 查无此包、`pgrep` 无进程、`grep` 无匹配均返回非零）——按「查得到才失败」写 `if <查询命令>; then FAIL; fi`，勿让目标达成的非零流出为失败信号；
+2. 「出错」不得折叠成通过——用不确定存在的选项（如 `pgrep -q`）报错时退出码与「未命中」同为非零、同走 if 假分支，判定命令只用确认全版本可用的写法（`pgrep <name> >/dev/null`）；
+3. 禁止 `&& { FAIL; }` 后接 `; echo $?` 的链尾哨兵——`$?` 取的是链上最后实际执行命令的退出码，不是块结果；需区分多态时用 `case` 显式分支（verify 契约模板的 `rc=$?; case` 即此模式）。
+
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；安全基线块（`apt-get install` / `sed` / `apt-get purge`）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功（pip 卸载含块尾 `dpkg -l` 复验，输出「仍已安装」即失败），否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
