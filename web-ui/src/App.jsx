@@ -16,7 +16,24 @@ const TASK_STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '挂起' }
 const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档' }
 const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED: 'warn' }
 
-function EventRow({ ev }) {
+// 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
+// result 就是最后一条 assistant 文本（CLI Result 语义），重复成框是噪音；
+// 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框
+function turnCompletedRow(ev, prev) {
+  const dup =
+    prev?.type === 'agent.message' &&
+    String(prev.payload.text ?? '').trim() === String(ev.payload.result ?? '').trim() &&
+    ev.payload.result?.trim()
+  if (dup) return <div className="va-stage-line">─ 回合完成 · 会话可继续 ─</div>
+  return (
+    <div className="va-result">
+      <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
+      <div className="va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.result) }} />
+    </div>
+  )
+}
+
+function EventRow({ ev, prev }) {
   if (ev.type === 'resumed.history') {
     return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
   }
@@ -51,12 +68,7 @@ function EventRow({ ev }) {
     return <div className="va-tool">✔ {ev.payload.tool} · {ev.payload.summary}</div>
   }
   if (ev.type === 'turn.completed') {
-    return (
-      <div className="va-result">
-        <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
-        <div className="va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.result) }} />
-      </div>
-    )
+    return turnCompletedRow(ev, prev)
   }
   if (ev.type === 'run.failed') {
     return <div className="va-failed">会话异常终止：{ev.payload.message}</div>
@@ -260,7 +272,7 @@ export default function App() {
                     {run.events.length === 0 && (
                       <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
                     )}
-                    {run.events.map((ev) => <EventRow key={ev.seq} ev={ev} />)}
+                    {run.events.map((ev, i) => <EventRow key={ev.seq} ev={ev} prev={run.events[i - 1]} />)}
                     {!follow && (
                       <button
                         className="va-jump"
