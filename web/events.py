@@ -33,6 +33,14 @@ class EventStore:
         """返回 seq 严格大于 after_seq 的全部事件（断点重放用）。"""
         return [ev for ev in self._events[run_id] if ev["seq"] > after_seq]
 
+    def adopt_history(self, dst_run_id, src_run_id, skip_types=()):
+        """把源 run 的全部事件转录进目标 run（seq 重新递增、唤醒订阅者）——
+        接续创建的新会话由此自带源会话历史（CLI resume 的浏览体验）。
+        skip_types 排除源流的生命周期起点（run.started，避免与新流的重复）。"""
+        for ev in self._events[src_run_id]:
+            if ev["type"] not in skip_types:
+                self.append(dst_run_id, ev["type"], ev["payload"])
+
     def is_complete(self, run_id, seen_seq):
         """seen_seq 已追上存储末尾（无更多事件可重放）。"""
         return not self.replay_from(run_id, seen_seq)

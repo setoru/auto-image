@@ -91,6 +91,12 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         store.create(run.run_id)
+        # 会话流同步开卷：run.started 先行；接续创建时带入源会话全部历史
+        # （CLI resume 的浏览体验），seq 重新编号、断点续传语义不变
+        store.append(run.run_id, "run.started", {})
+        if run.resumed_from is not None:
+            store.append(run.run_id, "resumed.history", {"resumed_from": run.resumed_from})
+            store.adopt_history(run.run_id, run.resumed_from, skip_types={"run.started"})
         # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
         _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
         run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout))

@@ -566,6 +566,39 @@ async def test_turn_timeout_fails_run():
         assert r.status_code == 409
 
 
+async def test_resume_carries_history_into_new_stream():
+    """接续创建的新会话事件流自带源会话历史（CLI resume 的体验）：
+    run.started → resumed.history 分隔 → 源会话全部事件（跳过源的
+    run.started，收尾事件如实保留）→ 后续新指令事件；seq 重新编号严格递增。"""
+    app = make_app()
+    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_a, "WAITING_INPUT")
+        await client.post(f"/api/runs/{run_a}/cancel")
+
+        run_b = (await client.post("/api/runs", json={"resume_from": run_a})).json()["run_id"]
+        events, _ = await collect_sse(await open_stream(client, run_b), deadline_s=1.0)
+        types = [e["event"] for e in events]
+        assert types[0] == "run.started"
+        assert types[1] == "resumed.history"
+        assert events[1]["data"]["resumed_from"] == run_a
+        # 源流的收尾事件（run.canceled）如实带入，源 run.started 不重复
+        assert types[-1] == "run.canceled"
+        assert types.count("run.started") == 1
+        # 源历史里的回合事件在场
+        assert "user.message" in types and "turn.completed" in types
+        seqs = [int(e["id"]) for e in events]
+        assert seqs == list(range(1, len(events) + 1)), seqs
+
+        # 新指令事件跟在历史之后，新回合正常驱动
+        await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续"})
+        await wait_status(client, run_b, "WAITING_INPUT")
+        events2, _ = await collect_sse(await open_stream(client, run_b), deadline_s=1.0)
+        assert [e["event"] for e in events2][-1] == "turn.completed"
+        assert int(events2[-1]["id"]) > int(events[-1]["id"])
+
+
 async def main():
     tests = [fn for name, fn in sorted(globals().items()) if name.startswith("test_")]
     for fn in tests:

@@ -29,8 +29,8 @@ async def run_agent(run, session_factory, store, turn_timeout=None):
     """驱动一条会话：等指令 → 执行回合 → 回挂起，直到会话被关闭或异常。
 
     turn_timeout 由服务端固定传入（sdk.TURN_TIMEOUT_SECONDS）；None 仅限
-    测试直接驱动，表示不限时。"""
-    store.append(run.run_id, "run.started", {})
+    测试直接驱动，表示不限时。run.started 与接续历史由 create_run 同步段
+    先行写入（见 app.py），本协程从等输入开始。"""
     try:
         async with session_factory(run.resume_session_id) as session:
             run.session = session

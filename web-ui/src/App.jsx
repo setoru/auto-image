@@ -17,6 +17,9 @@ const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '�
 const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED: 'warn' }
 
 function EventRow({ ev }) {
+  if (ev.type === 'resumed.history') {
+    return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
+  }
   if (ev.type === 'stage.changed') {
     return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
