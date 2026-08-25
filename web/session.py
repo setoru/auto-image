@@ -2,9 +2,9 @@
 
 run_agent 只接收参数、不引用全局状态——被关闭的旧会话不能让随后新建的
 Run 被旧协程的收尾分支改写状态。会话对象来自可注入工厂（生产包装
-ClaudeSDKClient，测试与本阶段默认为脚本化假实现），工厂需返回支持
-async with 的对象，暴露 query / receive_response / interrupt
-（interrupt 由后续干预语义接入）。
+ClaudeSDKClient，测试注入脚本化假实现），工厂需返回支持 async with
+的对象，暴露 query / receive_response / interrupt（interrupt 由干预
+语义接入）。
 """
 import asyncio
 

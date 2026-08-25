@@ -13,8 +13,8 @@ from fastapi.staticfiles import StaticFiles
 
 from . import runs as runs_mod
 from .events import EventStore
-from .fake import FakeSessionFactory
 from .runs import RunManager
+from .sdk import SDKSessionFactory
 from .session import run_agent
 
 # 前端构建产物（vite build 输出），存在才挂载；开发时走 vite dev proxy
@@ -22,10 +22,12 @@ DEFAULT_STATIC_DIR = Path(__file__).resolve().parent.parent / "web-ui" / "dist"
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None):
+    """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
+    测试注入按剧本推消息的假实现——注入边界即唯一测试缝。"""
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
-    factory = session_factory or FakeSessionFactory()
+    factory = session_factory or SDKSessionFactory()
     app.state.run_manager = manager
     app.state.event_store = store
     app.state.heartbeat_interval = heartbeat_interval
