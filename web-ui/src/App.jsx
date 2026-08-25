@@ -39,7 +39,7 @@ function EventRow({ ev }) {
     )
   }
   if (ev.type === 'agent.message') {
-    return <div className="va-msg">{ev.payload.text}</div>
+    return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
   }
   if (ev.type === 'agent.tool_started') {
     return <div className="va-tool">▶ {ev.payload.tool} · {ev.payload.summary}</div>
@@ -51,7 +51,7 @@ function EventRow({ ev }) {
     return (
       <div className="va-result">
         <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
-        <pre>{ev.payload.result}</pre>
+        <div className="va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.result) }} />
       </div>
     )
   }
@@ -106,15 +106,18 @@ function ArtifactCard({ run }) {
   )
 }
 
-// 产物 tab：markdown 经 marked 渲染（表格/代码块/验证契约 blockquote），json 原文展示。
-// 内容系 agent 转述外部文档，HTML 经消毒再进 DOM
+// markdown → 消毒后 HTML 的单点：产物与消息流共用（内容都系 agent 转述
+// 外部文档/工具输出，同威胁模型，HTML 一律消毒再进 DOM）
+const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false }))
+
+// 产物 tab：markdown 经 marked 渲染（表格/代码块/验证契约 blockquote），json 原文展示
 function ArtifactView({ run }) {
   const artifact = run.artifact
   if (!artifact) {
     return <div className="artifact-empty">点击左侧产物卡中的文件查看（随阶段推进解锁）</div>
   }
   const isJson = artifact.name.endsWith('.json')
-  const html = isJson ? '' : DOMPurify.sanitize(marked.parse(artifact.content, { async: false }))
+  const html = isJson ? '' : mdToHtml(artifact.content)
   return (
     <div className="va-artifact">
       <div className="va-artifact-head">
@@ -125,7 +128,7 @@ function ArtifactView({ run }) {
       {isJson ? (
         <pre className="va-artifact-raw">{artifact.content}</pre>
       ) : (
-        <div className="va-artifact-md" dangerouslySetInnerHTML={{ __html: html }} />
+        <div className="va-artifact-md va-md" dangerouslySetInnerHTML={{ __html: html }} />
       )}
     </div>
   )
