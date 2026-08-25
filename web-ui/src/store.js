@@ -223,15 +223,16 @@ export async function loadRuns() {
 }
 
 // 新建 = 一步创建空会话（WAITING_INPUT），无中间表单；执行中置灰由 UI 保证；
-// 勾选「接续上次」时携带最近终态会话的 resume_from（一次性，用毕复位）
-export async function createRun() {
+// resumeFrom 给定时从该终态会话续接上下文（查看历史会话时的「接续此会话」），
+// 否则勾选「接续上次」时取最近终态会话（一次性，用毕复位）
+export async function createRun(resumeFrom = null) {
   if (executingRunId()) {
     fail(conflictText('deployment_in_progress'))
     return
   }
-  const resumeFrom = state.resumeLast ? lastTerminalRunId() : null
+  const resume = resumeFrom ?? (state.resumeLast ? lastTerminalRunId() : null)
   try {
-    const data = await postJson('/api/runs', resumeFrom ? { resume_from: resumeFrom } : {})
+    const data = await postJson('/api/runs', resume ? { resume_from: resume } : {})
     const run = makeRun({
       runId: data.run_id,
       status: data.status,
