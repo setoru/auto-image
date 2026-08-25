@@ -10,6 +10,7 @@ run_agent 在回合收尾按该标记区分 turn.stopped 与 turn.completed（�
 被打断的回合以 result=None 的 error Result 收尾，但判定以本端标记为权威）。
 """
 import asyncio
+import time
 
 from .normalize import is_final_result, normalize_message
 from .redact import redact_text
@@ -50,9 +51,11 @@ async def run_agent(run, session_factory, store):
     except asyncio.CancelledError:
         # 关闭会话 = 取消本协程：会话记录保留，可供后续新会话续接
         run.status = CANCELED
+        run.ended_at = time.time()
         store.append(run.run_id, "run.canceled", {})
     except Exception as exc:  # noqa: BLE001 —— 会话内任何异常都落到 run.failed，错误摘要过脱敏
         run.status = FAILED
+        run.ended_at = time.time()
         store.append(run.run_id, "run.failed", {"message": redact_text(str(exc))})
 
 

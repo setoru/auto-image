@@ -4,6 +4,9 @@ RUNNING 至多一个：新建会话、向挂起会话发指令都要求当前无
 WAITING_INPUT（挂起）的会话可多个并存。回合与会话分离：回合完成、被停止
 或部署失败都不结束会话，会话只能被用户关闭（CANCELED）或异常终止（FAILED）。
 
+ENDED 是重启找回的历史 run（见 rebuild.py）：上个进程生命周期的记录，
+可回看、可作为续接起点，但不接受干预——终态语义与 CANCELED / FAILED 一致。
+
 活跃 = RUNNING / WAITING_INPUT；干预端点（stop / messages / cancel）对
 非活跃（终态）run 一律拒绝（run_not_active）。
 """
@@ -15,7 +18,8 @@ WAITING_INPUT = "WAITING_INPUT"
 RUNNING = "RUNNING"
 CANCELED = "CANCELED"
 FAILED = "FAILED"
-TERMINAL = {CANCELED, FAILED}
+ENDED = "ENDED"
+TERMINAL = {CANCELED, FAILED, ENDED}
 
 
 class Conflict(Exception):
@@ -42,6 +46,7 @@ class Run:
         self.resumed_from = None      # 续接来源 run_id（对外呈现）
         self.stop_requested = False   # 停止请求标记：run_agent 在回合收尾消费
         self.output_dir = None        # 产物目录（INSTALL 后发现，见 artifacts.py）
+        self.ended_at = None          # 终态时刻（历史回看的时长上限；非终态为 None）
 
     def summary(self):
         return {
@@ -50,6 +55,7 @@ class Run:
             "stage": self.stage,
             "first_prompt": self.first_prompt,
             "started_at": self.created_at,
+            "ended_at": self.ended_at,
             "resumed_from": self.resumed_from,
         }
 
@@ -61,6 +67,14 @@ class RunManager:
 
     def get(self, run_id):
         return self.runs.get(run_id)
+
+    def register(self, run):
+        """注册重启重建的历史 run（不经 create 的并发校验：启动时无执行）。"""
+        self.runs[run.run_id] = run
+
+    def summaries(self):
+        """全部 run 摘要，后启动的在前（列表/下拉以最新任务为首选）。"""
+        return [r.summary() for r in sorted(self.runs.values(), key=lambda r: r.created_at, reverse=True)]
 
     def running(self):
         return next((r for r in self.runs.values() if r.status == RUNNING), None)

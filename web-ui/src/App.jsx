@@ -7,12 +7,14 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtElapsed, firstPromptPreview, fmtSize } from './derive.js'
+import { fmtElapsed, firstPromptPreview, resumeMark, fmtSize } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 
-const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已结束', FAILED: '失败' }
+const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已关闭', FAILED: '失败', ENDED: '已结束' }
+// 下拉三态（执行中/挂起/已结束）：所有终态（含重启找回的 ENDED）归「已结束」
+const TASK_STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '挂起' }
 const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档' }
-const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn' }
+const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED: 'warn' }
 
 function EventRow({ ev }) {
   if (ev.type === 'stage.changed') {
@@ -58,6 +60,9 @@ function EventRow({ ev }) {
   }
   if (ev.type === 'run.canceled') {
     return <div className="va-canceled">— 会话已关闭 —</div>
+  }
+  if (ev.type === 'run.ended') {
+    return <div className="va-canceled">— 历史会话（服务重启找回，只读）—</div>
   }
   return null
 }
@@ -209,11 +214,12 @@ export default function App() {
             className="va-task-select"
             value={s.viewRunId ?? ''}
             onChange={(e) => store.selectRun(e.target.value)}
-            title="切换查看会话"
+            title="切换查看会话（历史会话只读回放）"
           >
             {s.order.map((id) => (
               <option key={id} value={id}>
-                {firstPromptPreview(s.runs[id])} · {id} · {STATUS_LABEL[s.runs[id].status]}
+                {firstPromptPreview(s.runs[id])} · {id} · {TASK_STATUS_LABEL[s.runs[id].status] ?? '已结束'}
+                {resumeMark(s.runs[id], s.runs)}
               </option>
             ))}
           </select>

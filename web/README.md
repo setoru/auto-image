@@ -21,6 +21,7 @@ python -m web            # 默认 8000，WEB_PORT=8765 可覆盖
 ```bash
 python web/tests/test_api.py        # ASGI 主缝（假会话驱动）
 python web/tests/test_artifacts.py  # 产物端点（临时目录造桩）
+python web/tests/test_history.py    # 列表摘要、只读约束、假 transcript 驱动的重启重建
 python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 ```
 
@@ -28,14 +29,15 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 
 | 文件 | 职责 |
 | --- | --- |
-| `app.py` | FastAPI 应用工厂、API 路由、SSE 流（id=seq、Last-Event-ID 重放、心跳保活） |
-| `runs.py` | 会话状态机（RUNNING 唯一、挂起并存）、干预（intervene）与 409 判定 |
+| `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 流（id=seq、Last-Event-ID 重放、心跳保活）、启动接线（历史重建 + 残留 CLI 告警） |
+| `runs.py` | 会话状态机（RUNNING 唯一、挂起并存）、干预（intervene）与 409 判定；ENDED 为重启找回的历史终态 |
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | 产物发现（install-meta.json mtime 驱动）、按阶段解锁的清单、内容读取与路径约束 |
 | `redact.py` | 事件出口脱敏（AK/SK、密码字段、私钥块） |
-| `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂 |
+| `rebuild.py` | 服务重启后的历史重建：list_sessions / get_session_messages 以 session 粒度找回历史 run（ENDED，只读可续接） |
+| `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
 
 ## SDK 真会话实测记录（claude-agent-sdk 0.2.144 + CLI 2.1.220）
@@ -83,6 +85,13 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
    被杀断开连接，远端进程是否终止取决于远端 shell 配置，**不保证**——
    按「已提交的云操作不可撤销」对待。断连后以 `resume=session_id` 新建
    会话实测可续接，上下文完整（能复述被打断前的指令）。
+10. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
+   全量重建约 2 秒）：`get_session_messages` 只回可见的 user/assistant 链
+   （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
+   包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
+   条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重建的
+   run 状态 ENDED（终态，可回看可续接），流以 `run.ended` 收尾后正常
+   关闭。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。

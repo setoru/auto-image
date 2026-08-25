@@ -16,6 +16,8 @@ from claude_agent_sdk import (
     ToolResultBlock,
     ToolUseBlock,
     UserMessage,
+    get_session_messages,
+    list_sessions,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -129,3 +131,13 @@ class SDKSession:
 class SDKSessionFactory:
     def __call__(self, session_id=None):
         return SDKSession(session_id)
+
+
+def list_project_sessions(project_root=None):
+    """项目根目录下的 SDK 会话清单（重启重建的发现源；cwd 过滤由 SDK 完成）。"""
+    return list_sessions(directory=str(project_root or PROJECT_ROOT))
+
+
+def project_session_messages(session_id, project_root=None):
+    """单条 SDK 会话的可见消息链（重启重建的事件映射源，只读 transcript）。"""
+    return get_session_messages(session_id, directory=str(project_root or PROJECT_ROOT))

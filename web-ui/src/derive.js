@@ -1,12 +1,29 @@
 // 从会话状态派生展示数据（布局自理），与服务端 first_prompt 语义对齐
 
+// 首条指令原文：服务端摘要的 firstPrompt 优先（重启找回的历史在事件回放前就有名字），
+// 否则取事件流首条 user.message。空会话（含尚未回放的历史）返回 null。
+export function firstPromptText(run) {
+  if (!run) return null
+  return run.firstPrompt ?? run.events.find((e) => e.type === 'user.message')?.payload.text ?? null
+}
+
+// 会话是否已有首条指令（输入条占位文案判定）
+export function hasPrompt(run) {
+  return firstPromptText(run) != null
+}
+
 // 任务名 = 首条指令截断（与 SDK list_sessions 的 first_prompt 对齐）
 export function firstPromptPreview(run, max = 18) {
-  if (!run) return ''
-  const first = run.events.find((e) => e.type === 'user.message')
-  if (!first) return '(空会话)'
-  const t = first.payload.text.trim().replace(/\s+/g, ' ')
+  const first = firstPromptText(run)
+  if (first == null) return '(空会话)'
+  const t = String(first).trim().replace(/\s+/g, ' ')
   return t.length > max ? t.slice(0, max) + '…' : t
+}
+
+// 接续标记：「↩ 接续『任务名』」；来源会话不在（列表缺它）时不标
+export function resumeMark(run, runs) {
+  if (!run?.resumedFrom || !runs?.[run.resumedFrom]) return ''
+  return ` ↩ 接续『${firstPromptPreview(runs[run.resumedFrom])}』`
 }
 
 export function fmtElapsed(startedAt, now) {

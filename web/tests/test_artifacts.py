@@ -87,6 +87,7 @@ def make_app(script, root):
         heartbeat_interval=0.05,
         artifact_root=root,
         deploy_config=root / "deploy.config.yaml",
+        list_sessions_fn=lambda: [],  # 不读本机真实 transcript
     )
 
 

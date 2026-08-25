@@ -9,6 +9,8 @@
 """
 import asyncio
 import json
+import logging
+import subprocess
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -16,7 +18,9 @@ from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import artifacts as artifacts_mod
+from . import rebuild as rebuild_mod
 from . import runs as runs_mod
+from . import sdk as sdk_mod
 from .events import EventStore
 from .runs import RunManager
 from .sdk import SDKSessionFactory
@@ -31,10 +35,14 @@ DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
-               artifact_root=None, deploy_config=None):
+               artifact_root=None, deploy_config=None,
+               list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
-    与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。"""
+    与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。
+
+    list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
+    residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。"""
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
@@ -45,6 +53,25 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     app.state.event_store = store
     app.state.session_factory = factory
     app.state.heartbeat_interval = heartbeat_interval
+    # 服务重启语义：启动即从 CLI 侧 transcript 重建历史（只读回看 + 续接起点），
+    # 正在执行的任务不自动重试；残留 CLI 子进程只告警不杀（可能处于云操作中间态）
+    rebuilt = rebuild_mod.rebuild_history(
+        manager, store,
+        list_sessions_fn or sdk_mod.list_project_sessions,
+        get_session_messages_fn or sdk_mod.project_session_messages,
+    )
+    if rebuilt:
+        logging.getLogger("web").info("服务重启后找回 %d 条历史会话", len(rebuilt))
+    residual_pids = (residual_cli_scan or residual_cli_processes)()
+    if residual_pids:
+        logging.getLogger("web").warning(
+            "检测到残留 CLI 子进程（不自动处理，可能处于云操作中间态，请人工处置）：%s",
+            residual_pids,
+        )
+
+    @app.get("/api/runs")
+    async def list_runs():
+        return {"runs": manager.summaries()}
 
     @app.post("/api/runs")
     async def create_run(body: dict | None = None):
@@ -191,3 +218,15 @@ def _get_run_or_404(manager, run_id):
 
 def _run_dir(run_id):
     return Path("/tmp/auto-image-runs") / run_id
+
+
+def residual_cli_processes():
+    """pgrep -f claude 检测残留 CLI 子进程，返回 pid 列表；无匹配或 pgrep 缺失为空。
+
+    只发现不处置：残留进程可能正处于云操作中间态，杀不杀由人工判断。
+    """
+    try:
+        proc = subprocess.run(["pgrep", "-f", "claude"], capture_output=True, text=True)
+    except OSError:
+        return []
+    return proc.stdout.split() if proc.returncode == 0 else []

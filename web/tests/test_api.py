@@ -27,6 +27,7 @@ def make_app(script=None, delay=DELAY):
     return create_app(
         session_factory=FakeSessionFactory(script=script if script is not None else DEFAULT_SCRIPT, delay=delay),
         heartbeat_interval=HEARTBEAT,
+        list_sessions_fn=lambda: [],  # 不读本机真实 transcript（重启重建见 test_history）
     )
 
 
