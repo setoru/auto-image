@@ -1,200 +1,220 @@
+// A 形态 —— Claude Code 会话的 Web 对话界面。
+// header（run_id · 会话状态 · 当前阶段 · 时长 · 结束会话）+ 左侧可收起
+// 任务详情栏（产物卡 / 阶段卡 / 回合汇总卡）+ 主区双 tab（会话 | 产物）
+// + 底部常驻对话输入条。多会话并存时 header 出现切换下拉。
 import { useEffect, useRef, useState } from 'react'
 import './App.css'
+import * as store from './store.js'
+import { fmtElapsed, firstPromptPreview } from './derive.js'
+import ChatBar from './components/ChatBar.jsx'
 
-// 与服务端内部事件协议一致的事件类型全集
-const EVENT_TYPES = [
-  'run.started',
-  'user.message',
-  'agent.thinking',
-  'agent.message',
-  'agent.tool_started',
-  'agent.tool_finished',
-  'stage.changed',
-  'turn.stopped',
-  'turn.completed',
-  'run.canceled',
-  'run.failed',
-]
+const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已结束', FAILED: '失败' }
+const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档' }
+const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn' }
 
-const STATUS_LABEL = {
-  WAITING_INPUT: '等待输入',
-  RUNNING: '执行中',
-  CANCELED: '已关闭',
-  FAILED: '失败',
-}
-
-async function postJson(url, body) {
-  const resp = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body ?? {}),
-  })
-  const data = await resp.json().catch(() => ({}))
-  if (!resp.ok) throw new Error(data.detail || `HTTP ${resp.status}`)
-  return data
-}
-
-function EventItem({ ev }) {
-  const { type, payload } = ev
-  if (type === 'user.message') {
-    return (
-      <div className="ev user">
-        <span className="who">你 ▸</span> {payload.text}
-      </div>
-    )
+function EventRow({ ev }) {
+  if (ev.type === 'stage.changed') {
+    return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
-  if (type === 'agent.thinking') {
+  if (ev.type === 'user.message') {
+    return <div className="va-user">你 ▸ {ev.payload.text}</div>
+  }
+  if (ev.type === 'turn.stopped') {
+    return <div className="va-paused">— 已停止（Esc 等效），等待指令 —</div>
+  }
+  if (ev.type === 'agent.thinking') {
     return (
-      <details className="ev thinking">
+      <details className="va-thinking">
         <summary>💭 Thinking</summary>
-        <p>{payload.text}</p>
+        <div className="va-thinking-body">{ev.payload.text}</div>
       </details>
     )
   }
-  if (type === 'agent.message') {
-    return <div className="ev message">{payload.text}</div>
+  if (ev.type === 'agent.message') {
+    return <div className="va-msg">{ev.payload.text}</div>
   }
-  if (type === 'agent.tool_started') {
+  if (ev.type === 'agent.tool_started') {
+    return <div className="va-tool">▶ {ev.payload.tool} · {ev.payload.summary}</div>
+  }
+  if (ev.type === 'agent.tool_finished') {
+    return <div className="va-tool">✔ {ev.payload.tool} · {ev.payload.summary}</div>
+  }
+  if (ev.type === 'turn.completed') {
     return (
-      <div className="ev tool">
-        ▶ {payload.tool} <span className="summary">{payload.summary}</span>
+      <div className="va-result">
+        <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
+        <pre>{ev.payload.result}</pre>
       </div>
     )
   }
-  if (type === 'agent.tool_finished') {
-    return (
-      <div className="ev tool">
-        ✔ {payload.tool} <span className="summary">{payload.summary}</span>
-      </div>
-    )
+  if (ev.type === 'run.failed') {
+    return <div className="va-failed">会话异常终止：{ev.payload.message}</div>
   }
-  if (type === 'stage.changed') {
-    return (
-      <div className="ev stage-divider">
-        <span>─ 进入 {payload.stage} ─</span>
-      </div>
-    )
-  }
-  if (type === 'turn.completed') {
-    return (
-      <div className="ev turn-card">
-        <div className="card-title">回合汇总</div>
-        <div className="card-body">{payload.result}</div>
-      </div>
-    )
-  }
-  if (type === 'run.failed') {
-    return (
-      <div className="ev run-failed">
-        会话异常终止：{payload.message}
-      </div>
-    )
-  }
-  if (type === 'run.canceled') {
-    return <div className="ev run-canceled">会话已关闭</div>
+  if (ev.type === 'run.canceled') {
+    return <div className="va-canceled">— 会话已关闭 —</div>
   }
   return null
 }
 
+// 任务详情侧栏：产物卡（产物端点接入前列出占位）+ 阶段卡 + 回合汇总卡
+function TaskSide({ run, onClose }) {
+  const lastAgentMsg = run
+    ? [...run.events].reverse().find((e) => e.type === 'agent.message')?.payload.text ?? ''
+    : ''
+  return (
+    <aside className="va-side">
+      <div className="va-side-head">
+        <span className="va-side-title-text">任务详情</span>
+        <button className="va-side-toggle" onClick={onClose} title="收起侧栏">«</button>
+      </div>
+      <div className="va-side-cards">
+        <div className="va-card">
+          <div className="va-card-title">产物 · 0</div>
+          <div className="va-card-line">等待阶段产物落盘…</div>
+        </div>
+
+        {run && (
+          <div className="va-card">
+            <div className="va-card-title">{run.result ? '最后阶段' : '当前阶段'}</div>
+            <div className="va-card-big">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : '—'}</div>
+            <div className="va-card-line">run：{run.runId}</div>
+            {lastAgentMsg && <div className="va-card-line va-card-msg">{lastAgentMsg}</div>}
+          </div>
+        )}
+
+        {run?.result && (
+          <div className="va-card va-card-result">
+            <div className="va-card-title">回合汇总（会话可继续）</div>
+            <pre>{run.result}</pre>
+          </div>
+        )}
+        {run?.status === 'CANCELED' && (
+          <div className="va-card"><div className="va-card-title">会话已关闭</div>云上已提交的操作不受影响</div>
+        )}
+      </div>
+    </aside>
+  )
+}
+
 export default function App() {
-  const [runId, setRunId] = useState(null)
-  const [status, setStatus] = useState(null)
-  const [events, setEvents] = useState([])
-  const [reconnecting, setReconnecting] = useState(false)
-  const [input, setInput] = useState('')
-  const [error, setError] = useState(null)
-  const listRef = useRef(null)
+  const s = store.useRunState()
+  const run = store.useViewRun()
+  const scrollRef = useRef(null)
+  const [follow, setFollow] = useState(true)
+  const [sideOpen, setSideOpen] = useState(true)
+  const [tab, setTab] = useState('chat') // chat | artifact
 
-  useEffect(() => {
-    if (!runId) return
-    // 浏览器 EventSource 断线自动重连并携带 Last-Event-ID，服务端从 seq+1 补发
-    const es = new EventSource(`/api/runs/${runId}/events`)
-    es.onopen = () => setReconnecting(false)
-    es.onerror = () => setReconnecting(true)
-    const onEvent = (e) => {
-      const seq = Number(e.lastEventId)
-      const payload = JSON.parse(e.data)
-      setEvents((prev) =>
-        prev.some((ev) => ev.seq === seq) ? prev : [...prev, { seq, type: e.type, payload }],
-      )
-      if (e.type === 'turn.completed') setStatus('WAITING_INPUT')
-      if (e.type === 'run.failed') setStatus('FAILED')
-      if (e.type === 'run.canceled') setStatus('CANCELED')
-      // 终态后服务端会关闭流，主动 close 避免 EventSource 无限重连
-      if (e.type === 'run.failed' || e.type === 'run.canceled') es.close()
-    }
-    for (const type of EVENT_TYPES) es.addEventListener(type, onEvent)
-    return () => es.close()
-  }, [runId])
-
-  useEffect(() => {
-    const el = listRef.current
+  const scrollToBottom = () => {
+    const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
-  }, [events, reconnecting])
-
-  async function newSession() {
-    setError(null)
-    try {
-      const data = await postJson('/api/runs', {})
-      setEvents([])
-      setStatus(data.status)
-      setRunId(data.run_id)
-    } catch (err) {
-      setError(`新建会话失败：${err.message}`)
-    }
   }
 
-  async function send() {
-    const text = input.trim()
-    if (!text || !runId) return
-    setError(null)
-    try {
-      const data = await postJson(`/api/runs/${runId}/messages`, { text })
-      setStatus(data.status)
-      setInput('')
-    } catch (err) {
-      setError(`发送失败：${err.message}`)
-    }
-  }
+  useEffect(() => {
+    setTab('chat')
+    setFollow(true)
+  }, [s.viewRunId])
 
-  const inputDisabled = !runId || status === 'RUNNING' || status === 'CANCELED' || status === 'FAILED'
+  useEffect(() => {
+    if (follow) scrollToBottom()
+  }, [run?.events.length, follow])
+
+  // 切回会话 tab（含从产物查看返回）时滚到最新
+  useEffect(() => {
+    if (tab === 'chat') scrollToBottom()
+  }, [tab, s.viewRunId])
+
+  const onScroll = () => {
+    const el = scrollRef.current
+    setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
+  }
 
   return (
-    <div className="app">
-      <header className="header">
-        <span className="run-id">{runId ?? '未创建会话'}</span>
-        <span className={`status status-${status ?? 'none'}`}>{STATUS_LABEL[status] ?? '—'}</span>
-        <button onClick={newSession}>+ 新建</button>
+    <div className="va-root">
+      <header className="va-head">
+        {s.order.length > 1 && (
+          <select
+            className="va-task-select"
+            value={s.viewRunId ?? ''}
+            onChange={(e) => store.selectRun(e.target.value)}
+            title="切换查看会话"
+          >
+            {s.order.map((id) => (
+              <option key={id} value={id}>
+                {firstPromptPreview(s.runs[id])} · {id} · {STATUS_LABEL[s.runs[id].status]}
+              </option>
+            ))}
+          </select>
+        )}
+        {run && !sideOpen && (
+          <button className="va-side-open" onClick={() => setSideOpen(true)} title="展开任务详情栏">
+            » 详情
+          </button>
+        )}
+        {run ? (
+          <>
+            <span className="va-runid">{run.runId}</span>
+            <span className={`dot tone-${STATUS_TONE[run.status] ?? 'ok'}`} />
+            <span>{STATUS_LABEL[run.status]}</span>
+            {run.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
+            <span className="va-spacer" />
+            <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : '—'}</span>
+            <span className="va-elapsed">{fmtElapsed(run.startedAt, run.endedAt ?? s.now)}</span>
+            <button onClick={() => store.cancel()} disabled={!store.isActive(run.status)}>
+              结束会话
+            </button>
+          </>
+        ) : (
+          <span className="va-runid">auto-image 部署会话</span>
+        )}
       </header>
 
-      <main className="stream" ref={listRef}>
-        {reconnecting && (
-          <div className="reconnect-banner">连接已断开，正在重连并从断点续传…</div>
-        )}
-        {events.length === 0 && (
-          <div className="empty">新建一个会话，输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
-        )}
-        {events.map((ev) => (
-          <EventItem key={ev.seq} ev={ev} />
-        ))}
-      </main>
+      <div className="va-body">
+        {sideOpen && <TaskSide run={run} onClose={() => setSideOpen(false)} />}
+        <div className="va-main">
+          {!run ? (
+            <div className="empty-state">
+              <div className="big">未开始</div>
+              <div>点底部「+ 新建」创建会话，输入第一条部署指令</div>
+            </div>
+          ) : (
+            <>
+              <div className="va-tabs">
+                <button className={tab === 'chat' ? 'on' : ''} onClick={() => setTab('chat')}>会话</button>
+                <button className={tab === 'artifact' ? 'on' : ''} onClick={() => setTab('artifact')} disabled>
+                  产物 · 0
+                </button>
+              </div>
+              <div className="va-tab-body">
+                {tab === 'chat' ? (
+                  <div className="va-stream" ref={scrollRef} onScroll={onScroll}>
+                    {run.events.length === 0 && (
+                      <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
+                    )}
+                    {run.events.map((ev) => <EventRow key={ev.seq} ev={ev} />)}
+                    {!follow && (
+                      <button
+                        className="va-jump"
+                        onClick={() => {
+                          setFollow(true)
+                          scrollToBottom()
+                        }}
+                      >
+                        ↓ 回到最新
+                      </button>
+                    )}
+                  </div>
+                ) : (
+                  <div className="artifact-empty">产物查看随产物端点接入</div>
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
 
-      {error && <div className="error-banner">{error}</div>}
+      {s.submitError && <div className="error-bar">{s.submitError}</div>}
 
-      <footer className="composer">
-        <input
-          value={input}
-          placeholder={runId ? '输入指令，回车发送…' : '先新建会话'}
-          disabled={inputDisabled}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'Enter') send()
-          }}
-        />
-        <button onClick={send} disabled={inputDisabled || !input.trim()}>
-          发送
-        </button>
-      </footer>
+      <ChatBar />
     </div>
   )
 }
