@@ -1,6 +1,6 @@
 // A 形态 —— Claude Code 会话的 Web 对话界面。
 // header（run_id · 会话状态 · 当前阶段 · 时长 · 结束会话）+ 左侧可收起
-// 任务详情栏（产物卡 / 阶段卡 / 回合汇总卡）+ 主区双 tab（会话 | 产物）
+// 任务详情栏（产物卡）+ 主区双 tab（会话 | 产物）
 // + 底部常驻对话输入条。多会话并存时 header 出现切换下拉。
 import { useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
@@ -131,11 +131,8 @@ function ArtifactView({ run }) {
   )
 }
 
-// 任务详情侧栏：产物卡 + 阶段卡 + 回合汇总卡
+// 任务详情侧栏：产物卡（阶段与回合汇总常驻 header 与消息流，不重复设卡）
 function TaskSide({ run, onClose }) {
-  const lastAgentMsg = run
-    ? [...run.events].reverse().find((e) => e.type === 'agent.message')?.payload.text ?? ''
-    : ''
   return (
     <aside className="va-side">
       <div className="va-side-head">
@@ -144,22 +141,6 @@ function TaskSide({ run, onClose }) {
       </div>
       <div className="va-side-cards">
         <ArtifactCard run={run} />
-
-        {run && (
-          <div className="va-card">
-            <div className="va-card-title">{run.result ? '最后阶段' : '当前阶段'}</div>
-            <div className="va-card-big">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : '—'}</div>
-            <div className="va-card-line">run：{run.runId}</div>
-            {lastAgentMsg && <div className="va-card-line va-card-msg">{lastAgentMsg}</div>}
-          </div>
-        )}
-
-        {run?.result && (
-          <div className="va-card va-card-result">
-            <div className="va-card-title">回合汇总（会话可继续）</div>
-            <pre>{run.result}</pre>
-          </div>
-        )}
         {run?.status === 'CANCELED' && (
           <div className="va-card"><div className="va-card-title">会话已关闭</div>云上已提交的操作不受影响</div>
         )}
