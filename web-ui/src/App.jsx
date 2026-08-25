@@ -82,41 +82,52 @@ function EventRow({ ev, prev }) {
   return null
 }
 
-// 阶段徽标（产物卡分组与产物 tab 头共用）
+// 阶段徽标（产物文件行与产物 tab 头共用）
 function StageBadge({ stage }) {
   return <span className={`va-art-badge s-${stage.toLowerCase()}`}>{stage}</span>
 }
 
-// 产物卡：按阶段分组列出已解锁文件（带阶段徽标），点击在主区产物 tab 查看
-function ArtifactCard({ run }) {
-  const files = run?.artifacts?.files ?? []
-  // 分组顺序取自 STAGE_LABEL 的键序（与流水线推进一致；清单由服务端按已进入阶段解锁）
-  const groups = Object.keys(STAGE_LABEL)
-    .map((stage) => ({ stage, items: files.filter((f) => f.stage === stage) }))
-    .filter((g) => g.items.length > 0)
+// 产物卡：deploy/ 全量镜像，按目录分组（组头带文件数，点击展开/收起），
+// 点击文件在主区产物 tab 查看。约定命名的带阶段徽标，非约定的（.v1 备份、
+// 杂项）无徽标平铺；目录按最新落盘时间降序（服务端排好）
+function ArtifactCard() {
+  const s = store.useRunState()
+  const groups = s.artifacts.groups
+  const [toggles, setToggles] = useState({})
+  const fileCount = groups.reduce((n, g) => n + g.files.length, 0)
   return (
     <div className="va-card">
-      <div className="va-card-title">产物 · {files.length}</div>
-      {groups.length === 0 && <div className="va-card-line">等待阶段产物落盘…</div>}
-      {groups.map(({ stage, items }) => (
-        <div key={stage} className="va-art-group">
-          <div className="va-art-stage">
-            <StageBadge stage={stage} />
-            {STAGE_LABEL[stage]}
-          </div>
-          {items.map((f) => (
+      <div className="va-card-title">产物 · {fileCount}</div>
+      {groups.length === 0 && <div className="va-card-line">deploy/ 下暂无产物</div>}
+      {groups.map((g, i) => {
+        const open = toggles[g.dir] ?? i === 0 // 未动过的目录默认展开最新一组
+        return (
+          <div key={g.dir} className="va-art-group">
             <button
-              key={f.name}
-              className={`va-art-item${run.artifact?.name === f.name ? ' on' : ''}`}
-              onClick={() => store.openArtifact(run.runId, f.name)}
-              title={f.name}
+              className="va-art-dir-head"
+              onClick={() => setToggles({ ...toggles, [g.dir]: !open })}
+              title={g.dir}
             >
-              <span className="va-art-name">{f.name}</span>
-              <span className="va-art-size">{fmtSize(f.size)}</span>
+              <span className="va-art-dir-arrow">{open ? '▾' : '▸'}</span>
+              <span className="va-art-name">{g.dir || '(根目录)'}</span>
+              <span className="va-art-count">{g.files.length}</span>
             </button>
-          ))}
-        </div>
-      ))}
+            {open &&
+              g.files.map((f) => (
+                <button
+                  key={f.name}
+                  className={`va-art-item${s.artifact?.dir === g.dir && s.artifact?.name === f.name ? ' on' : ''}`}
+                  onClick={() => store.openArtifact(g.dir ? `${g.dir}/${f.name}` : f.name)}
+                  title={f.name}
+                >
+                  {f.stage ? <StageBadge stage={f.stage} /> : null}
+                  <span className="va-art-name">{f.name}</span>
+                  <span className="va-art-size">{fmtSize(f.size)}</span>
+                </button>
+              ))}
+          </div>
+        )
+      })}
     </div>
   )
 }
@@ -126,19 +137,19 @@ function ArtifactCard({ run }) {
 const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false }))
 
 // 产物 tab：markdown 经 marked 渲染（表格/代码块/验证契约 blockquote），json 原文展示
-function ArtifactView({ run }) {
-  const artifact = run.artifact
+function ArtifactView() {
+  const artifact = store.useRunState().artifact
   if (!artifact) {
-    return <div className="artifact-empty">点击左侧产物卡中的文件查看（随阶段推进解锁）</div>
+    return <div className="artifact-empty">点击左侧产物卡中的文件查看</div>
   }
   const isJson = artifact.name.endsWith('.json')
   const html = isJson ? '' : mdToHtml(artifact.content)
   return (
     <div className="va-artifact">
       <div className="va-artifact-head">
-        <StageBadge stage={artifact.stage} />
+        {artifact.stage && <StageBadge stage={artifact.stage} />}
         <span className="va-artifact-name">{artifact.name}</span>
-        <span className="va-artifact-dir">{run.artifacts.outputDir ?? ''}</span>
+        <span className="va-artifact-dir">{artifact.dir}</span>
       </div>
       {isJson ? (
         <pre className="va-artifact-raw">{artifact.content}</pre>
@@ -158,7 +169,7 @@ function TaskSide({ run, onClose }) {
         <button className="va-side-toggle" onClick={onClose} title="收起侧栏">«</button>
       </div>
       <div className="va-side-cards">
-        <ArtifactCard run={run} />
+        <ArtifactCard />
         {run?.status === 'CANCELED' && (
           <div className="va-card"><div className="va-card-title">会话已关闭</div>云上已提交的操作不受影响</div>
         )}
@@ -174,7 +185,7 @@ export default function App() {
   const [follow, setFollow] = useState(true)
   const [sideOpen, setSideOpen] = useState(true)
   const [tab, setTab] = useState('chat') // chat | artifact
-  const artifactCount = run?.artifacts?.files?.length ?? 0
+  const artifactCount = s.artifacts.groups.reduce((n, g) => n + g.files.length, 0)
 
   const scrollToBottom = () => {
     const el = scrollRef.current
@@ -192,8 +203,8 @@ export default function App() {
 
   // 侧栏点开产物后自动切到产物 tab
   useEffect(() => {
-    if (run?.artifact) setTab('artifact')
-  }, [run?.artifact?.name])
+    if (s.artifact) setTab('artifact')
+  }, [s.artifact?.dir, s.artifact?.name])
 
   // 切回会话 tab（含从产物查看返回）时滚到最新
   useEffect(() => {
@@ -286,7 +297,7 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <ArtifactView run={run} />
+                  <ArtifactView />
                 )}
               </div>
             </>

@@ -45,8 +45,6 @@ class Run:
         self.resume_session_id = None  # 创建时携带的续接源会话 id（工厂参数）
         self.resumed_from = None      # 续接来源 run_id（对外呈现）
         self.stop_requested = False   # 停止请求标记：run_agent 在回合收尾消费
-        self.output_dir = None        # 产物目录（INSTALL 后发现，见 artifacts.py）
-        self.artifact_after = None    # 产物发现基准时刻（续接 run 回溯到源 run 创建，见 artifacts.py）
         self.ended_at = None          # 终态时刻（历史回看的时长上限；非终态为 None）
 
     def summary(self):
@@ -94,8 +92,6 @@ class RunManager:
         if source is not None:
             run.resumed_from = source.run_id
             run.resume_session_id = source.session_id
-            # 同一逻辑部署跨 run 续接：产物发现基准回溯到源 run 创建时刻
-            run.artifact_after = source.created_at
         self.runs[run.run_id] = run
         return run
 

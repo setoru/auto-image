@@ -193,18 +193,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-tabs button:disabled { opacity: 0.4; }
 .va-tab-body { flex: 1; min-height: 0; display: flex; }
 
-/* ---------- 产物：侧栏产物卡 ---------- */
+/* ---------- 产物：侧栏产物卡（目录分组折叠） ---------- */
 
 .va-art-group { display: flex; flex-direction: column; gap: 2px; }
-.va-art-stage { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+/* 组头：目录名 + 文件数，点击展开/收起 */
+.va-art-dir-head {
+  display: flex; align-items: baseline; gap: 5px; width: 100%;
+  padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); text-align: left;
+}
+.va-art-dir-head:hover { background: var(--surface-dim); }
+.va-art-dir-arrow { flex-shrink: 0; width: 10px; color: var(--ink-3); font-weight: 400; }
+.va-art-count { margin-left: auto; flex-shrink: 0; color: var(--ink-3); font-size: 11px; font-weight: 400; }
 .va-art-item {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
   padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
   font-family: var(--mono); font-size: 12px; color: var(--ink); text-align: left;
 }
 .va-art-item:hover { background: var(--surface-dim); }
 .va-art-item.on { background: var(--surface-deep); font-weight: 600; }
-.va-art-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.va-art-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .va-art-size { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
 
 /* 阶段徽标：四阶段各一色（列表与产物 tab 头共用） */

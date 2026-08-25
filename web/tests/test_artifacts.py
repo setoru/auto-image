@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""产物端点主缝测试 —— meta.json 发现、清单解锁、内容读取、路径约束。
+"""产物端点主缝测试 —— deploy/ 全量浏览、目录分组排序、内容读取、路径约束。
 
 缝：同 test_api 的 ASGI 测试客户端；产物目录在临时目录造桩
-（artifact_root 注入），会话用假实现按剧本推进 stage，不触网不触云。
-纯 assert，无 pytest。
+（artifact_root 注入），浏览不依赖会话，无需剧本推进。纯 assert，无 pytest。
 
 运行：python web/tests/test_artifacts.py
 """
@@ -12,7 +11,6 @@ import json
 import os
 import sys
 import tempfile
-import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
@@ -27,31 +25,13 @@ VERIFY_FILES = ("nginx-verify-result.md", "nginx-verify-issues.md")
 ARCHIVE_FILES = ("nginx-archive-result.md", "nginx-deploy-list.md", "nginx-archive-issues.md")
 
 
-def stage_script(*subagents):
-    """剧本：对每个流水线子 agent 发一次 tool_use / tool_result，尾随 Result。
-
-    stage.changed 由 tool_use + subagent_type 推导（同 normalize 主缝路径）。
-    """
-    script = []
-    for i, subagent in enumerate(subagents, 1):
-        script.append({"type": "assistant", "message": {"content": [
-            {"type": "tool_use", "id": f"toolu_{i:02d}", "name": "Task",
-             "input": {"subagent_type": subagent, "prompt": "执行"}},
-        ]}})
-        script.append({"type": "user", "message": {"content": [
-            {"type": "tool_result", "tool_use_id": f"toolu_{i:02d}", "content": "done"},
-        ]}})
-    script.append({"type": "result", "subtype": "success", "result": "回合完成"})
-    return script
-
-
 def make_output_tree(root, rel, names, mtime=None):
     """在 artifact_root 下造一个产物目录（rel 相对路径），写入给定产物文件。
 
-    mtime 显式给定：默认的「写入时刻」与 run 创建只差几毫秒，文件系统
-    mtime 精度截断会偶发落到 run 开始之前，被发现逻辑的 mtime 过滤误伤。
+    mtime 显式给定：分组排序按组内文件 mtime 最大值，固定时间戳保证
+    断言确定（不与真实时钟竞速）。
     """
-    out = root / rel
+    out = root / rel if rel else root
     out.mkdir(parents=True, exist_ok=True)
     for name in names:
         path = out / name
@@ -80,211 +60,112 @@ archive_issues_file: "{{software}}-archive-issues.md"
 """
 
 
-def make_app(script, root):
+# 与生产同构：config 在根、产物在其下 deploy/ 子目录（config 不进浏览清单）
+def make_app(root):
     (root / "deploy.config.yaml").write_text(DEPLOY_CONFIG_STUB, encoding="utf-8")
+    (root / "deploy").mkdir(exist_ok=True)
     return create_app(
-        session_factory=FakeSessionFactory(script=script),
+        session_factory=FakeSessionFactory(script=[]),
         heartbeat_interval=0.05,
-        artifact_root=root,
+        artifact_root=root / "deploy",
         deploy_config=root / "deploy.config.yaml",
         list_sessions_fn=lambda: [],  # 不读本机真实 transcript
         scope_config=root / "scope-absent.yaml",  # 不载真实凭据（脱敏已知值清单隔离）
     )
 
 
-async def start_run(client, text="部署 nginx 1.25"):
-    """新建空会话并发首条指令，返回 (run_id, started_at)。"""
-    run_id = (await client.post("/api/runs", json={})).json()["run_id"]
-    started_at = (await client.get(f"/api/runs/{run_id}")).json()["started_at"]
-    await client.post(f"/api/runs/{run_id}/messages", json={"text": text})
-    return run_id, started_at
+async def run_with_client(root):
+    return async_client(make_app(root))
 
 
-async def wait_stage(client, run_id, want, timeout_s=5.0):
-    deadline = time.monotonic() + timeout_s
-    last = None
-    while time.monotonic() < deadline:
-        r = await client.get(f"/api/runs/{run_id}")
-        assert r.status_code == 200, r.text
-        last = r.json()
-        if last["stage"] == want:
-            return last
-        await asyncio.sleep(0.01)
-    raise AssertionError(f"stage 未推进到 {want}，当前 {last}")
-
-
-async def run_with_client(script, root):
-    return async_client(make_app(script, root))
-
-
-async def test_empty_before_install_stage():
+async def test_browse_groups_by_dir_latest_mtime_desc():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        async with await run_with_client(stage_script("deploy-guide"), root) as client:
-            run_id, _ = await start_run(client)
-            await wait_stage(client, run_id, "GUIDE")
-            # 产物目录尚未发现（INSTALL 未开始）：即使目录里已有文件也返回空
-            make_output_tree(root, "nginx/1.25", GUIDE_FILES + INSTALL_FILES + VERIFY_FILES + ARCHIVE_FILES)
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
+        deploy = root / "deploy"
+        deploy.mkdir()
+        make_output_tree(deploy, "nginx/1.25", GUIDE_FILES + INSTALL_FILES, mtime=2000)
+        make_output_tree(deploy, "redis/7.2", GUIDE_FILES, mtime=3000)
+        # 非约定文件（.v1 备份、杂项）与根下散落文件同样在场
+        make_output_tree(deploy, "pi/0.84", ("pi-config", "pi-install-result.md.v1", "pi-install-result.md"), mtime=1000)
+        (deploy / "README.md").write_text("根散落", encoding="utf-8")
+        os.utime(deploy / "README.md", (4000, 4000))
+        async with await run_with_client(root) as client:
+            r = await client.get("/api/artifacts")
             assert r.status_code == 200, r.text
-            assert r.json() == {"output_dir": None, "files": []}, r.json()
-
-
-async def test_install_stage_unlocks_guide_and_install_only():
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        async with await run_with_client(stage_script("deploy-guide", "deploy-install"), root) as client:
-            run_id, started_at = await start_run(client)
-            # 造桩（mtime 明确晚于 run 开始）：四阶段文件齐全，但解锁只到 INSTALL
-            out = make_output_tree(root, "nginx/1.25",
-                                   GUIDE_FILES + INSTALL_FILES + VERIFY_FILES + ARCHIVE_FILES,
-                                   mtime=started_at + 60)
-            await wait_stage(client, run_id, "INSTALL")
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["output_dir"] == str(out), body["output_dir"]
-            by_name = {f["name"]: f for f in body["files"]}
-            assert sorted(by_name) == sorted(GUIDE_FILES + INSTALL_FILES), by_name
-            for name in GUIDE_FILES:
-                assert by_name[name]["stage"] == "GUIDE", by_name[name]
-            for name in INSTALL_FILES:
-                assert by_name[name]["stage"] == "INSTALL", by_name[name]
+            groups = r.json()["groups"]
+            # 组序 = 组内最新落盘时间降序（根散落文件最晚 → 在前）
+            assert [g["dir"] for g in groups] == ["", "redis/7.2", "nginx/1.25", "pi/0.84"], groups
+            by_dir = {g["dir"]: g for g in groups}
+            # 约定文件带正确阶段；组内文件名升序
+            nginx = by_dir["nginx/1.25"]["files"]
+            assert [f["name"] for f in nginx] == sorted(f["name"] for f in nginx)
+            stages = {f["name"]: f["stage"] for f in nginx}
+            assert stages["nginx-install.md"] == "GUIDE"
+            assert stages["nginx-install-meta.json"] == "INSTALL"
+            # 非约定文件无徽标（stage None）且如实列出
+            pi_stages = {f["name"]: f["stage"] for f in by_dir["pi/0.84"]["files"]}
+            assert pi_stages["pi-config"] is None
+            assert pi_stages["pi-install-result.md.v1"] is None
+            assert pi_stages["pi-install-result.md"] == "INSTALL"
             # size 如实（内容长度）
-            assert by_name["nginx-install.md"]["size"] == (out / "nginx-install.md").stat().st_size
+            by_name = {f["name"]: f for f in nginx}
+            assert by_name["nginx-install.md"]["size"] == (deploy / "nginx/1.25/nginx-install.md").stat().st_size
 
 
-async def test_discovery_filters_by_mtime():
+async def test_browse_empty_root():
+    with tempfile.TemporaryDirectory() as tmp:
+        async with await run_with_client(Path(tmp)) as client:
+            r = await client.get("/api/artifacts")
+            assert r.status_code == 200, r.text
+            assert r.json() == {"groups": []}, r.json()
+
+
+async def test_read_returns_content():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        async with await run_with_client(stage_script("deploy-guide", "deploy-install"), root) as client:
-            run_id, started_at = await start_run(client)
-            # 只有早于本次 run 的旧 meta：被 mtime 过滤，清单为空
-            make_output_tree(root, "nginx/old", GUIDE_FILES + INSTALL_FILES, mtime=started_at - 100)
-            await wait_stage(client, run_id, "INSTALL")
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
-            assert r.json() == {"output_dir": None, "files": []}, r.json()
-            # 新 meta 落盘（mtime 晚于 run 开始）：目录随即被发现
-            fresh = make_output_tree(root, "redis/7.2", (), mtime=started_at + 120)
-            (fresh / "redis-install-meta.json").write_text("{}", encoding="utf-8")
-            os.utime(fresh / "redis-install-meta.json", (started_at + 120,) * 2)
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
-            assert r.json()["output_dir"] == str(fresh), r.json()
-
-
-async def test_full_run_unlocks_all_stages():
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        script = stage_script("deploy-guide", "deploy-install", "deploy-verify", "deploy-archive")
-        async with await run_with_client(script, root) as client:
-            run_id, started_at = await start_run(client)
-            out = make_output_tree(
-                root, "nginx/1.25",
-                GUIDE_FILES + INSTALL_FILES + VERIFY_FILES + ARCHIVE_FILES + ("nginx-pipeline-result.md",),
-                mtime=started_at + 60,
-            )
-            await wait_stage(client, run_id, "ARCHIVE")
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
-            by_name = {f["name"]: f for f in r.json()["files"]}
-            expected = (
-                GUIDE_FILES + INSTALL_FILES + VERIFY_FILES + ARCHIVE_FILES + ("nginx-pipeline-result.md",)
-            )
-            assert sorted(by_name) == sorted(expected), by_name
-            assert by_name["nginx-pipeline-result.md"]["stage"] == "ARCHIVE", by_name
-            assert by_name["nginx-verify-result.md"]["stage"] == "VERIFY", by_name
-
-
-async def test_verify_failure_leaves_archive_absent():
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        # verify 未通过：门禁在 skill 层，ARCHIVE 不执行、文件不存在，清单如实缺席
-        script = stage_script("deploy-guide", "deploy-install", "deploy-verify")
-        async with await run_with_client(script, root) as client:
-            run_id, started_at = await start_run(client)
-            make_output_tree(root, "nginx/1.25", GUIDE_FILES + INSTALL_FILES + VERIFY_FILES, mtime=started_at + 60)
-            await wait_stage(client, run_id, "VERIFY")
-            r = await client.get(f"/api/runs/{run_id}/artifacts")
-            by_stage = {f["stage"] for f in r.json()["files"]}
-            assert by_stage == {"GUIDE", "INSTALL", "VERIFY"}, by_stage
-
-
-async def test_content_returns_raw_text():
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        async with await run_with_client(stage_script("deploy-guide", "deploy-install"), root) as client:
-            run_id, started_at = await start_run(client)
-            out = make_output_tree(root, "nginx/1.25", GUIDE_FILES + INSTALL_FILES, mtime=started_at + 60)
-            await wait_stage(client, run_id, "INSTALL")
-            r = await client.get(f"/api/runs/{run_id}/artifacts/nginx-install.md")
+        deploy = root / "deploy"
+        deploy.mkdir()
+        make_output_tree(deploy, "nginx/1.25", GUIDE_FILES + INSTALL_FILES, mtime=1000)
+        make_output_tree(deploy, "pi/0.84", ("pi-config",), mtime=1000)
+        async with await run_with_client(root) as client:
+            r = await client.get("/api/artifacts/file/nginx/1.25/nginx-install.md")
             assert r.status_code == 200, r.text
             body = r.json()
             assert body["name"] == "nginx-install.md"
+            assert body["dir"] == "nginx/1.25"
             assert body["stage"] == "GUIDE"
-            assert body["content"] == (out / "nginx-install.md").read_text(encoding="utf-8")
-            # json 产物同样原文返回
-            r = await client.get(f"/api/runs/{run_id}/artifacts/nginx-install-meta.json")
+            assert body["content"] == (deploy / "nginx/1.25/nginx-install.md").read_text(encoding="utf-8")
+            # json 产物与非约定文件同样原文返回（后者 stage 为 None）
+            r = await client.get("/api/artifacts/file/nginx/1.25/nginx-install-meta.json")
             assert r.status_code == 200, r.text
             assert r.json()["stage"] == "INSTALL"
+            r = await client.get("/api/artifacts/file/pi/0.84/pi-config")
+            assert r.status_code == 200, r.text
+            assert r.json()["stage"] is None
 
 
-async def test_resume_run_sees_source_deployment_artifacts():
-    """续接会话的产物可见性：meta.json 落盘于源 run 生命周期内（mtime 早于
-    续接 run 创建），发现基准须回溯到源 run 创建时刻，否则续接 run 的产物卡
-    恒空（真实验收在跳过门禁续接剧本中发现）。"""
+async def test_read_traversal_and_missing_404():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)
-        script = stage_script("deploy-guide", "deploy-install", "deploy-archive")
-        async with await run_with_client(script, root) as client:
-            run_a, started_a = await start_run(client)
-            # 源 run 装完（meta mtime 在源 run 生命周期内、早于任何续接：
-            # 桩偏移 1 秒，续接前等待 1.2 秒拉开与 B 创建时刻的先后）
-            make_output_tree(root, "nginx/1.25",
-                             GUIDE_FILES + INSTALL_FILES + ARCHIVE_FILES,
-                             mtime=started_a + 1)
-            await wait_stage(client, run_a, "ARCHIVE")
-            r = await client.post(f"/api/runs/{run_a}/cancel")
-            assert r.status_code == 200, r.text
-            await asyncio.sleep(1.2)
-
-            run_b = (await client.post("/api/runs", json={"resume_from": run_a})).json()["run_id"]
-            await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续归档"})
-            await wait_stage(client, run_b, "ARCHIVE")
-            r = await client.get(f"/api/runs/{run_b}/artifacts")
-            assert r.status_code == 200, r.text
-            body = r.json()
-            assert body["output_dir"] is not None, "续接 run 应发现源部署的产物目录"
-            names = {f["name"] for f in body["files"]}
-            assert "nginx-install.md" in names and "nginx-deploy-list.md" in names, names
-
-
-async def test_traversal_and_unknown_names_404():
-    with tempfile.TemporaryDirectory() as tmp:
-        root = Path(tmp)
-        async with await run_with_client(stage_script("deploy-guide", "deploy-install"), root) as client:
-            run_id, started_at = await start_run(client)
-            make_output_tree(root, "nginx/1.25", GUIDE_FILES + INSTALL_FILES, mtime=started_at + 60)
-            await wait_stage(client, run_id, "INSTALL")
-            # 清单外的名字（未解锁、非产物模式、不存在、越界编码）一律 404；
-            # 明文 `..` 段在客户端即被规范化，到服务端的是编码形式
-            for name in (
-                "%2e%2e",
-                "nginx-verify-result.md",       # 存在但未解锁
-                "nginx-random.md",              # 不匹配产物文件名约定
-                "deploy.config.yaml",           # 目录外真实存在的文件
-                "..%2F..%2Fdeploy.config.yaml", # URL 编码的越界路径
+        deploy = root / "deploy"
+        deploy.mkdir()
+        make_output_tree(deploy, "nginx/1.25", GUIDE_FILES, mtime=1000)
+        async with await run_with_client(root) as client:
+            # 越界、缺失、指向目录、二进制/空路径一律 404；明文 `..` 段在客户端
+            # 即被规范化，到服务端的是编码形式
+            for rel in (
+                "..%2F..%2Fdeploy.config.yaml",  # URL 编码的越界路径
                 "%2e%2e%2f%2e%2e%2fscope.yaml",
+                "%2Fetc%2Fpasswd",               # 绝对路径（Path / "/abs" 会丢根）
+                "nginx/1.25",                    # 指向目录本身
+                "nginx/1.25/nginx-absent.md",    # 不存在
+                "nginx%2F..%2F..%2FREADME.md",   # 目录段内夹带 ..
             ):
-                r = await client.get(f"/api/runs/{run_id}/artifacts/{name}")
-                assert r.status_code == 404, (name, r.text)
-
-
-async def test_unknown_run_404():
-    with tempfile.TemporaryDirectory() as tmp:
-        async with await run_with_client(stage_script("deploy-guide"), Path(tmp)) as client:
-            r = await client.get("/api/runs/run_missing/artifacts")
-            assert r.status_code == 404
-            r = await client.get("/api/runs/run_missing/artifacts/x.md")
-            assert r.status_code == 404
+                r = await client.get(f"/api/artifacts/file/{rel}")
+                assert r.status_code == 404, (rel, r.text)
+            # 空 rel（路由命中但路径为空）
+            r = await client.get("/api/artifacts/file/")
+            assert r.status_code == 404, r.text
 
 
 async def main():

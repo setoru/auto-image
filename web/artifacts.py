@@ -1,30 +1,22 @@
-"""产物发现与查看：目录发现（install-meta.json 驱动）、按阶段解锁的清单、内容读取。
+"""deploy/ 全量产物浏览：目录分组清单、内容读取与路径约束。
 
-产物目录的发现不靠猜：INSTALL 阶段开始后才扫描 artifact_root 下的
-`*-install-meta.json`（mtime 晚于本次 run 创建的取最新），meta.json 所在
-目录即 output_dir——meta.json 内并无目录字段（其 `path` 字段是 ECS 创建
-路径 create/existing），目录由 deploy.config.yaml 的「meta 文件位于
-output_dir 下」约定决定。此前清单为空，GUIDE 产物在目录被发现后一并可见。
+产物由 deploy 流水线按 deploy.config.yaml 约定落盘在
+deploy/<software>/<version>/ 下；本模块只读浏览全部产物（含历史轮次、
+重跑备份与杂项文件），不做任何按会话/阶段的过滤——侧栏产物区即
+deploy/ 的镜像，约定命名的文件带阶段徽标（文件名从 config 派生，
+{{software}} 占位剥去得后缀），非约定的（.v1 备份、人工杂项）无徽标
+平铺。
 
-阶段解锁：产物文件名从 deploy.config.yaml 派生（{{software}} 占位剥去得
-后缀），文件归入所属阶段，清单只含 run 已进入阶段的文件——同软件同版本
-重跑时旧一轮的后续阶段产物仍在目录里，但本次 run 未到达，不展示；匹配
-不上约定后缀的文件（.v1 重跑备份、人工杂项）不展示；verify 未通过时
-ARCHIVE 产物自然缺席（门禁在 skill 层，此处如实呈现）。
-
-路径约束（内容端点）：名字必须出现在清单中，且拼接 resolve 后仍位于
-output_dir 内；两者任一不满足按 404 处理——服务不是任意文件读取器。
+路径约束（内容端点）：相对路径拼接 resolve 后必须仍位于产物根内且
+是普通文件，否则按 404 处理——服务不是任意文件读取器。
 """
 import os
 from pathlib import Path
 
 import yaml
 
-# 阶段推进顺序（解锁判定：文件所属阶段须已被 run 进入）
-STAGE_ORDER = {"GUIDE": 0, "INSTALL": 1, "VERIFY": 2, "ARCHIVE": 3}
-
 # deploy.config.yaml 的产物文件键 → 所属阶段（config 是文件名的唯一权威源，
-# 改名 / 加键只动 config：改名自动跟随，新键不在此映射即不列出）
+# 改名 / 加键只动 config：改名自动跟随，新键不在此映射即无徽标）
 CONFIG_KEY_STAGES = {
     "install_file": "GUIDE",
     "verify_file": "GUIDE",
@@ -56,64 +48,53 @@ def load_file_stages(config_path):
 
 
 def stage_for_file(name, file_stages):
-    """产物文件名 → 所属阶段；非约定产物名返回 None（兜底不展示）。"""
+    """产物文件名 → 所属阶段；非约定产物名返回 None（无徽标平铺）。"""
     for suffix, stage in file_stages:
         if name.endswith(suffix):
             return stage
     return None
 
 
-def discover_output_dir(artifact_root, started_after):
-    """扫描全部 *-install-meta.json，取 mtime 晚于 started_after 的最新一个，
-    返回其所在目录；无命中返回 None（旧一轮的 meta 不算本次 run 的产物目录）。"""
-    latest = None
-    for meta in Path(artifact_root).glob("**/*-install-meta.json"):
-        mtime = os.stat(meta).st_mtime
-        if mtime > started_after and (latest is None or mtime > latest[0]):
-            latest = (mtime, meta.parent)
-    return latest[1] if latest else None
+def browse(artifact_root, file_stages):
+    """全树清单：按相对根的父目录分组，组间最新落盘时间降序、组内文件名升序。
+
+    组的排序键取组内文件 mtime 的最大值（逐文件 stat 已为 size 做，零额外
+    开销；目录自身 mtime 在原位重写文件时不更新，不可靠）。根下散落的
+    文件归 dir 为 "" 的组。stat 失败的文件跳过（竞态消失，如实缺席）。
+    """
+    groups = {}
+    for dirpath, _dirnames, filenames in os.walk(artifact_root):
+        rel_dir = Path(dirpath).relative_to(artifact_root).as_posix()
+        if rel_dir == ".":
+            rel_dir = ""
+        for name in filenames:
+            try:
+                stat = os.stat(Path(dirpath) / name)
+            except OSError:
+                continue
+            stage = stage_for_file(name, file_stages)
+            group = groups.setdefault(rel_dir, {"mtime": 0.0, "files": []})
+            group["mtime"] = max(group["mtime"], stat.st_mtime)
+            group["files"].append({"name": name, "stage": stage, "size": stat.st_size})
+    ordered = []
+    for rel_dir in sorted(groups, key=lambda d: (-groups[d]["mtime"], d)):
+        files = sorted(groups[rel_dir]["files"], key=lambda f: f["name"])
+        ordered.append({"dir": rel_dir, "files": files})
+    return {"groups": ordered}
 
 
-def snapshot(run, artifact_root, file_stages):
-    """产物清单：发现（惰性，一次 run 只发现一次）+ 按当前阶段解锁过滤。
-
-    发现基准取 run.artifact_after（续接 run 回溯到源 run 创建时刻——同一
-    逻辑部署的 meta 落盘早于续接 run，但属于它），否则本 run 创建时刻。"""
-    # INSTALL 开始前不扫描：GUIDE 阶段的目录归属尚不可判定；扫描而无命中同样空清单
-    if run.output_dir is None and STAGE_ORDER.get(run.stage, -1) >= STAGE_ORDER["INSTALL"]:
-        run.output_dir = discover_output_dir(artifact_root, run.artifact_after or run.created_at)
-    if run.output_dir is None:
-        return {"output_dir": None, "files": []}
-    return {"output_dir": str(run.output_dir), "files": _unlocked_files(run.output_dir, run.stage, file_stages)}
-
-
-def find(run, artifact_root, file_stages, name):
-    """内容端点的读取入口：清单命中后拼接并校验仍在产物目录内，
-    返回 (条目, 路径)；未命中或越界返回 None（调用方按 404 处理）。"""
-    snap = snapshot(run, artifact_root, file_stages)  # 与清单同一发现与解锁路径，无第二套判定
-    entry = next((f for f in snap["files"] if f["name"] == name), None)
-    if entry is None:
+def read(artifact_root, file_stages, rel_path):
+    """内容端点的读取入口：约束在产物根内的普通文件，返回 (条目, 路径)；
+    越界、缺失或非文件返回 None（调用方按 404 处理）。"""
+    if not rel_path or Path(rel_path).is_absolute():
+        return None  # 绝对路径与空串前置拒绝（Path / "/abs" 会整体替换根）
+    root = Path(artifact_root).resolve()
+    target = (root / rel_path).resolve()
+    if not target.is_relative_to(root) or not target.is_file():
         return None
-    target = (run.output_dir / name).resolve()
-    if not target.is_relative_to(run.output_dir.resolve()):
-        return None
+    entry = {
+        "dir": target.parent.relative_to(root).as_posix(),
+        "name": target.name,
+        "stage": stage_for_file(target.name, file_stages),
+    }
     return entry, target
-
-
-def _unlocked_files(output_dir, stage, file_stages):
-    unlocked = STAGE_ORDER.get(stage, -1)
-    files = []
-    try:
-        paths = sorted(os.listdir(output_dir))
-    except OSError:
-        return files  # 目录被移动/删除：清单如实为空
-    for name in paths:
-        file_stage = stage_for_file(name, file_stages)
-        if file_stage is None or STAGE_ORDER[file_stage] > unlocked:
-            continue
-        try:
-            size = os.stat(output_dir / name).st_size
-        except OSError:
-            continue  # 竞态消失的文件跳过
-        files.append({"name": name, "stage": file_stage, "size": size})
-    return files

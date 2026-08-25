@@ -147,23 +147,23 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             pass
         return {"run_id": run.run_id, "status": run.status}
 
-    @app.get("/api/runs/{run_id}/artifacts")
-    async def list_artifacts(run_id: str):
-        run = _get_run_or_404(manager, run_id)
-        return artifacts_mod.snapshot(run, artifact_root, file_stages)
+    # 产物浏览不依赖会话存在（deploy/ 全量镜像，含历史轮次）
+    @app.get("/api/artifacts")
+    async def list_artifacts():
+        return artifacts_mod.browse(artifact_root, file_stages)
 
-    @app.get("/api/runs/{run_id}/artifacts/{file_name}")
-    async def read_artifact(run_id: str, file_name: str):
-        run = _get_run_or_404(manager, run_id)
-        found = artifacts_mod.find(run, artifact_root, file_stages, file_name)
+    # /file/ 前缀段：{rel_path:path} 可匹配空串，无前缀段会与清单端点路由歧义
+    @app.get("/api/artifacts/file/{rel_path:path}")
+    async def read_artifact(rel_path: str):
+        found = artifacts_mod.read(artifact_root, file_stages, rel_path)
         if found is None:
             raise HTTPException(status_code=404, detail="artifact not found")
         entry, target = found
         try:
             content = target.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):  # 二进制产物按不可读处理，不 500
             raise HTTPException(status_code=404, detail="artifact not found") from None
-        return {"name": entry["name"], "stage": entry["stage"], "content": content}
+        return {**entry, "content": content}
 
     @app.get("/api/runs/{run_id}/events")
     async def event_stream(run_id: str, request: Request):

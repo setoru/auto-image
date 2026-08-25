@@ -22,7 +22,8 @@ export const EVENT_TYPES = [
   'run.ended',
 ]
 
-// 会触发产物清单刷新的事件：阶段推进（新产物落盘）与回合/会话收尾
+// 会触发产物清单刷新的事件：阶段推进（新产物落盘）与回合/会话收尾。
+// 清单是 deploy/ 全量镜像（与查看中的会话无关），任一 run 触发都全局刷新
 const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'run.canceled', 'run.failed', 'run.ended']
 
 const RUNNING = 'RUNNING'
@@ -41,7 +42,16 @@ const CONFLICT_HINT = {
 
 const listeners = new Set()
 // order 即任务下拉次序：最新在前（服务端列表同序，新建前插）
-let state = { runs: {}, order: [], viewRunId: null, submitError: null, resumeLast: false, now: Date.now() }
+let state = {
+  runs: {},
+  order: [],
+  viewRunId: null,
+  submitError: null,
+  resumeLast: false,
+  now: Date.now(),
+  artifacts: { groups: [] }, // deploy/ 全量产物（目录分组，全局不属于任何 run）
+  artifact: null,            // 当前查看中的产物内容（单槽，点击整体替换）
+}
 
 // 时长走针仅在会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
 setInterval(() => {
@@ -124,7 +134,7 @@ function onStreamEvent(runId, es, e) {
   const event = { seq: Number(e.lastEventId), type: e.type, payload: JSON.parse(e.data) }
   appendTo(runId, event)
   // 阶段推进与终态都可能带来新落盘的产物，触发清单刷新
-  if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts(runId)
+  if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
   // 终态事件后服务端会正常结束流，主动 close 避免 EventSource 无限重连
   // （run.ended 是重启找回历史的收尾：只读回放完毕即关流）
   if (event.type === 'run.failed' || event.type === 'run.canceled' || event.type === 'run.ended') es.close()
@@ -183,8 +193,6 @@ function makeRun(overrides) {
     startedAt: null,
     endedAt: null,
     es: null,
-    artifacts: { outputDir: null, files: [] },
-    artifact: null,
     ...overrides,
   }
 }
@@ -305,35 +313,34 @@ export function selectRun(runId) {
 
 // ---------- 产物 ----------
 
-// 清单刷新：阶段推进/终态事件触发；服务端按已进入阶段解锁文件，产物只读
-export async function refreshArtifacts(runId) {
-  const run = state.runs[runId]
-  if (!run) return
+// 清单刷新：阶段推进/终态事件触发（无 run 参数，全局镜像）
+export async function refreshArtifacts() {
   try {
-    const resp = await fetch(`/api/runs/${runId}/artifacts`)
+    const resp = await fetch('/api/artifacts')
     if (!resp.ok) return
-    setRun(runId, { artifacts: await resp.json() })
+    set({ artifacts: await resp.json() })
   } catch {
     // 清单刷新是尽力而为：失败不打断会话观察，下次阶段事件再试
   }
 }
 
-// 查看单个产物：内容按需拉取（缓存于 run.artifact），产物 tab 渲染
-export async function openArtifact(runId, name) {
-  const run = state.runs[runId]
-  if (!run) return
+// 查看单个产物：内容按需拉取（缓存于全局单槽），产物 tab 渲染。
+// relPath 形如 "pi/0.84.2/pi-config"；逐段编码（整段 encode 会把 / 也编码）
+export async function openArtifact(relPath) {
   try {
-    const resp = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`)
+    const resp = await fetch(`/api/artifacts/file/${relPath.split('/').map(encodeURIComponent).join('/')}`)
     const data = await resp.json().catch(() => ({}))
     if (!resp.ok) {
       fail(`打开产物失败：${data.detail || `HTTP ${resp.status}`}`)
       return
     }
-    setRun(runId, { artifact: data })
+    set({ artifact: data })
   } catch (err) {
     fail(`打开产物失败：${err.message}`)
   }
 }
 
-// 启动即恢复任务列表（含服务重启后经 transcript 重建的历史）
+// 启动即恢复任务列表（含服务重启后经 transcript 重建的历史）与产物清单
+// （loadRuns 无历史时提前 return，产物首刷不能依赖它）
 loadRuns()
+refreshArtifacts()

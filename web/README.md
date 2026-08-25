@@ -11,9 +11,9 @@
 pip install --break-system-packages -r web/requirements.txt   # 装进系统（本机现状）
 python3 -m venv .venv && . .venv/bin/activate \
   && pip install -r web/requirements.txt                      # 或 venv 隔离
-python -m web            # 默认 127.0.0.1:8000
+python -m web            # 默认 127.0.0.1:8123
 WEB_PORT=8765 python -m web             # 换端口
-WEB_HOST=0.0.0.0 WEB_PORT=8000 python -m web   # 外部可访问（见下）
+WEB_HOST=0.0.0.0 WEB_PORT=8123 python -m web   # 外部可访问（见下）
 ```
 
 默认只监听 127.0.0.1（无认证服务，能访问即能触发真实云操作）。
@@ -23,8 +23,8 @@ WEB_HOST=0.0.0.0 WEB_PORT=8000 python -m web   # 外部可访问（见下）
 
 前端两种打开方式：
 
-- 生产形态：`cd web-ui && npm run build` 后直接访问 `http://127.0.0.1:8000/`（FastAPI 挂载 `web-ui/dist`）；
-- 开发形态：`cd web-ui && npm run dev` 后访问 `http://127.0.0.1:5173/`（`/api` 由 Vite 代理到 FastAPI 的 8000 端口）。
+- 生产形态：`cd web-ui && npm run build` 后直接访问 `http://127.0.0.1:8123/`（FastAPI 挂载 `web-ui/dist`）；
+- 开发形态：`cd web-ui && npm run dev` 后访问 `http://127.0.0.1:5173/`（`/api` 由 Vite 代理到 FastAPI 的 8123 端口）。
 
 ## 测试（主缝：HTTP 进、SSE 出）
 
@@ -46,7 +46,7 @@ python web/tests/test_sdk.py        # options 契约（系统提示词、固定�
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
-| `artifacts.py` | 产物发现（install-meta.json mtime 驱动）、按阶段解锁的清单、内容读取与路径约束 |
+| `artifacts.py` | deploy/ 全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取与路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的历史重建：list_sessions / get_session_messages 以 session 粒度找回历史 run（ENDED，只读可续接） |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
@@ -101,25 +101,20 @@ python web/tests/test_sdk.py        # options 契约（系统提示词、固定�
    WAITING_INPUT；更早一轮还出现过并发派发上百次 guide 的调度风暴（20 实例
    触发 429，agent 自行终止后恢复）。系统提示词以执行纪律约束：至多一个
    子 agent 在跑、派发后 TaskOutput 阻塞等待、四阶段完成才收尾回合。
-11. **续接 run 的产物发现基准**（门禁续接剧本实测）：产物目录以 meta.json
-   mtime 晚于 run 创建过滤「旧一轮」，续接 run 创建晚于源部署的 meta 落盘，
-   基准须回溯到源 run 创建时刻（`Run.artifact_after`），否则续接 run 的
-   产物清单恒空。
-
-12. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
+11. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
    回合执行中的本地 Bash 子进程**随打断被终止**（实测 `sleep 222` 在
    interrupt 后即刻消失），CLI 子进程保留、连接可续聊。已提交的云操作
    （HTTP API 类：创建 ECS、制镜像等）不受任何影响——打断只作用于后续
    动作，界面在 `turn.stopped` 块与停止按钮上如实提示「已提交的云操作
    不受停止影响，无法撤销」。
-13. **cancel（断连）的终止边界**：回合执行中直接断开 SDK 连接（= run_task
+12. **cancel（断连）的终止边界**：回合执行中直接断开 SDK 连接（= run_task
    取消后 `__aexit__` 的路径）后 3 秒内：CLI 子进程**全部退出、无残留**
    （配合服务重启语义中的 pgrep 告警兜底），正在执行的本地 Bash 子进程
    同样被终止（实测 `sleep 333` 消失）。远程命令经 ssh 转发：客户端进程
    被杀断开连接，远端进程是否终止取决于远端 shell 配置，**不保证**——
    按「已提交的云操作不可撤销」对待。断连后以 `resume=session_id` 新建
    会话实测可续接，上下文完整（能复述被打断前的指令）。
-14. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
+13. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
    全量重建约 2 秒）：`get_session_messages` 只回可见的 user/assistant 链
    （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
