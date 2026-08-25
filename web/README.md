@@ -28,7 +28,7 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 | 文件 | 职责 |
 | --- | --- |
 | `app.py` | FastAPI 应用工厂、API 路由、SSE 流（id=seq、Last-Event-ID 重放、心跳保活） |
-| `runs.py` | 会话状态机（RUNNING 唯一、挂起并存）与 409 判定 |
+| `runs.py` | 会话状态机（RUNNING 唯一、挂起并存）、干预（intervene）与 409 判定 |
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
@@ -53,11 +53,12 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 4. **tools 必须显式给 `claude_code` 预设**：SDK 不配 `tools` 时 CLI 基础
    工具集不含子 agent 工具（agent 自查工具目录无 Task/Agent），四阶段
    流水线无从推进——`--tools default` 后才有。
-5. **interrupt 行为**（方案风险点二，为干预语义铺路）：回合执行中
-   `interrupt()` 后消息流**自然终止**（`receive_response` 迭代器结束），
-   尾随一条 `subtype="error_during_execution"`、`is_error=True`、result
-   文本为空的 Result；同一会话随后 `query` 续聊正常，打断前的上下文保留。
-   干预语义需按此形态区分 `turn.stopped` 与正常 `turn.completed`。
+5. **interrupt 行为**：回合执行中 `interrupt()` 后消息流**自然终止**
+   （`receive_response` 迭代器结束），尾随一条 `subtype="error_during_execution"`、
+   `is_error=True`、`result=None` 的 Result（后接的 UserMessage 为被中断
+   工具的错误 tool_result，照常走 tool_finished 映射）；同一会话随后
+   `query` 续聊正常，打断前的上下文保留。服务端以自己的 `stop_requested`
+   标记区分 `turn.stopped` 与 `turn.completed`，不解析该 Result 的文案。
 6. **联网链路**（方案风险点三）：SDK 会话内内置 `WebFetch` 被域名安全校验
    拦截（"Unable to verify if domain ... is safe to fetch"）、`WebSearch`
    在权限层被拒——与仓库 CLAUDE.md 记录一致。已按方案经 options 的
@@ -65,9 +66,21 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
    配 `allowed_tools=["mcp__exa-search__*"]` 放行；复测抓取 nginx.org
    成功。内置工具中 Bash 等随 `claude_code` 预设默认放行，无需额外配置。
 7. **回合上限**：`max_turns=200` 已配；回合级 wall-clock 超时属终局语义
-   （`run.failed` 路径），随干预与终局语义接入。
+   （`run.failed` 路径），尚未接入（干预语义已就绪，超时随需要补）。
 
-## 已知噪音
+8. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
+   回合执行中的本地 Bash 子进程**随打断被终止**（实测 `sleep 222` 在
+   interrupt 后即刻消失），CLI 子进程保留、连接可续聊。已提交的云操作
+   （HTTP API 类：创建 ECS、制镜像等）不受任何影响——打断只作用于后续
+   动作，界面在 `turn.stopped` 块与停止按钮上如实提示「已提交的云操作
+   不受停止影响，无法撤销」。
+9. **cancel（断连）的终止边界**：回合执行中直接断开 SDK 连接（= run_task
+   取消后 `__aexit__` 的路径）后 3 秒内：CLI 子进程**全部退出、无残留**
+   （配合服务重启语义中的 pgrep 告警兜底），正在执行的本地 Bash 子进程
+   同样被终止（实测 `sleep 333` 消失）。远程命令经 ssh 转发：客户端进程
+   被杀断开连接，远端进程是否终止取决于远端 shell 配置，**不保证**——
+   按「已提交的云操作不可撤销」对待。断连后以 `resume=session_id` 新建
+   会话实测可续接，上下文完整（能复述被打断前的指令）。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。

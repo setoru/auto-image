@@ -80,6 +80,20 @@ async def wait_status(client, run_id, want, timeout_s=5.0):
     raise AssertionError(f"run {run_id} 未进入 {want}，最后状态 {last}")
 
 
+async def wait_replay(client, run_id, ok, timeout_s=8.0):
+    """轮询全量事件重放直到 ok(events) 满足（回合收尾是异步的，
+    状态转挂起与事件落库之间可能隔着第二回合的启动）。"""
+    deadline = time.monotonic() + timeout_s
+    events = []
+    while time.monotonic() < deadline:
+        resp = await open_stream(client, run_id)
+        events, _ = await collect_sse(resp, deadline_s=0.6)
+        await resp.aclose()
+        if events and ok(events):
+            return events
+    raise AssertionError(f"事件流未满足条件，当前 {[e['event'] for e in events]}")
+
+
 async def open_stream(client, run_id, last_event_id=None):
     headers = {"Last-Event-ID": str(last_event_id)} if last_event_id else {}
     return await client.send(
@@ -263,11 +277,7 @@ async def test_messages_conflicts():
         # 不存在的 run
         r = await client.post("/api/runs/run_missing/messages", json={"text": "x"})
         assert r.status_code == 404
-        # 回合执行中向同一会话发指令：本版本直接拒绝（先停后发属后续干预语义）
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
-        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "再干点别的"})
-        assert r.status_code == 409
-        assert r.json()["detail"] == "execution_in_progress"
         await wait_status(client, run_id, "WAITING_INPUT")
         # 另一会话执行中向挂起会话发指令
         run_b = (await client.post("/api/runs", json={})).json()["run_id"]
@@ -311,6 +321,203 @@ async def test_unknown_run_events_404():
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         r = await client.get("/api/runs/run_missing/events")
+        assert r.status_code == 404
+
+
+
+async def test_stop_returns_to_waiting_and_session_continues():
+    # 慢剧本保证 stop 必落在回合执行中（快剧本下时序不稳）
+    app = make_app(delay=0.2)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        r = await client.post(f"/api/runs/{run_id}/stop", json={})
+        assert r.status_code == 200, r.text
+        await wait_status(client, run_id, "WAITING_INPUT", timeout_s=8.0)
+
+        # 会话保留：停止后可继续任意指令
+        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "删掉刚创建的 ECS"})
+        assert r.status_code == 200, r.text
+        events = await wait_replay(
+            client, run_id,
+            lambda evs: [e["event"] for e in evs].count("user.message") == 2
+            and evs[-1]["event"] == "turn.completed",
+        )
+        types = [e["event"] for e in events]
+        assert types.count("turn.stopped") == 1, types
+        assert types.count("turn.completed") == 1, types  # 仅第二回合正常收尾
+        ums = [i for i, t in enumerate(types) if t == "user.message"]
+        assert ums[0] < types.index("turn.stopped") < ums[1], types
+
+
+async def test_stop_with_text_stops_then_delivers():
+    app = make_app(delay=0.2)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx 1.25 到 server-a"})
+        r = await client.post(f"/api/runs/{run_id}/stop", json={"text": "跳过验证直接打包"})
+        assert r.status_code == 200, r.text
+        events = await wait_replay(
+            client, run_id,
+            lambda evs: [e["event"] for e in evs].count("user.message") == 2
+            and evs[-1]["event"] == "turn.completed",
+        )
+        types = [e["event"] for e in events]
+        assert types.count("turn.stopped") == 1, types
+        assert types[-1] == "turn.completed", types
+        texts = [e["data"]["text"] for e in events if e["event"] == "user.message"]
+        assert texts == ["部署 nginx 1.25 到 server-a", "跳过验证直接打包"], texts
+        # 停止与投递的先后在事件流上可分辨
+        ums = [i for i, t in enumerate(types) if t == "user.message"]
+        assert ums[0] < types.index("turn.stopped") < ums[1], types
+
+
+async def test_message_while_running_stops_first_then_delivers():
+    app = make_app(delay=0.2)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        # 执行中直接发新指令：不再 409，服务端先停止再投递
+        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "删掉刚创建的 ECS"})
+        assert r.status_code == 200, r.text
+        events = await wait_replay(
+            client, run_id,
+            lambda evs: [e["event"] for e in evs].count("user.message") == 2
+            and evs[-1]["event"] == "turn.completed",
+        )
+        types = [e["event"] for e in events]
+        assert types.count("turn.stopped") == 1, types
+        assert types.count("user.message") == 2, types
+        assert types[-1] == "turn.completed", types
+        ums = [i for i, t in enumerate(types) if t == "user.message"]
+        assert ums[0] < types.index("turn.stopped") < ums[1], types
+
+
+async def test_cancel_terminal_semantics():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        r = await client.post(f"/api/runs/{run_a}/cancel", json={})
+        assert r.status_code == 200, r.text
+        assert r.json()["status"] == "CANCELED"
+        # 终态后三个干预端点全部拒绝
+        for path in ("messages", "stop", "cancel"):
+            r = await client.post(f"/api/runs/{run_a}/{path}", json={"text": "继续"} if path == "messages" else {})
+            assert r.status_code == 409, (path, r.text)
+            assert r.json() == {"detail": "run_not_active"}, (path, r.text)
+        # 事件流以 run.canceled 收尾并正常关闭（后续阶段不再推进）
+        resp = await open_stream(client, run_a)
+        events, pings = await collect_sse(resp, deadline_s=2.0)
+        types = [e["event"] for e in events]
+        assert types[-1] == "run.canceled", types
+        assert pings == 0, pings
+
+        # 挂起会话同样可关闭
+        run_b = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_b}/messages", json={"text": "部署 redis"})
+        await wait_status(client, run_b, "WAITING_INPUT")
+        r = await client.post(f"/api/runs/{run_b}/cancel", json={})
+        assert r.status_code == 200, r.text
+        assert (await client.get(f"/api/runs/{run_b}")).json()["status"] == "CANCELED"
+
+
+async def test_stop_on_waiting_run():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # 挂起中无回合可停：无 text 幂等无操作
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_a, "WAITING_INPUT")
+        r = await client.post(f"/api/runs/{run_a}/stop", json={})
+        assert r.status_code == 200, r.text
+        assert (await client.get(f"/api/runs/{run_a}")).json()["status"] == "WAITING_INPUT"
+        resp = await open_stream(client, run_a)
+        events, _ = await collect_sse(resp, deadline_s=1.0)
+        assert [e["event"] for e in events].count("turn.stopped") == 0
+
+        # 带 text 时停止目标已达成（无执行），直接投递
+        r = await client.post(f"/api/runs/{run_a}/stop", json={"text": "继续"})
+        assert r.status_code == 200, r.text
+        await wait_status(client, run_a, "WAITING_INPUT")
+        resp = await open_stream(client, run_a)
+        events, _ = await collect_sse(resp, deadline_s=1.0)
+        types = [e["event"] for e in events]
+        assert types.count("user.message") == 2, types
+        assert types.count("turn.stopped") == 0, types
+        assert types[-1] == "turn.completed", types
+
+
+async def test_resume_from_canceled_run_carries_session():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_a, "WAITING_INPUT")
+        await client.post(f"/api/runs/{run_a}/cancel", json={})
+
+        r = await client.post("/api/runs", json={"resume_from": run_a})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["resumed_from"] == run_a
+        assert body["status"] == "WAITING_INPUT"
+        # 工厂收到源 run 的 SDK 会话 id（来自其回合 Result），而非全新会话
+        assert app.state.session_factory.session_ids == [None, "sess_fake_1"]
+
+        # 续接会话照常执行首条指令
+        run_b = body["run_id"]
+        r = await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续之前的部署"})
+        assert r.status_code == 200, r.text
+        await wait_status(client, run_b, "WAITING_INPUT")
+        resp = await open_stream(client, run_b)
+        events, _ = await collect_sse(resp, deadline_s=1.0)
+        assert [e["event"] for e in events][-1] == "turn.completed"
+
+
+async def test_resume_from_failed_run_allowed():
+    fail_script = list(DEFAULT_SCRIPT) + [RuntimeError("boom")]
+    app = make_app(script=fail_script)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_a, "FAILED")
+        r = await client.post("/api/runs", json={"resume_from": run_a})
+        assert r.status_code == 200, r.text
+        assert r.json()["resumed_from"] == run_a
+        assert app.state.session_factory.session_ids == [None, "sess_fake_1"]
+
+
+async def test_resume_from_non_terminal_run_conflicts():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        # 挂起（非终态）不可续接
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        r = await client.post("/api/runs", json={"resume_from": run_a})
+        assert r.status_code == 409
+        assert r.json() == {"detail": "session_in_use"}
+        # 执行中的源不可达 session_in_use：有会话执行时任何新建（含续接）
+        # 先撞新建互斥，判定顺序如实呈现
+        run_b = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_b}/messages", json={"text": "部署 nginx"})
+        r = await client.post("/api/runs", json={"resume_from": run_b})
+        assert r.status_code == 409
+        assert r.json() == {"detail": "deployment_in_progress"}
+        await wait_status(client, run_b, "WAITING_INPUT")
+
+
+async def test_resume_from_unknown_run_404():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        r = await client.post("/api/runs", json={"resume_from": "run_missing"})
         assert r.status_code == 404
 
 

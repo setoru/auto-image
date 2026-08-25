@@ -20,6 +20,7 @@ export default function ChatBar() {
     if (!text.trim()) return
     if (await store.send(text)) setText('')
   }
+  // 停止只打断后续动作：已提交的云操作不可撤销（与消息流提示一致）
   const act = () => (run?.status === 'RUNNING' && !text.trim() ? store.stop() : send())
 
   let btnLabel, btnDisabled
@@ -63,7 +64,12 @@ export default function ChatBar() {
         onChange={(e) => setText(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && !btnDisabled && act()}
       />
-      <button className="chat-act" onClick={act} disabled={btnDisabled}>
+      <button
+        className="chat-act"
+        onClick={act}
+        disabled={btnDisabled}
+        title={btnLabel === '■ 停止' ? '停止当前回合（Esc 等效）；已提交的云操作不受影响' : btnLabel}
+      >
         {btnLabel}
       </button>
     </div>

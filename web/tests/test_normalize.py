@@ -180,7 +180,7 @@ def test_to_dict_result_message():
         num_turns=2, session_id="s1", result="回合汇总文本",
     )
     d = to_dict(msg)
-    assert d == {"type": "result", "subtype": "success", "result": "回合汇总文本"}
+    assert d == {"type": "result", "subtype": "success", "result": "回合汇总文本", "session_id": "s1"}
     assert is_final_result(d)
 
 

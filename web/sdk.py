@@ -31,14 +31,16 @@ THINKING_BUDGET_TOKENS = 10000
 EXA_MCP_SERVER = {"type": "stdio", "command": "npx", "args": ["-y", "exa-mcp-server"], "env": {}}
 
 
-def default_options():
+def default_options(resume_session_id=None):
     """SDK options 全配：cwd=项目根，setting_sources 不设（SDK 默认
     user/project/local，project source 从 cwd 发现 .claude/ 与 CLAUDE.md）。
 
     tools 必须显式给 claude_code 预设（--tools default）：SDK 不传 --tools
-    时 CLI 的基础工具集不含子 agent 工具，四阶段流水线无从推进。"""
+    时 CLI 的基础工具集不含子 agent 工具，四阶段流水线无从推进。
+    resume_session_id 给定时从该 SDK 会话的 transcript 续接（resume_from）。"""
     return ClaudeAgentOptions(
         cwd=str(PROJECT_ROOT),
+        resume=resume_session_id,
         tools={"type": "preset", "preset": "claude_code"},
         mcp_servers={"exa-search": EXA_MCP_SERVER},
         # 非交互会话无人批准：Bash 等内置工具随 claude_code 预设放行，
@@ -68,7 +70,12 @@ def to_dict(message):
             "parent_tool_use_id": message.parent_tool_use_id,
         }
     if isinstance(message, ResultMessage):
-        return {"type": "result", "subtype": message.subtype, "result": message.result}
+        return {
+            "type": "result",
+            "subtype": message.subtype,
+            "result": message.result,
+            "session_id": getattr(message, "session_id", None),
+        }
     return {}
 
 
@@ -98,8 +105,8 @@ class SDKSession:
     """与会话抽象同形：async with 连接/断开，query/interrupt 透传，
     receive_response 把每回合消息适配成 CLI JSON 形状再产出。"""
 
-    def __init__(self):
-        self._client = ClaudeSDKClient(options=default_options())
+    def __init__(self, session_id=None):
+        self._client = ClaudeSDKClient(options=default_options(session_id))
 
     async def __aenter__(self):
         await self._client.__aenter__()
@@ -120,5 +127,5 @@ class SDKSession:
 
 
 class SDKSessionFactory:
-    def __call__(self):
-        return SDKSession()
+    def __call__(self, session_id=None):
+        return SDKSession(session_id)

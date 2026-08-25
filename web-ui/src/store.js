@@ -2,8 +2,8 @@
 // 与服务端交互。每个活跃会话一条常驻 EventSource（断线浏览器自动重连并
 // 携带 Last-Event-ID，服务端从 seq+1 补发；已收事件按 seq 去重）。
 //
-// 停止 / 关闭调用的端点随干预语义接入（见后端 web/），当前后端尚未提供，
-// 失败时如实把错误显示在提示条上，端点就绪后此处无需改动。
+// 停止 / 关闭 / 续接的干预端点见后端 web/（run_agent 按 stop_requested 标记
+// 区分 turn.stopped 与 turn.completed）；失败时如实把错误显示在提示条上。
 import { useSyncExternalStore } from 'react'
 
 // 与服务端内部事件协议一致的事件类型全集

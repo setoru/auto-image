@@ -20,7 +20,11 @@ function EventRow({ ev }) {
     return <div className="va-user">你 ▸ {ev.payload.text}</div>
   }
   if (ev.type === 'turn.stopped') {
-    return <div className="va-paused">— 已停止（Esc 等效），等待指令 —</div>
+    return (
+      <div className="va-paused">
+        — 已停止（Esc 等效），等待指令 · 已提交的云操作不受停止影响，无法撤销 —
+      </div>
+    )
   }
   if (ev.type === 'agent.thinking') {
     return (
