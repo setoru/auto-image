@@ -123,7 +123,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .va-msg { padding: 2px 0; }
 .va-msg p { margin: 0; }
-.va-tool { color: var(--ink-3); font-size: 12px; padding: 1px 0 1px 20px; }
+/* 工具调用：折叠行单行截断（摘要），展开见脱敏全文（限高内自滚动） */
+.va-tool { margin: 1px 0; font-size: 12px; }
+.va-tool summary {
+  display: block; cursor: pointer; list-style: none; user-select: none;
+  color: var(--ink-3); padding: 1px 0 1px 20px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.va-tool summary::-webkit-details-marker { display: none; }
+.va-tool-detail {
+  margin: 1px 0 2px; padding: 2px 0 2px 10px; border-left: 2px solid var(--line);
+  color: var(--ink-2); font-size: 12px; white-space: pre-wrap; word-break: break-word;
+  max-height: 320px; overflow: auto;
+}
 .va-canceled { color: var(--warn); text-align: center; margin: 8px 0; }
 .va-paused { color: var(--warn); text-align: center; margin: 8px 0; }
 .va-failed { color: var(--bad); text-align: center; margin: 8px 0; }

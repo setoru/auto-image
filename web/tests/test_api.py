@@ -153,9 +153,11 @@ async def test_first_message_drives_scripted_turn():
         assert events[1]["data"]["text"] == "部署 nginx 1.25 到 server-a"
         # 阶段由 Task + subagent_type 推导
         assert events[4]["data"] == {"stage": "GUIDE", "status": "running"}
-        # 工具事件只带工具名与摘要
+        # 工具事件带工具名 + 脱敏摘要（折叠行）+ 脱敏全文（展开查看）
         assert events[5]["data"]["tool"] == "Task"
+        assert "detail" in events[5]["data"] and "summary" in events[5]["data"]
         assert events[6]["data"]["tool"] == "Task"
+        assert "detail" in events[6]["data"] and "summary" in events[6]["data"]
         # 回合汇总携带 result 文本
         assert "result" in events[-1]["data"]
 
@@ -299,7 +301,8 @@ async def test_redaction_masks_credentials_everywhere():
         resp = await open_stream(client, run_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
         raw = json.dumps(events, ensure_ascii=False)
-        # thinking（AK/SK）、message（password）、turn.completed 的 result（secret）
+        # thinking（AK/SK）、message（password）、tool 的 summary/detail
+        # （tool_result 内联 password）、turn.completed 的 result（secret）
         for secret in ("HWPFEJ9AB3CDEFGHIJKL", "f3a9c81d0b7e46f2a5d8c3b1e9470ad6c2f5b831", "Xk9$mPq2LwzR", "topsecret-token"):
             assert secret not in raw, secret
         assert "***" in raw

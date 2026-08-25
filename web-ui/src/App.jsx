@@ -61,11 +61,15 @@ function EventRow({ ev, prev }) {
   if (ev.type === 'agent.message') {
     return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
   }
-  if (ev.type === 'agent.tool_started') {
-    return <div className="va-tool">▶ {ev.payload.tool} · {ev.payload.summary}</div>
-  }
-  if (ev.type === 'agent.tool_finished') {
-    return <div className="va-tool">✔ {ev.payload.tool} · {ev.payload.summary}</div>
+  if (ev.type === 'agent.tool_started' || ev.type === 'agent.tool_finished') {
+    // 折叠行是脱敏摘要，展开见脱敏全文（detail 兜底旧格式事件的 summary）
+    const arrow = ev.type === 'agent.tool_started' ? '▶' : '✔'
+    return (
+      <details className="va-tool">
+        <summary>{arrow} {ev.payload.tool} · {ev.payload.summary}</summary>
+        <pre className="va-tool-detail">{ev.payload.detail ?? ev.payload.summary}</pre>
+      </details>
+    )
   }
   if (ev.type === 'turn.completed') {
     return turnCompletedRow(ev, prev)

@@ -21,7 +21,7 @@ from claude_agent_sdk import (  # noqa: E402
     ToolUseBlock,
     UserMessage,
 )
-from web.normalize import is_final_result, normalize_message  # noqa: E402
+from web.normalize import TOOL_DETAIL_LIMIT, is_final_result, normalize_message  # noqa: E402
 from web.sdk import to_dict  # noqa: E402
 
 
@@ -39,7 +39,7 @@ def test_thinking_text_blocks_map_to_events():
     ]
 
 
-def test_tool_use_maps_to_started_with_summary_not_raw_input():
+def test_tool_use_maps_to_started_with_summary_and_detail():
     msg = {
         "type": "assistant",
         "message": {"content": [
@@ -51,12 +51,29 @@ def test_tool_use_maps_to_started_with_summary_not_raw_input():
     assert [e[0] for e in events] == ["agent.tool_started"]
     payload = events[0][1]
     assert payload["tool"] == "Bash"
-    # 摘要是脱敏后的紧凑表示，原始 input 不整体透出
+    # 摘要（折叠行）与全文（展开查看）同为脱敏表示，原始 input 不整体透出
     assert payload["summary"] == '{"command": "cat scope.yaml"}'
+    assert payload["detail"] == '{"command": "cat scope.yaml"}'
     assert "input" not in payload
 
 
-def test_tool_result_maps_to_finished_without_raw_output():
+def test_tool_detail_truncates_after_redaction():
+    # 截断必须先经整值脱敏：可见前缀里的凭据形状已被遮蔽，且总长有界
+    secret = "HWPFEJ9AB3CDEFGHIJKL"
+    text = f"ak={secret} " + "x" * (TOOL_DETAIL_LIMIT + 1000)
+    msg = {
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "id": "t1", "name": "Bash", "input": {"command": text}},
+        ]},
+    }
+    detail = normalize_message(msg, {})[0][1]["detail"]
+    assert secret not in detail and "***" in detail
+    assert len(detail) <= TOOL_DETAIL_LIMIT + 60  # 余量为截断标记文案
+    assert "已截断，脱敏后全文" in detail
+
+
+def test_tool_result_maps_to_finished_with_redacted_detail():
     tool_names = {"t1": "Read"}
     msg = {
         "type": "user",
@@ -67,7 +84,7 @@ def test_tool_result_maps_to_finished_without_raw_output():
     events = normalize_message(msg, tool_names)
     assert events == [(
         "agent.tool_finished",
-        {"tool": "Read", "summary": "ak=***\nsk=***"},
+        {"tool": "Read", "summary": "ak=***\nsk=***", "detail": "ak=***\nsk=***"},
     )]
     # 未知 id 的 tool_result：没有名字也无妨，事件仍发出（名字空）
     events = normalize_message({
@@ -168,7 +185,7 @@ def test_to_dict_user_message_tool_result_and_string_content():
         {"type": "tool_result", "tool_use_id": "t1", "content": "输出", "is_error": False},
     ]
     assert normalize_message(d, {"t1": "Read"}) == [
-        ("agent.tool_finished", {"tool": "Read", "summary": "输出"}),
+        ("agent.tool_finished", {"tool": "Read", "summary": "输出", "detail": "输出"}),
     ]
     # content 为纯字符串的用户行：适配后无块，normalize 零事件
     assert to_dict(UserMessage(content="纯文本"))["message"]["content"] == []

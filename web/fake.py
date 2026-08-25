@@ -34,7 +34,7 @@ DEFAULT_SCRIPT = [
     {
         "type": "user",
         "message": {"content": [
-            {"type": "tool_result", "tool_use_id": "toolu_01", "content": "指南已生成：deploy/nginx/1.25/install.md"},
+            {"type": "tool_result", "tool_use_id": "toolu_01", "content": "指南已生成：deploy/nginx/1.25/install.md，机器 password: Xk9$mPq2LwzR 已配置。"},
         ]},
     },
     {

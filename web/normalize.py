@@ -23,15 +23,29 @@ STAGE_BY_SUBAGENT = {
 SUBAGENT_TOOL_NAMES = {"Agent", "Task"}
 
 TOOL_SUMMARY_LIMIT = 120
+# 完整内容的截断上限：事件全量驻内存并经 SSE 重放（web/events.py），超长
+# Bash 输出须有界；单机单用户量级下每条 4K 可承受
+TOOL_DETAIL_LIMIT = 4000
 
 
 def summarize(value):
-    """工具入参/出参的脱敏摘要：截断的紧凑表示，不转发原始内容。"""
+    """工具入参/出参的脱敏摘要：截断的紧凑表示，折叠行展示用。"""
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, default=str)
     if len(value) > TOOL_SUMMARY_LIMIT:
         value = value[:TOOL_SUMMARY_LIMIT] + "…"
     return redact_text(value)
+
+
+def detail(value):
+    """工具入参/出参的脱敏全文：展开查看用。先整值脱敏再截断——截断不能
+    先于脱敏（把已知凭据值截成两半就不再匹配整值替换，半截明文漏出）。"""
+    if not isinstance(value, str):
+        value = json.dumps(value, ensure_ascii=False, default=str)
+    value = redact_text(value)
+    if len(value) > TOOL_DETAIL_LIMIT:
+        value = value[:TOOL_DETAIL_LIMIT] + f"\n…（已截断，脱敏后全文 {len(value)} 字符）"
+    return value
 
 
 def stage_from_tool_use(block):
@@ -77,7 +91,11 @@ def normalize_message(message, tool_names):
                     events.append(("stage.changed", {"stage": stage, "status": "running"}))
                 events.append((
                     "agent.tool_started",
-                    {"tool": block.get("name", ""), "summary": summarize(block.get("input"))},
+                    {
+                        "tool": block.get("name", ""),
+                        "summary": summarize(block.get("input")),
+                        "detail": detail(block.get("input")),
+                    },
                 ))
     elif mtype == "user":
         for block in _content_blocks(message):
@@ -87,6 +105,7 @@ def normalize_message(message, tool_names):
                     {
                         "tool": tool_names.get(block.get("tool_use_id"), ""),
                         "summary": summarize(block.get("content")),
+                        "detail": detail(block.get("content")),
                     },
                 ))
     return events
