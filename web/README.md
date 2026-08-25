@@ -7,7 +7,10 @@
 ## 运行（本机直跑，单进程单 worker）
 
 ```bash
-pip install -r web/requirements.txt
+# Ubuntu 24.04 起 pip 受 PEP 668 管控，二选一：
+pip install --break-system-packages -r web/requirements.txt   # 装进系统（本机现状）
+python3 -m venv .venv && . .venv/bin/activate \
+  && pip install -r web/requirements.txt                      # 或 venv 隔离
 python -m web            # 默认 127.0.0.1:8000
 WEB_PORT=8765 python -m web             # 换端口
 WEB_HOST=0.0.0.0 WEB_PORT=8000 python -m web   # 外部可访问（见下）
