@@ -4,6 +4,8 @@
 服务端的映射层消费的是 CLI JSON 形状的 dict——to_dict 在此适配，
 使假剧本（fake.py 的 dict）与真会话走同一条 normalize 路径。
 """
+import json
+import os
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -41,7 +43,21 @@ SYSTEM_PROMPT = """你是 auto-image 部署流水线的 Web 会话执行者，�
 # guide 阶段联网链路：SDK 会话内内置 WebFetch 被域名安全校验拦截、
 # WebSearch 被权限层拒（实测记录见 web/README.md），显式接入既有
 # exa MCP（与本机 ~/.claude.json 全局配置同源），不依赖运行者个人配置
-EXA_MCP_SERVER = {"type": "stdio", "command": "npx", "args": ["-y", "exa-mcp-server"], "env": {}}
+def _exa_env():
+    """exa 的 API key：进程环境优先（Claude Code settings 注入），回退读
+    ~/.claude/settings.json 的 env——用户手动 shell 起服务时无此变量，
+    无 key 则工具注册成功但调用 401。key 只进 SDK options，不经事件流。"""
+    key = os.environ.get("EXA_API_KEY")
+    if not key:
+        try:
+            cfg = json.loads((Path.home() / ".claude" / "settings.json").read_text(encoding="utf-8"))
+            key = cfg.get("env", {}).get("EXA_API_KEY")
+        except (OSError, ValueError):
+            key = None
+    return {"EXA_API_KEY": key} if key else {}
+
+
+EXA_MCP_SERVER = {"type": "stdio", "command": "npx", "args": ["-y", "exa-mcp-server"], "env": _exa_env()}
 
 
 def default_options(resume_session_id=None):

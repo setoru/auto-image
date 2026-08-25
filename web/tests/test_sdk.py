@@ -11,7 +11,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from web.sdk import SYSTEM_PROMPT, TURN_TIMEOUT_SECONDS, default_options  # noqa: E402
+from web.sdk import EXA_MCP_SERVER, SYSTEM_PROMPT, TURN_TIMEOUT_SECONDS, default_options  # noqa: E402
 
 
 def test_system_prompt_covers_control_boundary():
@@ -44,6 +44,13 @@ def test_options_grant_unattended_write_permission():
     信任边界由运行形态承担：只监听 127.0.0.1 + 系统提示词任务边界。"""
     options = default_options()
     assert options.permission_mode == "bypassPermissions"
+
+
+def test_exa_server_env_carries_only_api_key():
+    """exa MCP 的 env 只有 API key 一项（有则带、无则空）——防止将来塞入
+    其他变量；key 值本身不设断言（依赖运行环境，只约束形状）。"""
+    env = EXA_MCP_SERVER["env"]
+    assert set(env) in (set(), {"EXA_API_KEY"})
 
 
 def main():
