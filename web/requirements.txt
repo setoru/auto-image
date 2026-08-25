@@ -1,4 +1,5 @@
 fastapi
 uvicorn
 httpx
+pyyaml
 claude-agent-sdk

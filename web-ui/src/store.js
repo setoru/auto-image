@@ -21,6 +21,9 @@ export const EVENT_TYPES = [
   'run.failed',
 ]
 
+// 会触发产物清单刷新的事件：阶段推进（新产物落盘）与回合/会话收尾
+const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'run.canceled', 'run.failed']
+
 const RUNNING = 'RUNNING'
 const WAITING_INPUT = 'WAITING_INPUT'
 // 活跃（可继续操作）状态集合：判定值与服务端状态机一致，单处维护
@@ -109,6 +112,8 @@ function conflictMessage(err) {
 function onStreamEvent(runId, es, e) {
   const event = { seq: Number(e.lastEventId), type: e.type, payload: JSON.parse(e.data) }
   appendTo(runId, event)
+  // 阶段推进与终态都可能带来新落盘的产物，触发清单刷新
+  if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts(runId)
   // 终态后服务端会正常结束流，主动 close 避免 EventSource 无限重连
   if (event.type === 'run.failed' || event.type === 'run.canceled') es.close()
 }
@@ -124,6 +129,7 @@ function attachStream(runId) {
 }
 
 // SSE 断线重连后服务端会全量重放，按 seq 去重；状态随事件类型同步推进
+// （重放的 stage.changed / 终态事件会重复触发清单刷新，幂等无害）
 function appendTo(runId, event) {
   const run = state.runs[runId]
   if (!run || run.events.some((ev) => ev.seq === event.seq)) return
@@ -164,6 +170,8 @@ export async function createRun() {
       connection: 'live',
       startedAt: Date.now(),
       es: null,
+      artifacts: { outputDir: null, files: [] },
+      artifact: null,
     }
     set({
       runs: { ...state.runs, [run.runId]: run },
@@ -221,4 +229,36 @@ export async function cancel() {
 
 export function selectRun(runId) {
   if (state.runs[runId]) set({ viewRunId: runId })
+}
+
+// ---------- 产物 ----------
+
+// 清单刷新：阶段推进/终态事件触发；服务端按已进入阶段解锁文件，产物只读
+export async function refreshArtifacts(runId) {
+  const run = state.runs[runId]
+  if (!run) return
+  try {
+    const resp = await fetch(`/api/runs/${runId}/artifacts`)
+    if (!resp.ok) return
+    setRun(runId, { artifacts: await resp.json() })
+  } catch {
+    // 清单刷新是尽力而为：失败不打断会话观察，下次阶段事件再试
+  }
+}
+
+// 查看单个产物：内容按需拉取（缓存于 run.artifact），产物 tab 渲染
+export async function openArtifact(runId, name) {
+  const run = state.runs[runId]
+  if (!run) return
+  try {
+    const resp = await fetch(`/api/runs/${runId}/artifacts/${encodeURIComponent(name)}`)
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      fail(`打开产物失败：${data.detail || `HTTP ${resp.status}`}`)
+      return
+    }
+    setRun(runId, { artifact: data })
+  } catch (err) {
+    fail(`打开产物失败：${err.message}`)
+  }
 }

@@ -14,3 +14,9 @@ export function fmtElapsed(startedAt, now) {
   const s = Math.max(0, Math.floor(((now || Date.now()) - startedAt) / 1000))
   return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
 }
+
+// 产物大小：B / KB（清单 size 字段的展示形态）
+export function fmtSize(bytes) {
+  if (bytes == null) return ''
+  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`
+}

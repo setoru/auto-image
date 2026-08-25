@@ -1,5 +1,5 @@
-/* A 形态样式：基础 token / reset / 输入条 / 错误条 + A 布局（header / 侧栏 / tabs / 消息流）。
-   产物查看样式随产物端点接入时补齐。 */
+/* A 形态样式：基础 token / reset / 输入条 / 错误条 + A 布局（header / 侧栏 / tabs / 消息流）
+   + 产物（侧栏产物卡 / 产物 tab 的 markdown·json 渲染）。 */
 
 :root {
   --surface: #ffffff;
@@ -179,3 +179,62 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-tabs button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
 .va-tabs button:disabled { opacity: 0.4; }
 .va-tab-body { flex: 1; min-height: 0; display: flex; }
+
+/* ---------- 产物：侧栏产物卡 ---------- */
+
+.va-art-group { display: flex; flex-direction: column; gap: 2px; }
+.va-art-stage { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--ink-3); margin-top: 4px; }
+.va-art-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+  padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--ink); text-align: left;
+}
+.va-art-item:hover { background: var(--surface-dim); }
+.va-art-item.on { background: var(--surface-deep); font-weight: 600; }
+.va-art-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.va-art-size { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+
+/* 阶段徽标：四阶段各一色（列表与产物 tab 头共用） */
+.va-art-badge {
+  flex-shrink: 0; padding: 0 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.03em; color: #fff; background: var(--ink-3);
+}
+.va-art-badge.s-guide { background: #8250df; }
+.va-art-badge.s-install { background: var(--accent); }
+.va-art-badge.s-verify { background: var(--ok); }
+.va-art-badge.s-archive { background: var(--warn); }
+
+/* ---------- 产物：主区产物 tab ---------- */
+
+.va-artifact { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.va-artifact-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  border-bottom: 1px solid var(--line); background: var(--surface-dim);
+}
+.va-artifact-name { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.va-artifact-dir {
+  margin-left: auto; color: var(--ink-3); font-size: 11px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+}
+.va-artifact-raw {
+  flex: 1; margin: 0; padding: 16px; overflow: auto;
+  font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+}
+
+/* markdown 渲染（marked 输出）：表格 / 代码块 / 验证契约 blockquote */
+.va-artifact-md { flex: 1; overflow: auto; padding: 16px 24px; font-size: 13.5px; line-height: 1.65; }
+.va-artifact-md h1, .va-artifact-md h2, .va-artifact-md h3 { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.va-artifact-md pre {
+  background: var(--surface-dim); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; overflow: auto; font-family: var(--mono); font-size: 12.5px;
+}
+.va-artifact-md code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-dim); padding: 1px 4px; border-radius: 4px; }
+.va-artifact-md pre code { background: none; padding: 0; }
+.va-artifact-md table { border-collapse: collapse; margin: 8px 0; }
+.va-artifact-md th, .va-artifact-md td { border: 1px solid var(--line); padding: 4px 10px; font-size: 12.5px; }
+.va-artifact-md th { background: var(--surface-dim); }
+.va-artifact-md blockquote {
+  margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--warn);
+  background: #fff8c5; border-radius: 0 6px 6px 0; color: var(--ink-2);
+}
+.va-artifact-md img { max-width: 100%; }

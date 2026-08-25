@@ -20,6 +20,7 @@ python -m web            # 默认 8000，WEB_PORT=8765 可覆盖
 
 ```bash
 python web/tests/test_api.py        # ASGI 主缝（假会话驱动）
+python web/tests/test_artifacts.py  # 产物端点（临时目录造桩）
 python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 ```
 
@@ -32,6 +33,7 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
+| `artifacts.py` | 产物发现（install-meta.json mtime 驱动）、按阶段解锁的清单、内容读取与路径约束 |
 | `redact.py` | 事件出口脱敏（AK/SK、密码字段、私钥块） |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |

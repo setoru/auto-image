@@ -15,6 +15,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+from . import artifacts as artifacts_mod
 from . import runs as runs_mod
 from .events import EventStore
 from .runs import RunManager
@@ -23,15 +24,23 @@ from .session import run_agent
 
 # 前端构建产物（vite build 输出），存在才挂载；开发时走 vite dev proxy
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent.parent / "web-ui" / "dist"
+# 流水线产物根（deploy.config.yaml 的 output_dir 固定前缀），Agent cwd 即项目根
+DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "deploy"
+# 产物文件名约定的权威源（见 artifacts.load_file_stages）
+DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.yaml"
 
 
-def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None):
+def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
+               artifact_root=None, deploy_config=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
-    测试注入按剧本推消息的假实现——注入边界即唯一测试缝。"""
+    测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
+    与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。"""
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
     factory = session_factory or SDKSessionFactory()
+    artifact_root = Path(artifact_root) if artifact_root is not None else DEFAULT_ARTIFACT_ROOT
+    file_stages = artifacts_mod.load_file_stages(deploy_config or DEFAULT_DEPLOY_CONFIG)
     app.state.run_manager = manager
     app.state.event_store = store
     app.state.session_factory = factory
@@ -96,6 +105,24 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None):
         except asyncio.CancelledError:
             pass
         return {"run_id": run.run_id, "status": run.status}
+
+    @app.get("/api/runs/{run_id}/artifacts")
+    async def list_artifacts(run_id: str):
+        run = _get_run_or_404(manager, run_id)
+        return artifacts_mod.snapshot(run, artifact_root, file_stages)
+
+    @app.get("/api/runs/{run_id}/artifacts/{file_name}")
+    async def read_artifact(run_id: str, file_name: str):
+        run = _get_run_or_404(manager, run_id)
+        found = artifacts_mod.find(run, artifact_root, file_stages, file_name)
+        if found is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        entry, target = found
+        try:
+            content = target.read_text(encoding="utf-8")
+        except OSError:
+            raise HTTPException(status_code=404, detail="artifact not found") from None
+        return {"name": entry["name"], "stage": entry["stage"], "content": content}
 
     @app.get("/api/runs/{run_id}/events")
     async def event_stream(run_id: str, request: Request):

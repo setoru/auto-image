@@ -9,6 +9,11 @@ import asyncio
 import httpx
 
 
+def async_client(app):
+    """app → 挂真流式 ASGI 传输的 AsyncClient（各主缝测试共用的装配）。"""
+    return httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver")
+
+
 class StreamingASGITransport(httpx.AsyncBaseTransport):
     def __init__(self, app):
         self.app = app

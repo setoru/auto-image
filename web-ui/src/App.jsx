@@ -3,9 +3,11 @@
 // 任务详情栏（产物卡 / 阶段卡 / 回合汇总卡）+ 主区双 tab（会话 | 产物）
 // + 底部常驻对话输入条。多会话并存时 header 出现切换下拉。
 import { useEffect, useRef, useState } from 'react'
+import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtElapsed, firstPromptPreview } from './derive.js'
+import { fmtElapsed, firstPromptPreview, fmtSize } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 
 const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已结束', FAILED: '失败' }
@@ -60,7 +62,71 @@ function EventRow({ ev }) {
   return null
 }
 
-// 任务详情侧栏：产物卡（产物端点接入前列出占位）+ 阶段卡 + 回合汇总卡
+// 阶段徽标（产物卡分组与产物 tab 头共用）
+function StageBadge({ stage }) {
+  return <span className={`va-art-badge s-${stage.toLowerCase()}`}>{stage}</span>
+}
+
+// 产物卡：按阶段分组列出已解锁文件（带阶段徽标），点击在主区产物 tab 查看
+function ArtifactCard({ run }) {
+  const files = run?.artifacts?.files ?? []
+  // 分组顺序取自 STAGE_LABEL 的键序（与流水线推进一致；清单由服务端按已进入阶段解锁）
+  const groups = Object.keys(STAGE_LABEL)
+    .map((stage) => ({ stage, items: files.filter((f) => f.stage === stage) }))
+    .filter((g) => g.items.length > 0)
+  return (
+    <div className="va-card">
+      <div className="va-card-title">产物 · {files.length}</div>
+      {groups.length === 0 && <div className="va-card-line">等待阶段产物落盘…</div>}
+      {groups.map(({ stage, items }) => (
+        <div key={stage} className="va-art-group">
+          <div className="va-art-stage">
+            <StageBadge stage={stage} />
+            {STAGE_LABEL[stage]}
+          </div>
+          {items.map((f) => (
+            <button
+              key={f.name}
+              className={`va-art-item${run.artifact?.name === f.name ? ' on' : ''}`}
+              onClick={() => store.openArtifact(run.runId, f.name)}
+              title={f.name}
+            >
+              <span className="va-art-name">{f.name}</span>
+              <span className="va-art-size">{fmtSize(f.size)}</span>
+            </button>
+          ))}
+        </div>
+      ))}
+    </div>
+  )
+}
+
+// 产物 tab：markdown 经 marked 渲染（表格/代码块/验证契约 blockquote），json 原文展示。
+// 内容系 agent 转述外部文档，HTML 经消毒再进 DOM
+function ArtifactView({ run }) {
+  const artifact = run.artifact
+  if (!artifact) {
+    return <div className="artifact-empty">点击左侧产物卡中的文件查看（随阶段推进解锁）</div>
+  }
+  const isJson = artifact.name.endsWith('.json')
+  const html = isJson ? '' : DOMPurify.sanitize(marked.parse(artifact.content, { async: false }))
+  return (
+    <div className="va-artifact">
+      <div className="va-artifact-head">
+        <StageBadge stage={artifact.stage} />
+        <span className="va-artifact-name">{artifact.name}</span>
+        <span className="va-artifact-dir">{run.artifacts.outputDir ?? ''}</span>
+      </div>
+      {isJson ? (
+        <pre className="va-artifact-raw">{artifact.content}</pre>
+      ) : (
+        <div className="va-artifact-md" dangerouslySetInnerHTML={{ __html: html }} />
+      )}
+    </div>
+  )
+}
+
+// 任务详情侧栏：产物卡 + 阶段卡 + 回合汇总卡
 function TaskSide({ run, onClose }) {
   const lastAgentMsg = run
     ? [...run.events].reverse().find((e) => e.type === 'agent.message')?.payload.text ?? ''
@@ -72,10 +138,7 @@ function TaskSide({ run, onClose }) {
         <button className="va-side-toggle" onClick={onClose} title="收起侧栏">«</button>
       </div>
       <div className="va-side-cards">
-        <div className="va-card">
-          <div className="va-card-title">产物 · 0</div>
-          <div className="va-card-line">等待阶段产物落盘…</div>
-        </div>
+        <ArtifactCard run={run} />
 
         {run && (
           <div className="va-card">
@@ -107,6 +170,7 @@ export default function App() {
   const [follow, setFollow] = useState(true)
   const [sideOpen, setSideOpen] = useState(true)
   const [tab, setTab] = useState('chat') // chat | artifact
+  const artifactCount = run?.artifacts?.files?.length ?? 0
 
   const scrollToBottom = () => {
     const el = scrollRef.current
@@ -121,6 +185,11 @@ export default function App() {
   useEffect(() => {
     if (follow) scrollToBottom()
   }, [run?.events.length, follow])
+
+  // 侧栏点开产物后自动切到产物 tab
+  useEffect(() => {
+    if (run?.artifact) setTab('artifact')
+  }, [run?.artifact?.name])
 
   // 切回会话 tab（含从产物查看返回）时滚到最新
   useEffect(() => {
@@ -184,8 +253,12 @@ export default function App() {
             <>
               <div className="va-tabs">
                 <button className={tab === 'chat' ? 'on' : ''} onClick={() => setTab('chat')}>会话</button>
-                <button className={tab === 'artifact' ? 'on' : ''} onClick={() => setTab('artifact')} disabled>
-                  产物 · 0
+                <button
+                  className={tab === 'artifact' ? 'on' : ''}
+                  onClick={() => setTab('artifact')}
+                  disabled={artifactCount === 0}
+                >
+                  产物 · {artifactCount}
                 </button>
               </div>
               <div className="va-tab-body">
@@ -208,7 +281,7 @@ export default function App() {
                     )}
                   </div>
                 ) : (
-                  <div className="artifact-empty">产物查看随产物端点接入</div>
+                  <ArtifactView run={run} />
                 )}
               </div>
             </>

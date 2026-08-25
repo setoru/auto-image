@@ -41,6 +41,7 @@ class Run:
         self.resume_session_id = None  # 创建时携带的续接源会话 id（工厂参数）
         self.resumed_from = None      # 续接来源 run_id（对外呈现）
         self.stop_requested = False   # 停止请求标记：run_agent 在回合收尾消费
+        self.output_dir = None        # 产物目录（INSTALL 后发现，见 artifacts.py）
 
     def summary(self):
         return {
