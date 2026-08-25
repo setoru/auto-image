@@ -19,6 +19,7 @@ from fastapi.staticfiles import StaticFiles
 
 from . import artifacts as artifacts_mod
 from . import rebuild as rebuild_mod
+from . import redact as redact_mod
 from . import runs as runs_mod
 from . import sdk as sdk_mod
 from .events import EventStore
@@ -32,21 +33,28 @@ DEFAULT_STATIC_DIR = Path(__file__).resolve().parent.parent / "web-ui" / "dist"
 DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "deploy"
 # 产物文件名约定的权威源（见 artifacts.load_file_stages）
 DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.yaml"
+# 运行时真实凭据源（ak/sk/ECS 密码值进脱敏已知清单，见 redact.load_scope_secrets）
+DEFAULT_SCOPE_CONFIG = Path(__file__).resolve().parent.parent / "scope.yaml"
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
-               artifact_root=None, deploy_config=None,
+               artifact_root=None, deploy_config=None, turn_timeout=None, scope_config=None,
                list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
     与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。
+    turn_timeout 为回合 wall-clock 上限（终局语义），默认 sdk 层固定值。
+    scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
 
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
     residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。"""
+    # 已知凭据值入脱敏清单（幂等；scope 缺失时只剩形状正则防线）
+    redact_mod.load_scope_secrets(scope_config or DEFAULT_SCOPE_CONFIG)
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
     factory = session_factory or SDKSessionFactory()
+    turn_timeout = sdk_mod.TURN_TIMEOUT_SECONDS if turn_timeout is None else turn_timeout
     artifact_root = Path(artifact_root) if artifact_root is not None else DEFAULT_ARTIFACT_ROOT
     file_stages = artifacts_mod.load_file_stages(deploy_config or DEFAULT_DEPLOY_CONFIG)
     app.state.run_manager = manager
@@ -85,7 +93,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         store.create(run.run_id)
         # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
         _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
-        run.task = asyncio.create_task(run_agent(run, factory, store))
+        run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout))
         return {"run_id": run.run_id, "status": run.status, "resumed_from": run.resumed_from}
 
     @app.get("/api/runs/{run_id}")

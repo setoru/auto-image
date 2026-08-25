@@ -88,6 +88,7 @@ def make_app(script, root):
         artifact_root=root,
         deploy_config=root / "deploy.config.yaml",
         list_sessions_fn=lambda: [],  # 不读本机真实 transcript
+        scope_config=root / "scope-absent.yaml",  # 不载真实凭据（脱敏已知值清单隔离）
     )
 
 
@@ -224,6 +225,36 @@ async def test_content_returns_raw_text():
             r = await client.get(f"/api/runs/{run_id}/artifacts/nginx-install-meta.json")
             assert r.status_code == 200, r.text
             assert r.json()["stage"] == "INSTALL"
+
+
+async def test_resume_run_sees_source_deployment_artifacts():
+    """续接会话的产物可见性：meta.json 落盘于源 run 生命周期内（mtime 早于
+    续接 run 创建），发现基准须回溯到源 run 创建时刻，否则续接 run 的产物卡
+    恒空（真实验收在跳过门禁续接剧本中发现）。"""
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        script = stage_script("deploy-guide", "deploy-install", "deploy-archive")
+        async with await run_with_client(script, root) as client:
+            run_a, started_a = await start_run(client)
+            # 源 run 装完（meta mtime 在源 run 生命周期内、早于任何续接：
+            # 桩偏移 1 秒，续接前等待 1.2 秒拉开与 B 创建时刻的先后）
+            make_output_tree(root, "nginx/1.25",
+                             GUIDE_FILES + INSTALL_FILES + ARCHIVE_FILES,
+                             mtime=started_a + 1)
+            await wait_stage(client, run_a, "ARCHIVE")
+            r = await client.post(f"/api/runs/{run_a}/cancel")
+            assert r.status_code == 200, r.text
+            await asyncio.sleep(1.2)
+
+            run_b = (await client.post("/api/runs", json={"resume_from": run_a})).json()["run_id"]
+            await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续归档"})
+            await wait_stage(client, run_b, "ARCHIVE")
+            r = await client.get(f"/api/runs/{run_b}/artifacts")
+            assert r.status_code == 200, r.text
+            body = r.json()
+            assert body["output_dir"] is not None, "续接 run 应发现源部署的产物目录"
+            names = {f["name"] for f in body["files"]}
+            assert "nginx-install.md" in names and "nginx-deploy-list.md" in names, names
 
 
 async def test_traversal_and_unknown_names_404():

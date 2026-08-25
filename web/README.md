@@ -23,6 +23,8 @@ python web/tests/test_api.py        # ASGI 主缝（假会话驱动）
 python web/tests/test_artifacts.py  # 产物端点（临时目录造桩）
 python web/tests/test_history.py    # 列表摘要、只读约束、假 transcript 驱动的重启重建
 python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
+python web/tests/test_redact.py     # 事件出口脱敏（形状正则 + 已知值清单）
+python web/tests/test_sdk.py        # options 契约（系统提示词、固定上限、无值守写权限）
 ```
 
 ## 模块
@@ -35,7 +37,7 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | 产物发现（install-meta.json mtime 驱动）、按阶段解锁的清单、内容读取与路径约束 |
-| `redact.py` | 事件出口脱敏（AK/SK、密码字段、私钥块） |
+| `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的历史重建：list_sessions / get_session_messages 以 session 粒度找回历史 run（ENDED，只读可续接） |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
@@ -68,24 +70,46 @@ python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
    在权限层被拒——与仓库 CLAUDE.md 记录一致。已按方案经 options 的
    `mcp_servers` 接入既有 exa MCP，并因非交互会话无人批准 MCP 工具而
    配 `allowed_tools=["mcp__exa-search__*"]` 放行；复测抓取 nginx.org
-   成功。内置工具中 Bash 等随 `claude_code` 预设默认放行，无需额外配置。
-7. **回合上限**：`max_turns=200` 已配；回合级 wall-clock 超时属终局语义
-   （`run.failed` 路径），尚未接入（干预语义已就绪，超时随需要补）。
+   成功。内置工具中只读 Bash 随 `claude_code` 预设放行；写路径需
+   `permission_mode`（见第 8 条）。
+7. **回合上限**：`max_turns=200` 与回合级 wall-clock 超时（默认 3600 秒，
+   `sdk.TURN_TIMEOUT_SECONDS`）都是终局语义：Result 的错误 subtype（兜底
+   判定：只有 `success` 是正常完成）或超时都以 `run.failed` 收尾、会话进
+   FAILED、断开 SDK 连接，不自动重试。
 
-8. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
+8. **无值守会话的写权限**（真部署实测）：`claude_code` 工具预设只放行
+   只读 Bash，Write 与 Bash 写路径一律被权限系统拦截（guide 只能把指南
+   全文以文本返回）——options 必须配 `permission_mode="bypassPermissions"`。
+   信任边界由运行形态承担：只监听 127.0.0.1 + 系统提示词任务边界。
+9. **凭据值的两层脱敏**（真部署实测）：形状正则防不住自然语言内联
+   （`` password `pcb…@@` ``、`password is set (…)` 出现在 thinking），
+   redact 层除形状外还维护运行时已知值清单（启动时从 scope.yaml 登记
+   ak/sk/password 值，任意上下文整值遮蔽）；实测华为云 SK 为 38 位大小写
+   混合，非注释曾以为的 40 位小写。
+10. **子 agent 的异步派发失稳**（真部署实测）：CLI 的 Agent 工具支持异步
+   启动，模型可能派发后结束回合「等通知」——通知无处投递、run 挂在
+   WAITING_INPUT；更早一轮还出现过并发派发上百次 guide 的调度风暴（20 实例
+   触发 429，agent 自行终止后恢复）。系统提示词以执行纪律约束：至多一个
+   子 agent 在跑、派发后 TaskOutput 阻塞等待、四阶段完成才收尾回合。
+11. **续接 run 的产物发现基准**（门禁续接剧本实测）：产物目录以 meta.json
+   mtime 晚于 run 创建过滤「旧一轮」，续接 run 创建晚于源部署的 meta 落盘，
+   基准须回溯到源 run 创建时刻（`Run.artifact_after`），否则续接 run 的
+   产物清单恒空。
+
+12. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
    回合执行中的本地 Bash 子进程**随打断被终止**（实测 `sleep 222` 在
    interrupt 后即刻消失），CLI 子进程保留、连接可续聊。已提交的云操作
    （HTTP API 类：创建 ECS、制镜像等）不受任何影响——打断只作用于后续
    动作，界面在 `turn.stopped` 块与停止按钮上如实提示「已提交的云操作
    不受停止影响，无法撤销」。
-9. **cancel（断连）的终止边界**：回合执行中直接断开 SDK 连接（= run_task
+13. **cancel（断连）的终止边界**：回合执行中直接断开 SDK 连接（= run_task
    取消后 `__aexit__` 的路径）后 3 秒内：CLI 子进程**全部退出、无残留**
    （配合服务重启语义中的 pgrep 告警兜底），正在执行的本地 Bash 子进程
    同样被终止（实测 `sleep 333` 消失）。远程命令经 ssh 转发：客户端进程
    被杀断开连接，远端进程是否终止取决于远端 shell 配置，**不保证**——
    按「已提交的云操作不可撤销」对待。断连后以 `resume=session_id` 新建
    会话实测可续接，上下文完整（能复述被打断前的指令）。
-10. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
+14. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
    全量重建约 2 秒）：`get_session_messages` 只回可见的 user/assistant 链
    （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一

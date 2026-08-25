@@ -22,10 +22,21 @@ from claude_agent_sdk import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 方案第 9 节「固定上限」的取值：一个完整部署回合的 turns 预算；
-# 回合级 wall-clock 超时属终局语义（run.failed），不在 options 层表达
+# 方案第 9 节「固定上限」的取值：一个完整部署回合的 turns 预算与
+# wall-clock 上限（秒）；超时的终局语义在 session 层表达（run.failed）
 MAX_TURNS = 200
+TURN_TIMEOUT_SECONDS = 3600.0
 THINKING_BUDGET_TOKENS = 10000
+
+# 方案第 9 节「系统提示词至少要求」的六要素原文基线
+SYSTEM_PROMPT = """你是 auto-image 部署流水线的 Web 会话执行者，与部署使用者在浏览器会话里交互。
+
+- 只处理本项目的部署任务，不执行与部署无关的命令。
+- 部署一律按当前 deploy skill（.claude/skills/deploy/SKILL.md）编排执行，四个阶段依次推进、不得合并或内联替做。
+- 子 agent 同一时刻至多一个在跑；派发后必须阻塞等待其完成（TaskOutput 等待）并校验产物落盘，不得派发后结束回合等通知；四阶段全部完成、汇总呈现后才收尾回合。
+- 不向输出暴露凭据：API Key、密码、SSH 私钥等不在消息、思维链与工具摘要中出现。
+- 未经用户明确确认，验证未通过不得归档；用户显式要求跳过门禁时，先复述风险、取得用户确认后再执行。
+- 已提交的云操作（创建 ECS、制镜像等）不可撤销；用户要求停止或调整时，如实告知这一边界。"""
 
 # guide 阶段联网链路：SDK 会话内内置 WebFetch 被域名安全校验拦截、
 # WebSearch 被权限层拒（实测记录见 web/README.md），显式接入既有
@@ -39,10 +50,15 @@ def default_options(resume_session_id=None):
 
     tools 必须显式给 claude_code 预设（--tools default）：SDK 不传 --tools
     时 CLI 的基础工具集不含子 agent 工具，四阶段流水线无从推进。
+    permission_mode 必须给 bypassPermissions：无值守会话无人批准，SDK 默认
+    权限下 Write 与 Bash 写路径一律被拒（真部署实测），产物无法落盘；信任
+    边界由运行形态承担（只监听 127.0.0.1 + 系统提示词任务边界）。
     resume_session_id 给定时从该 SDK 会话的 transcript 续接（resume_from）。"""
     return ClaudeAgentOptions(
         cwd=str(PROJECT_ROOT),
         resume=resume_session_id,
+        system_prompt=SYSTEM_PROMPT,
+        permission_mode="bypassPermissions",
         tools={"type": "preset", "preset": "claude_code"},
         mcp_servers={"exa-search": EXA_MCP_SERVER},
         # 非交互会话无人批准：Bash 等内置工具随 claude_code 预设放行，

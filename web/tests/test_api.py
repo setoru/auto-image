@@ -28,6 +28,7 @@ def make_app(script=None, delay=DELAY):
         session_factory=FakeSessionFactory(script=script if script is not None else DEFAULT_SCRIPT, delay=delay),
         heartbeat_interval=HEARTBEAT,
         list_sessions_fn=lambda: [],  # 不读本机真实 transcript（重启重建见 test_history）
+        scope_config="/nonexistent-scope.yaml",  # 不载真实凭据（脱敏已知值清单隔离）
     )
 
 
@@ -520,6 +521,49 @@ async def test_resume_from_unknown_run_404():
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         r = await client.post("/api/runs", json={"resume_from": "run_missing"})
         assert r.status_code == 404
+
+
+async def test_max_turns_result_fails_run():
+    """Result 的错误 subtype（max_turns 触发）→ run 进 FAILED、run.failed
+    携带错误摘要；终态后事件流收尾关闭。判定取兜底：非 success 即终局失败。"""
+    script = [
+        {"type": "assistant", "message": {"content": [{"type": "text", "text": "开始部署。"}]}},
+        {"type": "result", "subtype": "error_max_turns", "is_error": True, "result": "已达到回合上限，回合被截断 password: leak-me"},
+    ]
+    app = make_app(script)
+    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "FAILED")
+        events = await wait_replay(client, run_id, lambda evs: evs[-1]["event"] == "run.failed")
+        assert events[-1]["event"] == "run.failed"
+        message = events[-1]["data"]["message"]
+        assert "error_max_turns" in message
+        assert "回合上限" in message
+        assert "leak-me" not in message  # 摘要脱敏：密码不外泄
+
+
+async def test_turn_timeout_fails_run():
+    """回合 wall-clock 超时 → FAILED + run.failed 携带超时摘要（终局语义，
+    会话断连不自动重试）。"""
+    app = create_app(
+        session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=1.0),
+        heartbeat_interval=HEARTBEAT,
+        turn_timeout=0.1,
+        list_sessions_fn=lambda: [],
+        scope_config="/nonexistent-scope.yaml",
+    )
+    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "FAILED")
+        events = await wait_replay(client, run_id, lambda evs: evs[-1]["event"] == "run.failed")
+        message = events[-1]["data"]["message"]
+        assert "超时" in message or "超过" in message
+        assert "0" in message  # 摘要带上限值
+        # 后续指令被拒：终态 run 不接受干预
+        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
+        assert r.status_code == 409
 
 
 async def main():

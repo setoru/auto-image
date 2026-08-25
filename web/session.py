@@ -8,6 +8,10 @@ ClaudeSDKClient，测试注入脚本化假实现），工厂以续接源 session
 停止的服务端语义：intervene 置 stop_requested 后由 HTTP 层调 interrupt；
 run_agent 在回合收尾按该标记区分 turn.stopped 与 turn.completed（真 SDK
 被打断的回合以 result=None 的 error Result 收尾，但判定以本端标记为权威）。
+
+回合终局语义：turn_timeout（wall-clock 秒）超时、Result 的错误 subtype
+（max_turns 触发、执行错误等）都落到 run.failed——会话进 FAILED 终态、
+断开 SDK 连接，不自动重试（服务重启语义一致）。
 """
 import asyncio
 import time
@@ -17,8 +21,15 @@ from .redact import redact_text
 from .runs import CANCELED, FAILED, WAITING_INPUT
 
 
-async def run_agent(run, session_factory, store):
-    """驱动一条会话：等指令 → 执行回合 → 回挂起，直到会话被关闭或异常。"""
+class TurnFailure(Exception):
+    """回合终局失败（Result 错误 subtype）：run_agent 的异常收尾转 run.failed。"""
+
+
+async def run_agent(run, session_factory, store, turn_timeout=None):
+    """驱动一条会话：等指令 → 执行回合 → 回挂起，直到会话被关闭或异常。
+
+    turn_timeout 由服务端固定传入（sdk.TURN_TIMEOUT_SECONDS）；None 仅限
+    测试直接驱动，表示不限时。"""
     store.append(run.run_id, "run.started", {})
     try:
         async with session_factory(run.resume_session_id) as session:
@@ -31,23 +42,14 @@ async def run_agent(run, session_factory, store):
                 text = run.pending_prompt
                 store.append(run.run_id, "user.message", {"text": text})
                 await session.query(text)
-                tool_names = {}
-                finished = False
-                async for message in session.receive_response():
-                    for etype, payload in normalize_message(message, tool_names):
-                        store.append(run.run_id, etype, payload)
-                        if etype == "stage.changed":
-                            run.stage = payload["stage"]
-                    if is_final_result(message):
-                        sid = message.get("session_id")
-                        if sid:
-                            run.session_id = sid
-                        _finish_turn(run, store, message)
-                        finished = True
-                if not finished:
-                    # 流结束而无 Result（未观察到的 SDK 形态）：仍须收尾，
-                    # 否则状态卡在 RUNNING、会话永久占用执行权
-                    _finish_turn(run, store, None)
+                try:
+                    await asyncio.wait_for(
+                        _drain_turn(run, session, store), timeout=turn_timeout
+                    )
+                except asyncio.TimeoutError:
+                    raise TimeoutError(
+                        f"回合执行超过 {turn_timeout:.0f} 秒上限，会话已终止"
+                    ) from None
     except asyncio.CancelledError:
         # 关闭会话 = 取消本协程：会话记录保留，可供后续新会话续接
         run.status = CANCELED
@@ -59,16 +61,40 @@ async def run_agent(run, session_factory, store):
         store.append(run.run_id, "run.failed", {"message": redact_text(str(exc))})
 
 
+async def _drain_turn(run, session, store):
+    """消费一个回合的消息流至 Result（或流结束），收尾交 _finish_turn。"""
+    tool_names = {}
+    final = None
+    async for message in session.receive_response():
+        for etype, payload in normalize_message(message, tool_names):
+            store.append(run.run_id, etype, payload)
+            if etype == "stage.changed":
+                run.stage = payload["stage"]
+        if is_final_result(message):
+            sid = message.get("session_id")
+            if sid:
+                run.session_id = sid
+            final = message
+    _finish_turn(run, store, final)
+
+
 def _finish_turn(run, store, message):
-    """回合收尾：停止请求优先（turn.stopped），否则以 Result 正常完成。
+    """回合收尾：停止请求优先（turn.stopped）；Result 的错误 subtype 属
+    终局失败，以 TurnFailure 抛给 run_agent 的异常收尾（run.failed）。
 
     与 intervene 的标记置位同为同步块，在单线程事件循环上互斥执行，
-    不存在「半停半完成」的交错。
+    不存在「半停半完成」的交错。subtype 判定取兜底：只有 success 是正常
+    完成，其余（error_max_turns、执行错误等文案不可穷尽）一律失败。
     """
-    run.status = WAITING_INPUT
     if run.stop_requested:
         run.stop_requested = False
+        run.status = WAITING_INPUT
         store.append(run.run_id, "turn.stopped", {})
-    else:
+    elif message is None or message.get("subtype") == "success":
         result = message.get("result", "") if message else ""
+        run.status = WAITING_INPUT
         store.append(run.run_id, "turn.completed", {"result": redact_text(result)})
+    else:
+        subtype = message.get("subtype") or "unknown"
+        detail = redact_text(str(message.get("result") or "")).strip()
+        raise TurnFailure(f"回合以 {subtype} 终止" + (f"：{detail}" if detail else ""))

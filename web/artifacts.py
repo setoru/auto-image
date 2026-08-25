@@ -75,10 +75,13 @@ def discover_output_dir(artifact_root, started_after):
 
 
 def snapshot(run, artifact_root, file_stages):
-    """产物清单：发现（惰性，一次 run 只发现一次）+ 按当前阶段解锁过滤。"""
+    """产物清单：发现（惰性，一次 run 只发现一次）+ 按当前阶段解锁过滤。
+
+    发现基准取 run.artifact_after（续接 run 回溯到源 run 创建时刻——同一
+    逻辑部署的 meta 落盘早于续接 run，但属于它），否则本 run 创建时刻。"""
     # INSTALL 开始前不扫描：GUIDE 阶段的目录归属尚不可判定；扫描而无命中同样空清单
     if run.output_dir is None and STAGE_ORDER.get(run.stage, -1) >= STAGE_ORDER["INSTALL"]:
-        run.output_dir = discover_output_dir(artifact_root, run.created_at)
+        run.output_dir = discover_output_dir(artifact_root, run.artifact_after or run.created_at)
     if run.output_dir is None:
         return {"output_dir": None, "files": []}
     return {"output_dir": str(run.output_dir), "files": _unlocked_files(run.output_dir, run.stage, file_stages)}

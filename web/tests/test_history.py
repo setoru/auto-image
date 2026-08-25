@@ -71,6 +71,7 @@ def deploy_transcript():
 def history_app(infos, messages_fn, **kwargs):
     """以假 list_sessions / get_session_messages 装配的应用（重启后形态）。"""
     kwargs.setdefault("residual_cli_scan", lambda: [])  # pgrep 路径由专门测试覆盖
+    kwargs.setdefault("scope_config", "/nonexistent-scope.yaml")  # 不载真实凭据（脱敏已知值清单隔离）
     return create_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT),
         heartbeat_interval=HEARTBEAT,
@@ -83,6 +84,7 @@ def history_app(infos, messages_fn, **kwargs):
 def plain_app(**kwargs):
     """无历史的常规应用（列表摘要等行为测试用）。"""
     kwargs.setdefault("residual_cli_scan", lambda: [])
+    kwargs.setdefault("scope_config", "/nonexistent-scope.yaml")
     return create_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT),
         heartbeat_interval=HEARTBEAT,
