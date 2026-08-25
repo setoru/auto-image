@@ -4,12 +4,19 @@
 会话为 `ClaudeSDKClient` 真实现（`web/sdk.py` 经工厂注入）；测试注入脚本化
 假实现（`web/fake.py`），不触网、不启动真 SDK。
 
-## 运行（本机直跑，单进程单 worker，只监听 127.0.0.1）
+## 运行（本机直跑，单进程单 worker）
 
 ```bash
 pip install -r web/requirements.txt
-python -m web            # 默认 8000，WEB_PORT=8765 可覆盖
+python -m web            # 默认 127.0.0.1:8000
+WEB_PORT=8765 python -m web             # 换端口
+WEB_HOST=0.0.0.0 WEB_PORT=8000 python -m web   # 外部可访问（见下）
 ```
+
+默认只监听 127.0.0.1（无认证服务，能访问即能触发真实云操作）。
+需要外部机器的浏览器访问时，`WEB_HOST=0.0.0.0` 绑定全部网卡，
+经 `http://<本机IP>:<端口>/` 访问——暴露面由运行者的网络策略
+（安全组/防火墙）控制，风险自担。
 
 前端两种打开方式：
 
