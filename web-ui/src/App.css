@@ -123,11 +123,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .va-msg { padding: 2px 0; }
 .va-msg p { margin: 0; }
-/* 用户消息：右侧气泡 */
+/* 用户消息：右侧浅蓝气泡 */
 .va-user {
   width: fit-content; max-width: 80%; margin: 8px 0 8px auto;
   padding: 6px 12px; border-radius: 12px;
-  background: var(--accent); color: #fff; white-space: pre-wrap;
+  background: #ddf4ff; color: var(--accent); white-space: pre-wrap;
 }
 /* 工具操作行：小字灰色、工具名加粗；折叠行单行截断（主参数），展开见
    脱敏全文（限高内自滚动）；▶ 运行中 / ✓ 完成（同灰），一次调用一行 */

@@ -66,7 +66,7 @@ function EventRow({ ev, prev, tools }) {
   if (ev.type === 'agent.thinking') {
     return (
       <details className="va-thinking">
-        <summary>··· thinking</summary>
+        <summary>Thinking &gt;</summary>
         <div className="va-thinking-body">{ev.payload.text}</div>
       </details>
     )
