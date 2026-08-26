@@ -72,8 +72,10 @@ class RunManager:
         self.runs[run.run_id] = run
 
     def summaries(self):
-        """全部 run 摘要，后启动的在前（列表/下拉以最新任务为首选）。"""
-        return [r.summary() for r in sorted(self.runs.values(), key=lambda r: r.created_at, reverse=True)]
+        """全部 run 摘要，最后活跃在前：终态按结束时刻（重建 run 即
+        transcript 的 last_modified，续接过一次的会话浮到最新），活跃按
+        创建时刻（无结束时刻）。"""
+        return [r.summary() for r in sorted(self.runs.values(), key=lambda r: r.ended_at or r.created_at, reverse=True)]
 
     def running(self):
         return next((r for r in self.runs.values() if r.status == RUNNING), None)
