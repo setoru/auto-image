@@ -571,8 +571,8 @@ async def test_turn_timeout_fails_run():
 
 async def test_resume_carries_history_into_new_stream():
     """接续创建的新会话事件流自带源会话历史（CLI resume 的体验）：
-    run.started → resumed.history 分隔 → 源会话全部事件（跳过源的
-    run.started，收尾事件如实保留）→ 后续新指令事件；seq 重新编号严格递增。"""
+    run.started → resumed.history 分隔 → 源会话事件（跳过生命周期事件，
+    源的收尾不是新会话的收尾）→ 后续新指令事件；seq 重新编号严格递增。"""
     app = make_app()
     async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
         run_a = (await client.post("/api/runs", json={})).json()["run_id"]
@@ -586,9 +586,10 @@ async def test_resume_carries_history_into_new_stream():
         assert types[0] == "run.started"
         assert types[1] == "resumed.history"
         assert events[1]["data"]["resumed_from"] == run_a
-        # 源流的收尾事件（run.canceled）如实带入，源 run.started 不重复
-        assert types[-1] == "run.canceled"
-        assert types.count("run.started") == 1
+        # 源流的生命周期事件不带入（终态收尾会被前端当成本 run 终态关流），
+        # 流以源历史的最后一个回合事件收尾
+        assert "run.canceled" not in types and "run.started" not in types[1:]
+        assert types[-1] == "turn.completed"
         # 源历史里的回合事件在场
         assert "user.message" in types and "turn.completed" in types
         seqs = [int(e["id"]) for e in events]

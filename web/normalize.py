@@ -29,7 +29,7 @@ PRIMARY_INPUT_FIELD = {
     "Edit": "file_path",
     "Write": "file_path",
     "NotebookEdit": "notebook_path",
-    "Bash": "command",
+    "Bash": "description",
     "Grep": "pattern",
     "Glob": "pattern",
     "WebFetch": "url",

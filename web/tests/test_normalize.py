@@ -59,6 +59,17 @@ def test_tool_use_maps_to_started_with_summary_and_detail():
     assert "input" not in payload
 
 
+def test_bash_summary_prefers_description():
+    msg = {
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "id": "t11", "name": "Bash",
+             "input": {"command": "apt install -y nginx", "description": "安装 nginx"}},
+        ]},
+    }
+    assert normalize_message(msg, {})[0][1]["summary"] == "安装 nginx"
+
+
 def test_edit_tool_use_emits_line_diff():
     msg = {
         "type": "assistant",

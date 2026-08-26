@@ -277,7 +277,12 @@ export async function stop() {
 export async function send(text) {
   const trimmed = (text ?? '').trim()
   const run = state.runs[state.viewRunId]
-  if (!run || !trimmed || !isActive(run.status)) return false
+  if (!run || !trimmed) return false
+  if (!isActive(run.status)) {
+    // 只读会话（已结束/重启找回的历史）不静默吞掉输入，给出出路提示
+    fail('该会话只读（已结束或重启找回的历史）——「+ 新建」或接续该会话后继续')
+    return false
+  }
   if (run.status === WAITING_INPUT && executingRunId()) {
     fail(conflictText('execution_in_progress'))
     return false

@@ -96,7 +96,12 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         store.append(run.run_id, "run.started", {})
         if run.resumed_from is not None:
             store.append(run.run_id, "resumed.history", {"resumed_from": run.resumed_from})
-            store.adopt_history(run.run_id, run.resumed_from, skip_types={"run.started"})
+            # 源流的生命周期事件不转录：源的起点/接续标记/收尾都不是新会话的
+            # 状态——终态收尾被前端当成本 run 的终态会关流判死，接续后无法续聊
+            store.adopt_history(
+                run.run_id, run.resumed_from,
+                skip_types={"run.started", "run.canceled", "run.failed", "run.ended", "resumed.history"},
+            )
         # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
         _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
         run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout))
