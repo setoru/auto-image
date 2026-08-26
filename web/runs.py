@@ -71,6 +71,17 @@ class RunManager:
         """注册重启重建的历史 run（不经 create 的并发校验：启动时无执行）。"""
         self.runs[run.run_id] = run
 
+    def adopt_ids(self, run_ids):
+        """恢复既有 run_id 后把计数器前拨过已用号，新建不撞号（run_N 解析
+        数字取 max；解析不出的 id 与计数序列无关，跳过）。"""
+        top = 0
+        for run_id in run_ids:
+            _, _, num = run_id.rpartition("run_")
+            if num.isdigit():
+                top = max(top, int(num))
+        if top >= next(self._ids):
+            self._ids = itertools.count(top + 1)
+
     def summaries(self):
         """全部 run 摘要，最后活跃在前：终态按结束时刻（重建 run 即
         transcript 的 last_modified，续接过一次的会话浮到最新），活跃按

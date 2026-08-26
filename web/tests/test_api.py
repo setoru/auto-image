@@ -7,6 +7,7 @@
 运行：python web/tests/test_api.py
 """
 import asyncio
+import tempfile
 import json
 import os
 import sys
@@ -29,6 +30,7 @@ def make_app(script=None, delay=DELAY):
         heartbeat_interval=HEARTBEAT,
         list_sessions_fn=lambda: [],  # 不读本机真实 transcript（重启重建见 test_history）
         scope_config="/nonexistent-scope.yaml",  # 不载真实凭据（脱敏已知值清单隔离）
+        state_path=tempfile.mkdtemp() + "/state.json",  # 簿记隔离（恢复见 test_state）
     )
 
 
@@ -555,6 +557,7 @@ async def test_turn_timeout_fails_run():
         turn_timeout=0.1,
         list_sessions_fn=lambda: [],
         scope_config="/nonexistent-scope.yaml",
+        state_path=tempfile.mkdtemp() + "/state.json",
     )
     async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
         run_id = (await client.post("/api/runs", json={})).json()["run_id"]

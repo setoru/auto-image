@@ -22,6 +22,7 @@ from . import rebuild as rebuild_mod
 from . import redact as redact_mod
 from . import runs as runs_mod
 from . import sdk as sdk_mod
+from . import state as state_mod
 from .events import EventStore
 from .runs import RunManager
 from .sdk import SDKSessionFactory
@@ -35,11 +36,14 @@ DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "deploy"
 DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.yaml"
 # 运行时真实凭据源（ak/sk/ECS 密码值进脱敏已知清单，见 redact.load_scope_secrets）
 DEFAULT_SCOPE_CONFIG = Path(__file__).resolve().parent.parent / "scope.yaml"
+# 挂起会话的落盘簿记（服务重启恢复可聊；同一 HOME 下多实例共用一份）
+DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                artifact_root=None, deploy_config=None, turn_timeout=None, scope_config=None,
-               list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None):
+               list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
+    state_path=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
     与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。
@@ -47,7 +51,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
 
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
-    residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。"""
+    residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。
+    state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。"""
     # 已知凭据值入脱敏清单（幂等；scope 缺失时只剩形状正则防线）
     redact_mod.load_scope_secrets(scope_config or DEFAULT_SCOPE_CONFIG)
     app = FastAPI(title="auto-image deploy web")
@@ -61,12 +66,30 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     app.state.event_store = store
     app.state.session_factory = factory
     app.state.heartbeat_interval = heartbeat_interval
-    # 服务重启语义：启动即从 CLI 侧 transcript 重建历史（只读回看 + 续接起点），
-    # 正在执行的任务不自动重试；残留 CLI 子进程只告警不杀（可能处于云操作中间态）
+    state_file = Path(state_path) if state_path is not None else DEFAULT_STATE_PATH
+
+    def persist():
+        """状态变更点统一落盘（全量原子替换，见 state.save_state）。"""
+        state_mod.save_state(manager.runs.values(), state_file)
+
+    # 服务重启语义：簿记里的挂起会话先恢复（可聊、resume 重建连接），CLI 侧
+    # transcript 再重建其余历史（只读回看 + 续接起点）；正在执行的任务不自动
+    # 重试（RUNNING 降级挂起 + run.interrupted 提示）；残留 CLI 子进程只告警
+    # 不杀（可能处于云操作中间态）
+    restored = rebuild_mod.restore_active_runs(
+        manager, store,
+        state_mod.load_state(state_file),
+        get_session_messages_fn or sdk_mod.project_session_messages,
+    )
+    if restored:
+        logging.getLogger("web").info("服务重启后恢复 %d 条挂起会话（可继续对话）", len(restored))
+        for run in restored:
+            run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout, on_change=persist))
     rebuilt = rebuild_mod.rebuild_history(
         manager, store,
         list_sessions_fn or sdk_mod.list_project_sessions,
         get_session_messages_fn or sdk_mod.project_session_messages,
+        skip_sessions={r.session_id for r in restored},
     )
     if rebuilt:
         logging.getLogger("web").info("服务重启后找回 %d 条历史会话", len(rebuilt))
@@ -104,7 +127,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             )
         # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
         _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
-        run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout))
+        run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout, on_change=persist))
+        persist()
         return {"run_id": run.run_id, "status": run.status, "resumed_from": run.resumed_from}
 
     @app.get("/api/runs/{run_id}")
@@ -122,6 +146,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             manager.intervene(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
+        persist()
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
@@ -135,6 +160,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             manager.intervene(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
+        persist()
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
@@ -150,6 +176,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             await run.task  # 等收尾（run.canceled 已入事件流）再返回
         except asyncio.CancelledError:
             pass
+        persist()
         return {"run_id": run.run_id, "status": run.status}
 
     # 产物浏览不依赖会话存在（deploy/ 全量镜像，含历史轮次）

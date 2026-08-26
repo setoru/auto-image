@@ -110,6 +110,13 @@ function EventRow({ ev, prev, tools }) {
       </div>
     )
   }
+  if (ev.type === 'run.interrupted') {
+    return (
+      <div className="va-paused">
+        — 服务重启，上一回合被中断 · 已提交的云操作不受影响，无法撤销 —
+      </div>
+    )
+  }
   if (ev.type === 'agent.thinking') {
     return (
       <details className="va-thinking">

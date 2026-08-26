@@ -25,12 +25,17 @@ class TurnFailure(Exception):
     """回合终局失败（Result 错误 subtype）：run_agent 的异常收尾转 run.failed。"""
 
 
-async def run_agent(run, session_factory, store, turn_timeout=None):
+async def run_agent(run, session_factory, store, turn_timeout=None, on_change=None):
     """驱动一条会话：等指令 → 执行回合 → 回挂起，直到会话被关闭或异常。
 
     turn_timeout 由服务端固定传入（sdk.TURN_TIMEOUT_SECONDS）；None 仅限
     测试直接驱动，表示不限时。run.started 与接续历史由 create_run 同步段
-    先行写入（见 app.py），本协程从等输入开始。"""
+    先行写入（见 app.py），本协程从等输入开始。on_change 在回合收尾与
+    终局收尾后回调（服务端挂簿记落盘用，None 为无簿记）。"""
+    def changed():
+        if on_change is not None:
+            on_change()
+
     try:
         async with session_factory(run.resume_session_id) as session:
             run.session = session
@@ -50,15 +55,20 @@ async def run_agent(run, session_factory, store, turn_timeout=None):
                     raise TimeoutError(
                         f"回合执行超过 {turn_timeout:.0f} 秒上限，会话已终止"
                     ) from None
+                # 回合收尾即簿记变更点：状态回挂起 / session_id 首次提取 /
+                # stage 推进都在此刻定格
+                changed()
     except asyncio.CancelledError:
         # 关闭会话 = 取消本协程：会话记录保留，可供后续新会话续接
         run.status = CANCELED
         run.ended_at = time.time()
         store.append(run.run_id, "run.canceled", {})
+        changed()
     except Exception as exc:  # noqa: BLE001 —— 会话内任何异常都落到 run.failed，错误摘要过脱敏
         run.status = FAILED
         run.ended_at = time.time()
         store.append(run.run_id, "run.failed", {"message": redact_text(str(exc))})
+        changed()
 
 
 async def _drain_turn(run, session, store):

@@ -48,7 +48,8 @@ python web/tests/test_sdk.py        # options 契约（系统提示词、固定�
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | deploy/ 全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取与路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
-| `rebuild.py` | 服务重启后的历史重建：list_sessions / get_session_messages 以 session 粒度找回历史 run（ENDED，只读可续接） |
+| `rebuild.py` | 服务重启后的恢复：state 簿记里的挂起 run 恢复为可聊（原 run_id、事件流从 transcript 重放），其余 transcript 以 session 粒度重建为历史 run（ENDED，只读可续接） |
+| `state.py` | 挂起 run 的落盘簿记（`~/.auto-image-web/state.json`，全量原子替换）：run ↔ session 映射与状态机状态，transcript 里没有的东西；损坏降级为纯历史重建 |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
 
@@ -121,6 +122,15 @@ python web/tests/test_sdk.py        # options 契约（系统提示词、固定�
    条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重建的
    run 状态 ENDED（终态，可回看可续接），流以 `run.ended` 收尾后正常
    关闭。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
+14. **服务重启的挂起恢复**（state 簿记 + 真 SDK 实测）：簿记只存活跃 run
+   （WAITING_INPUT / RUNNING，无 session_id 的首回合未完成 run 不入册），
+   每次状态变更即全量原子写。重启后挂起 run 以原 run_id 恢复可聊——事件
+   流从 transcript 重放、协程以自身 session resume 重建连接（实测恢复后
+   发消息，agent 记得重启前的约定）。簿记里的 RUNNING 降级 WAITING_INPUT
+   + `run.interrupted` 事件（未收尾回合不自动重跑：已提交的云操作不可
+   重复执行）；恢复占用的 session 不再重复建历史条目。簿记损坏/缺失一律
+   降级为纯历史重建，不阻断启动。kill -9 实测：崩溃窗口内丢失的最后一次
+   状态变更由 transcript 存在性校验兜底（读不到即丢弃）。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。

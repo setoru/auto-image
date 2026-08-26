@@ -17,6 +17,7 @@ export const EVENT_TYPES = [
   'stage.changed',
   'turn.stopped',
   'turn.completed',
+  'run.interrupted',
   'run.canceled',
   'run.failed',
   'run.ended',

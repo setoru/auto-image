@@ -16,7 +16,9 @@ from .app import create_app
 def main():
     port = int(os.environ.get("WEB_PORT", "8000"))
     host = os.environ.get("WEB_HOST", "127.0.0.1")
-    uvicorn.run(create_app(), host=host, port=port)
+    # 工厂形态：应用构造发生在事件循环就绪后——启动段的挂起会话恢复要
+    # create_task 起 run_agent 协程，无运行循环会崩
+    uvicorn.run(create_app, factory=True, host=host, port=port)
 
 
 if __name__ == "__main__":
