@@ -123,11 +123,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .va-msg { padding: 2px 0; font-size: 15px; }
 .va-msg p { margin: 0; }
-/* 用户消息：右侧浅蓝气泡 */
+/* 用户消息：右侧浅蓝气泡，文字与正文同款（15px/深色） */
 .va-user {
   width: fit-content; max-width: 80%; margin: 8px 0 8px auto;
   padding: 6px 12px; border-radius: 12px;
-  background: #ddf4ff; color: var(--ink); white-space: pre-wrap;
+  background: #dbeafe; color: var(--ink); white-space: pre-wrap;
+  font-size: 15px;
 }
 /* 工具操作行：小字灰色、工具名加粗；折叠行单行截断（主参数），展开见
    脱敏全文（限高内自滚动）；▶ 运行中 / ✓ 完成（同灰），一次调用一行 */
