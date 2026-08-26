@@ -51,9 +51,10 @@ def test_tool_use_maps_to_started_with_summary_and_detail():
     assert [e[0] for e in events] == ["agent.tool_started"]
     payload = events[0][1]
     assert payload["tool"] == "Bash"
-    # 摘要（折叠行）与全文（展开查看）同为脱敏表示，原始 input 不整体透出
-    assert payload["summary"] == '{"command": "cat scope.yaml"}'
-    assert payload["detail"] == '{"command": "cat scope.yaml"}'
+    assert payload["id"] == "t1"  # 前端按 id 合并 started/finished 为一行
+    # 摘要取主参数（Bash→command），全文为 k: v 可读行，原始 input 不整体透出
+    assert payload["summary"] == "cat scope.yaml"
+    assert payload["detail"] == "command: cat scope.yaml"
     assert "input" not in payload
 
 
@@ -84,7 +85,7 @@ def test_tool_result_maps_to_finished_with_redacted_detail():
     events = normalize_message(msg, tool_names)
     assert events == [(
         "agent.tool_finished",
-        {"tool": "Read", "summary": "ak=***\nsk=***", "detail": "ak=***\nsk=***"},
+        {"id": "t1", "tool": "Read", "summary": "ak=***\nsk=***", "detail": "ak=***\nsk=***"},
     )]
     # 未知 id 的 tool_result：没有名字也无妨，事件仍发出（名字空）
     events = normalize_message({
@@ -185,7 +186,7 @@ def test_to_dict_user_message_tool_result_and_string_content():
         {"type": "tool_result", "tool_use_id": "t1", "content": "输出", "is_error": False},
     ]
     assert normalize_message(d, {"t1": "Read"}) == [
-        ("agent.tool_finished", {"tool": "Read", "summary": "输出", "detail": "输出"}),
+        ("agent.tool_finished", {"id": "t1", "tool": "Read", "summary": "输出", "detail": "输出"}),
     ]
     # content 为纯字符串的用户行：适配后无块，normalize 零事件
     assert to_dict(UserMessage(content="纯文本"))["message"]["content"] == []

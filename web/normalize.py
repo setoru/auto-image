@@ -22,27 +22,85 @@ STAGE_BY_SUBAGENT = {
 # 子 agent 工具的 CLI 名：新名 Agent，Task 为旧名/事件重放剧本兼容
 SUBAGENT_TOOL_NAMES = {"Agent", "Task"}
 
+# 摘要行的主参数字段：已知工具取最能代表这次调用的入参（Read 的路径、
+# Bash 的命令……）；未命中（含 MCP 工具）由 primary_arg 兜底
+PRIMARY_INPUT_FIELD = {
+    "Read": "file_path",
+    "Edit": "file_path",
+    "Write": "file_path",
+    "NotebookEdit": "notebook_path",
+    "Bash": "command",
+    "Grep": "pattern",
+    "Glob": "pattern",
+    "WebFetch": "url",
+    "WebSearch": "query",
+    "Agent": "description",
+    "Task": "description",
+}
+
 TOOL_SUMMARY_LIMIT = 120
 # 完整内容的截断上限：事件全量驻内存并经 SSE 重放（web/events.py），超长
 # Bash 输出须有界；单机单用户量级下每条 4K 可承受
 TOOL_DETAIL_LIMIT = 4000
 
 
+def _plain(value):
+    """dict 行内取值：str 原样，其余紧凑 JSON（标量直读，嵌套结构不展开）。"""
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return ""
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _readable(value):
+    """值 → 可读文本：str 原样；内容块列表拼 text；dict 转 k: v 行；
+    其余形状 JSON 兜底。入参/出参的展示格式只此一处，不再裸 dumps。"""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list) and all(isinstance(b, dict) for b in value):
+        texts = [b["text"] for b in value if isinstance(b.get("text"), str)]
+        if texts:
+            return "\n".join(texts)
+    if isinstance(value, dict):
+        return "\n".join(f"{k}: {_plain(v)}" for k, v in value.items())
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def primary_arg(tool, value):
+    """入参摘要的主参数：已知工具取主字段，未知工具取首个字符串字段，
+    再兜底整体可读格式。"""
+    if not isinstance(value, dict):
+        return _readable(value)
+    field = PRIMARY_INPUT_FIELD.get(tool)
+    if isinstance(value.get(field), str) and value[field]:
+        return value[field]
+    for v in value.values():
+        if isinstance(v, str) and v:
+            return v
+    return _readable(value)
+
+
+def _clip(text):
+    if len(text) > TOOL_SUMMARY_LIMIT:
+        return text[:TOOL_SUMMARY_LIMIT] + "…"
+    return text
+
+
 def summarize(value):
-    """工具入参/出参的脱敏摘要：截断的紧凑表示，折叠行展示用。"""
-    if not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False, default=str)
-    if len(value) > TOOL_SUMMARY_LIMIT:
-        value = value[:TOOL_SUMMARY_LIMIT] + "…"
-    return redact_text(value)
+    """出参/通用值的脱敏摘要：可读格式化后截断，折叠行展示用。"""
+    return _clip(redact_text(_readable(value)))
+
+
+def summarize_input(tool, value):
+    """入参摘要：主参数优先——Tool(路径/命令) 的单行观感。"""
+    return _clip(redact_text(primary_arg(tool, value)))
 
 
 def detail(value):
-    """工具入参/出参的脱敏全文：展开查看用。先整值脱敏再截断——截断不能
+    """脱敏全文：展开查看用。先整值脱敏再截断——截断不能
     先于脱敏（把已知凭据值截成两半就不再匹配整值替换，半截明文漏出）。"""
-    if not isinstance(value, str):
-        value = json.dumps(value, ensure_ascii=False, default=str)
-    value = redact_text(value)
+    value = redact_text(_readable(value))
     if len(value) > TOOL_DETAIL_LIMIT:
         value = value[:TOOL_DETAIL_LIMIT] + f"\n…（已截断，脱敏后全文 {len(value)} 字符）"
     return value
@@ -92,8 +150,10 @@ def normalize_message(message, tool_names):
                 events.append((
                     "agent.tool_started",
                     {
+                        # id 供前端把 started/finished 合并为一行
+                        "id": block.get("id"),
                         "tool": block.get("name", ""),
-                        "summary": summarize(block.get("input")),
+                        "summary": summarize_input(block.get("name", ""), block.get("input")),
                         "detail": detail(block.get("input")),
                     },
                 ))
@@ -103,6 +163,7 @@ def normalize_message(message, tool_names):
                 events.append((
                     "agent.tool_finished",
                     {
+                        "id": block.get("tool_use_id"),
                         "tool": tool_names.get(block.get("tool_use_id"), ""),
                         "summary": summarize(block.get("content")),
                         "detail": detail(block.get("content")),

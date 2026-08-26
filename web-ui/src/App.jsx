@@ -33,7 +33,20 @@ function turnCompletedRow(ev, prev) {
   )
 }
 
-function EventRow({ ev, prev }) {
+// 工具事件索引：started/finished 按 id 关联（旧事件无 id 时不入索引，
+// 各自独立成行兜底）
+function toolIndex(events) {
+  const startedById = new Map()
+  const finishedIds = new Set()
+  for (const ev of events) {
+    if (!ev.payload?.id) continue
+    if (ev.type === 'agent.tool_started') startedById.set(ev.payload.id, ev)
+    if (ev.type === 'agent.tool_finished') finishedIds.add(ev.payload.id)
+  }
+  return { startedById, finishedIds }
+}
+
+function EventRow({ ev, prev, tools }) {
   if (ev.type === 'resumed.history') {
     return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
   }
@@ -41,7 +54,12 @@ function EventRow({ ev, prev }) {
     return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
   if (ev.type === 'user.message') {
-    return <div className="va-user">你 ▸ {ev.payload.text}</div>
+    return (
+      <div className="va-turn">
+        <div className="va-turn-label">&gt; user</div>
+        <div className="va-user">{ev.payload.text}</div>
+      </div>
+    )
   }
   if (ev.type === 'turn.stopped') {
     return (
@@ -53,21 +71,37 @@ function EventRow({ ev, prev }) {
   if (ev.type === 'agent.thinking') {
     return (
       <details className="va-thinking">
-        <summary>💭 Thinking</summary>
+        <summary>··· thinking</summary>
         <div className="va-thinking-body">{ev.payload.text}</div>
       </details>
     )
   }
   if (ev.type === 'agent.message') {
-    return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
+    return (
+      <div className="va-turn">
+        <div className="va-turn-label">&gt; assistant</div>
+        <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
+      </div>
+    )
   }
-  if (ev.type === 'agent.tool_started' || ev.type === 'agent.tool_finished') {
-    // 折叠行是脱敏摘要，展开见脱敏全文（detail 兜底旧格式事件的 summary）
-    const arrow = ev.type === 'agent.tool_started' ? '▶' : '✔'
+  if (ev.type === 'agent.tool_started') {
+    // 同 id 已有 finished：行移到 finished 位置渲染成 ✓，此处跳过
+    if (ev.payload.id && tools.finishedIds.has(ev.payload.id)) return null
+    // 运行中：摘要/展开都是入参侧
     return (
       <details className="va-tool">
-        <summary>{arrow} {ev.payload.tool} · {ev.payload.summary}</summary>
+        <summary>▶ {ev.payload.tool}({ev.payload.summary})</summary>
         <pre className="va-tool-detail">{ev.payload.detail ?? ev.payload.summary}</pre>
+      </details>
+    )
+  }
+  if (ev.type === 'agent.tool_finished') {
+    const started = ev.payload.id ? tools.startedById.get(ev.payload.id) : null
+    const head = started?.payload ?? ev.payload // ✓ 行显示入参主参数；旧事件兜底自身摘要
+    return (
+      <details className="va-tool done">
+        <summary>✓ {head.tool}({head.summary})</summary>
+        <pre className="va-tool-detail">{ev.payload.detail ?? head.detail ?? head.summary}</pre>
       </details>
     )
   }
@@ -190,6 +224,7 @@ export default function App() {
   const [sideOpen, setSideOpen] = useState(true)
   const [tab, setTab] = useState('chat') // chat | artifact
   const artifactCount = s.artifacts.groups.reduce((n, g) => n + g.files.length, 0)
+  const tools = run ? toolIndex(run.events) : { startedById: new Map(), finishedIds: new Set() }
 
   const scrollToBottom = () => {
     const el = scrollRef.current
@@ -287,7 +322,9 @@ export default function App() {
                     {run.events.length === 0 && (
                       <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
                     )}
-                    {run.events.map((ev, i) => <EventRow key={ev.seq} ev={ev} prev={run.events[i - 1]} />)}
+                    {run.events.map((ev, i) => (
+                      <EventRow key={ev.seq} ev={ev} prev={run.events[i - 1]} tools={tools} />
+                    ))}
                     {!follow && (
                       <button
                         className="va-jump"
