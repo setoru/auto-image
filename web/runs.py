@@ -105,6 +105,9 @@ class RunManager:
         if source is not None:
             run.resumed_from = source.run_id
             run.resume_session_id = source.session_id
+            # 任务名继承源头最早标题：接续会话与源是同一任务的延续，
+            # 不随接续后的首条新消息改名（intervene 只对无名 run 命名）
+            run.first_prompt = source.first_prompt
         self.runs[run.run_id] = run
         return run
 
