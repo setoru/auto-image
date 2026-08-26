@@ -18,13 +18,14 @@ const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED
 
 // 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
 // result 就是最后一条 assistant 文本（CLI Result 语义），重复成框是噪音；
-// 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框
+// 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框。
+// 线上不断言「可继续」——活会话输入条已表达，历史回放里则与只读语义相悖
 function turnCompletedRow(ev, prev) {
   const dup =
     prev?.type === 'agent.message' &&
     String(prev.payload.text ?? '').trim() === String(ev.payload.result ?? '').trim() &&
     ev.payload.result?.trim()
-  if (dup) return <div className="va-stage-line">─ 回合完成 · 会话可继续 ─</div>
+  if (dup) return <div className="va-stage-line">─ 回合完成 ─</div>
   return (
     <div className="va-result">
       <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
@@ -104,7 +105,7 @@ function EventRow({ ev, prev, tools }) {
     return <div className="va-canceled">— 会话已关闭 —</div>
   }
   if (ev.type === 'run.ended') {
-    return <div className="va-canceled">— 历史会话（服务重启找回，只读）—</div>
+    return <div className="va-canceled">— 历史会话回放完毕（重启找回，只读）—</div>
   }
   return null
 }
