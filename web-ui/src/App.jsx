@@ -54,12 +54,7 @@ function EventRow({ ev, prev, tools }) {
     return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
   if (ev.type === 'user.message') {
-    return (
-      <div className="va-turn">
-        <div className="va-turn-label">&gt; user</div>
-        <div className="va-user">{ev.payload.text}</div>
-      </div>
-    )
+    return <div className="va-user">{ev.payload.text}</div>
   }
   if (ev.type === 'turn.stopped') {
     return (
@@ -79,24 +74,23 @@ function EventRow({ ev, prev, tools }) {
   if (ev.type === 'agent.message') {
     return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
   }
-  if (ev.type === 'agent.tool_started') {
+  if (ev.type === 'agent.tool_started' || ev.type === 'agent.tool_finished') {
     // 同 id 已有 finished：行移到 finished 位置渲染成 ✓，此处跳过
-    if (ev.payload.id && tools.finishedIds.has(ev.payload.id)) return null
-    // 运行中：摘要/展开都是入参侧
+    if (ev.type === 'agent.tool_started' && ev.payload.id && tools.finishedIds.has(ev.payload.id)) {
+      return null
+    }
+    const started = ev.type === 'agent.tool_finished' && ev.payload.id
+      ? tools.startedById.get(ev.payload.id)
+      : null
+    const head = started?.payload ?? ev.payload // ✓ 行显示入参主参数；旧事件兜底自身摘要
+    const body = ev.type === 'agent.tool_finished'
+      ? ev.payload.detail ?? head.detail ?? head.summary // 完成后展开体=结果全文
+      : head.detail ?? head.summary
+    const mark = ev.type === 'agent.tool_started' ? '▶' : '✓'
     return (
       <details className="va-tool">
-        <summary>▶ <b>{ev.payload.tool}</b>({ev.payload.summary})</summary>
-        <pre className="va-tool-detail">{ev.payload.detail ?? ev.payload.summary}</pre>
-      </details>
-    )
-  }
-  if (ev.type === 'agent.tool_finished') {
-    const started = ev.payload.id ? tools.startedById.get(ev.payload.id) : null
-    const head = started?.payload ?? ev.payload // ✓ 行显示入参主参数；旧事件兜底自身摘要
-    return (
-      <details className="va-tool done">
-        <summary>✓ <b>{head.tool}</b>({head.summary})</summary>
-        <pre className="va-tool-detail">{ev.payload.detail ?? head.detail ?? head.summary}</pre>
+        <summary>{mark} <b>{head.tool}</b>({head.summary})</summary>
+        <pre className="va-tool-detail">{body}</pre>
       </details>
     )
   }
