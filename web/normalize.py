@@ -87,9 +87,14 @@ def tool_diff(tool, value):
 
 def primary_arg(tool, value):
     """入参摘要的主参数：已知工具取主字段，未知工具取首个字符串字段，
-    再兜底整体可读格式。"""
+    再兜底整体可读格式。TodoWrite 摘要为完成计数。"""
     if not isinstance(value, dict):
         return _readable(value)
+    if tool == "TodoWrite" and isinstance(value.get("todos"), list):
+        done = sum(
+            1 for t in value["todos"] if isinstance(t, dict) and t.get("status") == "completed"
+        )
+        return f"{done}/{len(value['todos'])} 完成"
     field = PRIMARY_INPUT_FIELD.get(tool)
     if isinstance(value.get(field), str) and value[field]:
         return value[field]
@@ -122,6 +127,33 @@ def detail(value):
     if len(value) > TOOL_DETAIL_LIMIT:
         value = value[:TOOL_DETAIL_LIMIT] + f"\n…（已截断，脱敏后全文 {len(value)} 字符）"
     return value
+
+
+def detail_input(tool, value):
+    """入参全文：k: v 行，但已作摘要主参数的字段不重复（如 Bash 的
+    description）；过滤后无剩余字段时保留全量（Read 仅 file_path 一项）。"""
+    if isinstance(value, dict):
+        rest = {k: v for k, v in value.items() if k != PRIMARY_INPUT_FIELD.get(tool)}
+        if rest:
+            value = rest
+    return detail(value)
+
+
+def tool_todos(value):
+    """TodoWrite 入参 → [{content, status}] 脱敏列表（前端渲染 checkbox）；
+    形状不合返回 None（前端回退普通输入块）。"""
+    todos = value.get("todos") if isinstance(value, dict) else None
+    if not isinstance(todos, list):
+        return None
+    items = [
+        {
+            "content": redact_text(t["content"]),
+            "status": t["status"] if isinstance(t.get("status"), str) else "pending",
+        }
+        for t in todos
+        if isinstance(t, dict) and isinstance(t.get("content"), str)
+    ]
+    return items or None
 
 
 def stage_from_tool_use(block):
@@ -172,8 +204,9 @@ def normalize_message(message, tool_names):
                         "id": block.get("id"),
                         "tool": block.get("name", ""),
                         "summary": summarize_input(block.get("name", ""), block.get("input")),
-                        "detail": detail(block.get("input")),
+                        "detail": detail_input(block.get("name", ""), block.get("input")),
                         "diff": tool_diff(block.get("name", ""), block.get("input")),
+                        "todos": tool_todos(block.get("input")),
                     },
                 ))
     elif mtype == "user":

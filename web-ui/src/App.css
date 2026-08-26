@@ -151,6 +151,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 0; white-space: pre-wrap; word-break: break-word;
   color: var(--ink-2); font-size: 12px; max-height: 320px; overflow: auto;
 }
+/* TodoWrite checkbox 列表：完成划线灰、进行中加粗、待办灰 */
+.va-todos { font-size: 12px; }
+.va-todo { padding: 1px 0; }
+.va-todo.completed { color: var(--ink-3); text-decoration: line-through; }
+.va-todo.in_progress { color: var(--ink); font-weight: 600; }
+.va-todo.pending { color: var(--ink-2); }
 /* diff 行染色：+ 绿 / - 红 / 头部与上下文灰 */
 .va-diff span { display: block; }
 .va-diff .add { color: var(--ok); background: #e6ffec; }

@@ -67,7 +67,33 @@ def test_bash_summary_prefers_description():
              "input": {"command": "apt install -y nginx", "description": "安装 nginx"}},
         ]},
     }
-    assert normalize_message(msg, {})[0][1]["summary"] == "安装 nginx"
+    payload = normalize_message(msg, {})[0][1]
+    assert payload["summary"] == "安装 nginx"
+    # 摘要已显示的主字段不进输入全文
+    assert payload["detail"] == "command: apt install -y nginx"
+
+
+def test_todowrite_summary_count_and_structured_todos():
+    msg = {
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "id": "t12", "name": "TodoWrite",
+             "input": {"todos": [
+                 {"content": "装 nginx", "status": "completed"},
+                 {"content": "验证"},
+             ]}},
+        ]},
+    }
+    payload = normalize_message(msg, {})[0][1]
+    assert payload["summary"] == "1/2 完成"
+    assert payload["todos"] == [
+        {"content": "装 nginx", "status": "completed"},
+        {"content": "验证", "status": "pending"},  # 缺 status 兜底 pending
+    ]
+    # 形状不合：回退普通输入块
+    bad = {"type": "tool_use", "id": "t13", "name": "TodoWrite", "input": {"todos": "x"}}
+    msg["message"]["content"][0] = bad
+    assert normalize_message(msg, {})[0][1]["todos"] is None
 
 
 def test_edit_tool_use_emits_line_diff():

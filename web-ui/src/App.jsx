@@ -78,6 +78,21 @@ function IoDiff({ text }) {
   )
 }
 
+// TodoWrite 的输入块：checkbox 列表（☑ 完成 / ◐ 进行中 / ☐ 待办）
+function IoTodos({ todos }) {
+  const MARK = { completed: '☑', in_progress: '◐', pending: '☐' }
+  return (
+    <div className="va-tool-io">
+      <div className="va-tool-io-title">todos</div>
+      <div className="va-todos">
+        {todos.map((t, i) => (
+          <div key={i} className={`va-todo ${t.status}`}>{MARK[t.status] ?? '☐'} {t.content}</div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function EventRow({ ev, prev, tools }) {
   if (ev.type === 'resumed.history') {
     return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
@@ -124,7 +139,7 @@ function EventRow({ ev, prev, tools }) {
       <details className="va-tool">
         <summary>{mark} <b>{head.tool}</b>({head.summary})</summary>
         <div className="va-tool-detail">
-          {head.diff ? <IoDiff text={head.diff} /> : <IoBlock title="输入" text={input} />}
+          {head.diff ? <IoDiff text={head.diff} /> : head.todos ? <IoTodos todos={head.todos} /> : <IoBlock title="输入" text={input} />}
           {output !== null && <IoBlock title="输出" text={output} />}
         </div>
       </details>
