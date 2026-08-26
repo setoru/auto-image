@@ -55,7 +55,25 @@ def test_tool_use_maps_to_started_with_summary_and_detail():
     # 摘要取主参数（Bash→command），全文为 k: v 可读行，原始 input 不整体透出
     assert payload["summary"] == "cat scope.yaml"
     assert payload["detail"] == "command: cat scope.yaml"
+    assert payload["diff"] is None  # 非 Edit/Write 无 diff
     assert "input" not in payload
+
+
+def test_edit_tool_use_emits_line_diff():
+    msg = {
+        "type": "assistant",
+        "message": {"content": [
+            {"type": "tool_use", "id": "t9", "name": "Edit",
+             "input": {"file_path": "web/a.py", "old_string": "a=1\nb=2", "new_string": "a=2"}},
+        ]},
+    }
+    payload = normalize_message(msg, {})[0][1]
+    assert payload["diff"] == "--- web/a.py\n+++ web/a.py\n-a=1\n-b=2\n+a=2"
+    # Write 无 old：全 + 行；路径缺失也有兜底头
+    msg["message"]["content"][0] = {
+        "type": "tool_use", "id": "t10", "name": "Write", "input": {"content": "x\ny"},
+    }
+    assert normalize_message(msg, {})[0][1]["diff"] == "--- (未知路径)\n+++ (未知路径)\n+x\n+y"
 
 
 def test_tool_detail_truncates_after_redaction():

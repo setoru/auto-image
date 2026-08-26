@@ -67,6 +67,24 @@ def _readable(value):
     return json.dumps(value, ensure_ascii=False, default=str)
 
 
+def tool_diff(tool, value):
+    """Edit/Write 入参 → 行级 diff 文本（---/+++ 头 + 每行 -/+ 前缀），
+    经 detail() 同款脱敏与截断；形状不合返回 None（前端回退普通输入块）。"""
+    if not isinstance(value, dict):
+        return None
+    if tool == "Write" and isinstance(value.get("content"), str):
+        old, new = "", value["content"]
+    else:
+        old, new = value.get("old_string"), value.get("new_string")
+        if not isinstance(old, str) or not isinstance(new, str):
+            return None
+    path = value.get("file_path") or value.get("notebook_path") or "(未知路径)"
+    lines = [f"--- {path}", f"+++ {path}"]
+    lines += [f"-{ln}" for ln in old.splitlines()]
+    lines += [f"+{ln}" for ln in new.splitlines()]
+    return detail("\n".join(lines))
+
+
 def primary_arg(tool, value):
     """入参摘要的主参数：已知工具取主字段，未知工具取首个字符串字段，
     再兜底整体可读格式。"""
@@ -155,6 +173,7 @@ def normalize_message(message, tool_names):
                         "tool": block.get("name", ""),
                         "summary": summarize_input(block.get("name", ""), block.get("input")),
                         "detail": detail(block.get("input")),
+                        "diff": tool_diff(block.get("name", ""), block.get("input")),
                     },
                 ))
     elif mtype == "user":

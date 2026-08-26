@@ -151,6 +151,12 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   margin: 0; white-space: pre-wrap; word-break: break-word;
   color: var(--ink-2); font-size: 12px; max-height: 320px; overflow: auto;
 }
+/* diff 行染色：+ 绿 / - 红 / 头部与上下文灰 */
+.va-diff span { display: block; }
+.va-diff .add { color: var(--ok); background: #e6ffec; }
+.va-diff .del { color: var(--bad); background: #ffebe9; }
+.va-diff .meta { color: var(--ink-3); }
+.va-diff .ctx { color: var(--ink-2); }
 .va-canceled { color: var(--warn); text-align: center; margin: 8px 0; }
 .va-paused { color: var(--warn); text-align: center; margin: 8px 0; }
 .va-failed { color: var(--bad); text-align: center; margin: 8px 0; }

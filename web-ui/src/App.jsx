@@ -57,6 +57,27 @@ function IoBlock({ title, text }) {
   )
 }
 
+// Edit/Write 的输入块：diff 文本按行首染色（+ 绿 / - 红 / 头部灰）
+function IoDiff({ text }) {
+  return (
+    <div className="va-tool-io">
+      <div className="va-tool-io-title">diff</div>
+      <pre className="va-tool-io-text va-diff">
+        {text.split('\n').map((line, i) => {
+          const cls = line.startsWith('+++') || line.startsWith('---')
+            ? 'meta'
+            : line.startsWith('+')
+              ? 'add'
+              : line.startsWith('-')
+                ? 'del'
+                : 'ctx'
+          return <span key={i} className={cls}>{line}{'\n'}</span>
+        })}
+      </pre>
+    </div>
+  )
+}
+
 function EventRow({ ev, prev, tools }) {
   if (ev.type === 'resumed.history') {
     return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
@@ -103,7 +124,7 @@ function EventRow({ ev, prev, tools }) {
       <details className="va-tool">
         <summary>{mark} <b>{head.tool}</b>({head.summary})</summary>
         <div className="va-tool-detail">
-          <IoBlock title="输入" text={input} />
+          {head.diff ? <IoDiff text={head.diff} /> : <IoBlock title="输入" text={input} />}
           {output !== null && <IoBlock title="输出" text={output} />}
         </div>
       </details>
