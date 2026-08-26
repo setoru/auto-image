@@ -77,12 +77,7 @@ function EventRow({ ev, prev, tools }) {
     )
   }
   if (ev.type === 'agent.message') {
-    return (
-      <div className="va-turn">
-        <div className="va-turn-label">&gt; assistant</div>
-        <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
-      </div>
-    )
+    return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
   }
   if (ev.type === 'agent.tool_started') {
     // 同 id 已有 finished：行移到 finished 位置渲染成 ✓，此处跳过
@@ -90,7 +85,7 @@ function EventRow({ ev, prev, tools }) {
     // 运行中：摘要/展开都是入参侧
     return (
       <details className="va-tool">
-        <summary>▶ {ev.payload.tool}({ev.payload.summary})</summary>
+        <summary>▶ <b>{ev.payload.tool}</b>({ev.payload.summary})</summary>
         <pre className="va-tool-detail">{ev.payload.detail ?? ev.payload.summary}</pre>
       </details>
     )
@@ -100,7 +95,7 @@ function EventRow({ ev, prev, tools }) {
     const head = started?.payload ?? ev.payload // ✓ 行显示入参主参数；旧事件兜底自身摘要
     return (
       <details className="va-tool done">
-        <summary>✓ {head.tool}({head.summary})</summary>
+        <summary>✓ <b>{head.tool}</b>({head.summary})</summary>
         <pre className="va-tool-detail">{ev.payload.detail ?? head.detail ?? head.summary}</pre>
       </details>
     )
