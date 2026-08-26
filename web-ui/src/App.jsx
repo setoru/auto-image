@@ -47,6 +47,16 @@ function toolIndex(events) {
   return { startedById, finishedIds }
 }
 
+// 工具展开体的一块：小标题 + 浅底圆角内容块，输入/输出各一块
+function IoBlock({ title, text }) {
+  return (
+    <div className="va-tool-io">
+      <div className="va-tool-io-title">{title}</div>
+      <pre className="va-tool-io-text">{text}</pre>
+    </div>
+  )
+}
+
 function EventRow({ ev, prev, tools }) {
   if (ev.type === 'resumed.history') {
     return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
@@ -83,15 +93,19 @@ function EventRow({ ev, prev, tools }) {
     const started = ev.type === 'agent.tool_finished' && ev.payload.id
       ? tools.startedById.get(ev.payload.id)
       : null
-    const head = started?.payload ?? ev.payload // ✓ 行显示入参主参数；旧事件兜底自身摘要
-    const body = ev.type === 'agent.tool_finished'
-      ? ev.payload.detail ?? head.detail ?? head.summary // 完成后展开体=结果全文
-      : head.detail ?? head.summary
+    const head = started?.payload ?? ev.payload // 行显示入参主参数；旧事件兜底自身摘要
+    const input = head.detail ?? head.summary // 输入全文（k: v 行），折叠行截断的完整版
+    const output = ev.type === 'agent.tool_finished' // 完成后附结果全文
+      ? ev.payload.detail ?? ev.payload.summary
+      : null
     const mark = ev.type === 'agent.tool_started' ? '▶' : '✓'
     return (
       <details className="va-tool">
         <summary>{mark} <b>{head.tool}</b>({head.summary})</summary>
-        <pre className="va-tool-detail">{body}</pre>
+        <div className="va-tool-detail">
+          <IoBlock title="输入" text={input} />
+          {output !== null && <IoBlock title="输出" text={output} />}
+        </div>
       </details>
     )
   }
