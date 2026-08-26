@@ -47,7 +47,6 @@ let state = {
   order: [],
   viewRunId: null,
   submitError: null,
-  resumeLast: false,
   now: Date.now(),
   artifacts: { groups: [] }, // deploy/ 全量产物（目录分组，全局不属于任何 run）
   artifact: null,            // 当前查看中的产物内容（单槽，点击整体替换）
@@ -81,15 +80,6 @@ export function useRunState() {
 
 export function executingRunId() {
   return state.order.find((id) => state.runs[id]?.status === RUNNING) ?? null
-}
-
-// 最近的终态会话（「接续上次」的续接源；无终态会话时不提供勾选）
-export function lastTerminalRunId() {
-  return state.order.find((id) => !isActive(state.runs[id]?.status)) ?? null
-}
-
-export function toggleResumeLast() {
-  set({ resumeLast: !state.resumeLast })
 }
 
 // 查看中的会话（header / 输入条 / 消息流都以它为对象）
@@ -231,16 +221,14 @@ export async function loadRuns() {
 }
 
 // 新建 = 一步创建空会话（WAITING_INPUT），无中间表单；执行中置灰由 UI 保证；
-// resumeFrom 给定时从该终态会话续接上下文（查看历史会话时的「接续此会话」），
-// 否则勾选「接续上次」时取最近终态会话（一次性，用毕复位）
+// resumeFrom 给定时从该终态会话续接上下文（「↩ 接续此会话」）
 export async function createRun(resumeFrom = null) {
   if (executingRunId()) {
     fail(conflictText('deployment_in_progress'))
     return
   }
-  const resume = resumeFrom ?? (state.resumeLast ? lastTerminalRunId() : null)
   try {
-    const data = await postJson('/api/runs', resume ? { resume_from: resume } : {})
+    const data = await postJson('/api/runs', resumeFrom ? { resume_from: resumeFrom } : {})
     const run = makeRun({
       runId: data.run_id,
       status: data.status,
@@ -253,7 +241,6 @@ export async function createRun(resumeFrom = null) {
       order: [run.runId, ...state.order],
       viewRunId: run.runId,
       submitError: null,
-      resumeLast: false,
     })
     attachStream(run.runId)
   } catch (err) {

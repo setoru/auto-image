@@ -73,15 +73,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .chat-bar input:disabled { background: var(--surface-dim); color: var(--ink-3); }
 .chat-bar button { border-color: var(--line); }
 .chat-new { flex-shrink: 0; color: var(--accent); border-color: var(--accent); }
-/* 「接续上次」勾选：存在终态会话时出现，新建即从该会话续接上下文 */
-.chat-resume {
-  flex-shrink: 0; display: inline-flex; gap: 5px; align-items: center;
-  font-size: 12px; color: var(--ink-2); cursor: pointer; user-select: none;
-}
-.chat-resume:has(input:disabled) { color: var(--ink-3); cursor: default; }
 .chat-continue {
-  background: var(--surface); border: 1px solid var(--line); border-radius: 8px;
-  padding: 4px 12px; font-size: 12.5px; cursor: pointer; white-space: nowrap;
+  flex-shrink: 0; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px 12px; font-size: 12.5px; cursor: pointer;
+  white-space: nowrap;
 }
 .chat-continue:hover:not(:disabled) { border-color: var(--ink-2); }
 .chat-continue:disabled { color: var(--ink-3); cursor: default; }

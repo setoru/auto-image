@@ -4,8 +4,6 @@
 //   执行中 + 有输入   -> 发送（服务端先停止再投递）
 //   挂起 + 无其他执行 -> 发送
 //   挂起 + 另一会话执行中 -> 输入禁用，提示原因
-// 「+ 新建」旁的「接续上次」勾选：存在终态会话时才出现，勾选即下次新建
-// 从最近终态会话续接上下文（resume_from）。
 // 查看终态会话（含重启找回的历史）时出现「↩ 接续此会话」：一键从当前
 // 查看的会话续接（终态只读是状态机语义——续接 = 以该会话新建，上下文完整）。
 import { useState } from 'react'
@@ -13,10 +11,8 @@ import * as store from '../store.js'
 import { firstPromptPreview, hasPrompt } from '../derive.js'
 
 export default function ChatBar() {
-  const s = store.useRunState()
   const run = store.useViewRun()
   const executing = !!store.executingRunId()
-  const resumeSource = store.lastTerminalRunId()
   const [text, setText] = useState('')
 
   // 挂起会话在另一会话执行中时输入禁用（RUNNING 的会话即执行中的那个，不受此限）
@@ -65,23 +61,9 @@ export default function ChatBar() {
       >
         + 新建
       </button>
-      {resumeSource && !isTerminal && (
-        <label
-          className="chat-resume"
-          title={`新建时从『${firstPromptPreview(s.runs[resumeSource])}』续接上下文`}
-        >
-          <input
-            type="checkbox"
-            checked={s.resumeLast}
-            onChange={() => store.toggleResumeLast()}
-            disabled={executing}
-          />
-          接续上次
-        </label>
-      )}
       {isTerminal && (
         <button
-          className="chat-resume chat-continue"
+          className="chat-continue"
           onClick={() => store.createRun(run.runId)}
           disabled={executing}
           title={`从『${firstPromptPreview(run)}』的上下文继续对话（新建一条续接会话）`}
