@@ -7,7 +7,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtElapsed, firstPromptPreview, resumeMark, fmtSize } from './derive.js'
+import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 
 const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已关闭', FAILED: '失败', ENDED: '已结束' }
@@ -333,7 +333,10 @@ export default function App() {
             {run.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
             <span className="va-spacer" />
             <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : '—'}</span>
-            <span className="va-elapsed">{fmtElapsed(run.startedAt, run.endedAt ?? s.now)}</span>
+            <span className="va-elapsed" title="累计执行：各回合之和，扣除等待输入">
+              总计时间：{fmtActive(run, s.now)}
+            </span>
+            <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(run)}</span>
             <button onClick={() => store.cancel()} disabled={!store.isActive(run.status)}>
               结束会话
             </button>

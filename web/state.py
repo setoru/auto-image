@@ -62,6 +62,7 @@ def _record(run):
         "first_prompt": run.first_prompt,
         "title": run.title,
         "created_at": run.created_at,
+        "last_event_at": run.last_event_at,
         "session_id": run.session_id,
         "resumed_from": run.resumed_from,
     }

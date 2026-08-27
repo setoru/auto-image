@@ -182,7 +182,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 .va-result {
-  margin-top: 14px; border: 1px solid var(--line); border-left: 3px solid var(--ok);
+  margin-top: 14px; border: 1px solid var(--line);
   border-radius: 6px; padding: 10px 12px; background: var(--surface-dim);
 }
 .va-result-title { font-family: var(--sans); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
@@ -212,9 +212,6 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
 .va-card-big { font-size: 17px; font-weight: 700; }
 .va-card-line { font-size: 12.5px; color: var(--ink-2); }
-.va-card-msg { font-family: var(--mono); font-size: 12px; }
-.va-card-result { border-left: 3px solid var(--ok); background: var(--surface-dim); }
-.va-card-result pre { margin: 0; white-space: pre-wrap; font-size: 12.5px; }
 
 /* ---- 主区 tabs ---- */
 .va-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px; flex-shrink: 0; }

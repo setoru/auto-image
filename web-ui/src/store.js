@@ -149,6 +149,8 @@ function appendTo(runId, event) {
   const run = state.runs[runId]
   if (!run || run.events.some((ev) => ev.seq === event.seq)) return
   const patch = { events: [...run.events, event] }
+  // 最后活动时刻以服务端事件 ts 为准（刷新/SSE 重放后不漂移）
+  if (event.payload.ts) patch.lastEventAt = event.payload.ts * 1000
   if (event.type === 'stage.changed') patch.stage = event.payload.stage
   if (event.type === 'run.title_changed') patch.title = event.payload.title
   if (event.type === 'turn.completed') patch.result = event.payload.result
@@ -186,6 +188,7 @@ function makeRun(overrides) {
     connection: 'idle',
     startedAt: null,
     endedAt: null,
+    lastEventAt: null,
     es: null,
     ...overrides,
   }
@@ -211,6 +214,7 @@ export async function loadRuns() {
         resumedFrom: s.resumed_from,
         startedAt: s.started_at * 1000,
         endedAt: s.ended_at ? s.ended_at * 1000 : null,
+        lastEventAt: s.last_event_at ? s.last_event_at * 1000 : null,
       })
       order.push(s.run_id)
     }

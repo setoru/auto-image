@@ -47,6 +47,7 @@ class Run:
         self.resumed_from = None      # 续接来源 run_id（对外呈现）
         self.stop_requested = False   # 停止请求标记：run_agent 在回合收尾消费
         self.ended_at = None          # 终态时刻（历史回看的时长上限；非终态为 None）
+        self.last_event_at = None     # 最后活动时刻（时长冻结点；rebuild 以 ended_at 兜底）
 
     def summary(self):
         return {
@@ -57,6 +58,7 @@ class Run:
             "title": self.title,
             "started_at": self.created_at,
             "ended_at": self.ended_at,
+            "last_event_at": self.last_event_at,
             "resumed_from": self.resumed_from,
         }
 

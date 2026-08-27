@@ -140,6 +140,8 @@ async def test_rebuild_restores_history_viewable():
         assert run["title"] == "部署 nginx"  # 标题来自 transcript 的 custom-title 行
         assert run["started_at"] == 1_700_000_000.0
         assert run["stage"] == "GUIDE"
+        # 历史无逐事件时刻，最后活动以 transcript 落盘时刻近似（= ended_at）
+        assert run["last_event_at"] == run["ended_at"], run
         run_id = run["run_id"]
 
         # 事件流从 transcript 消息重新映射：run.started 起步、run.ended 收尾

@@ -61,6 +61,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
+    store.bind_runs(manager.runs)
     factory = session_factory or SDKSessionFactory()
     titles = title_factory or sdk_mod.TitleSessionFactory()
     turn_timeout = sdk_mod.TURN_TIMEOUT_SECONDS if turn_timeout is None else turn_timeout
@@ -260,7 +261,8 @@ async def _interrupt_if_requested(run):
 
 
 def _sse_chunk(event):
-    data = json.dumps(event["payload"], ensure_ascii=False)
+    # ts 随 payload 下发（前端时长的冻结点），seq 走 SSE id 维持断点续传
+    data = json.dumps({**event["payload"], "ts": event["ts"]}, ensure_ascii=False)
     return f"id: {event['seq']}\nevent: {event['type']}\ndata: {data}\n\n"
 
 

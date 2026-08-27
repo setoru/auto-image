@@ -159,8 +159,12 @@ async def test_first_message_drives_scripted_turn():
         assert seqs == list(range(1, len(events) + 1)), seqs
         # 首条指令原样进入事件流
         assert events[1]["data"]["text"] == "部署 nginx 1.25 到 server-a"
+        # 每条事件带服务端 ts（时长冻结点），单调不回退
+        tss = [e["data"]["ts"] for e in events]
+        assert all(isinstance(t, (int, float)) for t in tss), tss
+        assert tss == sorted(tss), tss
         # 阶段由 Task + subagent_type 推导
-        assert events[4]["data"] == {"stage": "GUIDE", "status": "running"}
+        assert events[4]["data"] == {"stage": "GUIDE", "status": "running", "ts": events[4]["data"]["ts"]}
         # 工具事件带工具名 + 脱敏摘要（折叠行）+ 脱敏全文（展开查看）
         assert events[5]["data"]["tool"] == "Task"
         assert "detail" in events[5]["data"] and "summary" in events[5]["data"]
@@ -617,6 +621,23 @@ async def test_resume_carries_history_into_new_stream():
         events2 = drop_title_events(events2)
         assert [e["event"] for e in events2][-1] == "turn.completed"
         assert int(events2[-1]["id"]) > int(events[-1]["id"])
+
+
+async def test_summary_tracks_last_event_at():
+    """摘要的 last_event_at 随事件推进：创建即 run.started 的 ts，回合
+    推进后等于最近一条事件 ts（前端时长的冻结点，页面刷新后从摘要恢复）。"""
+    app = make_app()
+    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
+        summary = (await client.get(f"/api/runs/{run_id}")).json()
+        assert summary["last_event_at"] == events[-1]["data"]["ts"], summary
+
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "WAITING_INPUT")
+        events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
+        summary = (await client.get(f"/api/runs/{run_id}")).json()
+        assert summary["last_event_at"] == events[-1]["data"]["ts"], summary
 
 
 async def main():

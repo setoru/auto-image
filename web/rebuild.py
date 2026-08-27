@@ -99,6 +99,7 @@ def restore_active_runs(manager, store, records, get_session_messages):
         run.first_prompt = record.get("first_prompt")
         run.title = record.get("title")
         run.created_at = record["created_at"]
+        run.last_event_at = record.get("last_event_at")
         manager.register(run)
         manager.adopt_ids([run.run_id])
         store.create(run.run_id)
@@ -107,6 +108,8 @@ def restore_active_runs(manager, store, records, get_session_messages):
         if record.get("status") == RUNNING:
             store.append(run.run_id, "run.interrupted", {})
         restored.append(run)
+        # 上面重放的事件不是真实活动（都是重启当下的时刻），恢复簿记值
+        run.last_event_at = record.get("last_event_at")
     return restored
 
 
@@ -126,6 +129,9 @@ def _rebuild_run(manager, store, info, messages):
     store.append(run.run_id, "run.started", {})
     replay_messages(run, store, messages)
     store.append(run.run_id, "run.ended", {})
+    # 历史无逐事件时刻：最后活动以 transcript 落盘时刻近似（= ended_at）。
+    # 上面重建事件流的 ts 都是重启当下的时刻，不是真实活动，恢复后覆盖。
+    run.last_event_at = run.ended_at
     return run
 
 
