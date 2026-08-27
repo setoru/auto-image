@@ -1,4 +1,4 @@
-// 从会话状态派生展示数据（布局自理），与服务端 first_prompt 语义对齐
+// 从会话状态派生展示数据（布局自理），与服务端 first_prompt / title 语义对齐
 
 // 首条指令原文：服务端摘要的 firstPrompt 优先（重启找回的历史在事件回放前就有名字），
 // 否则取事件流首条 user.message。空会话（含尚未回放的历史）返回 null。
@@ -12,8 +12,10 @@ export function hasPrompt(run) {
   return firstPromptText(run) != null
 }
 
-// 任务名 = 首条指令截断（与 SDK list_sessions 的 first_prompt 对齐）
+// 任务名 = LLM 标题（服务端 run.title / 事件流 run.title_changed）优先，
+// 回退首条指令截断（生成中/失败/老会话）
 export function firstPromptPreview(run, max = 18) {
+  if (run?.title) return run.title.length > max ? run.title.slice(0, max) + '…' : run.title
   const first = firstPromptText(run)
   if (first == null) return '(空会话)'
   const t = String(first).trim().replace(/\s+/g, ' ')

@@ -47,6 +47,11 @@ def parse_sse_block(block_lines):
     return ev
 
 
+def drop_title_events(events):
+    """剔除 run.title_changed（标题生成异步落流、时序自由，主缝断言不关心）。"""
+    return [e for e in events if e["event"] != "run.title_changed"]
+
+
 async def collect_sse(resp, stop=None, deadline_s=5.0):
     """聚合 SSE 流为 (事件列表, 心跳行数)；stop(ev) 为 True 时停止读取。"""
     pings = 0
@@ -136,6 +141,7 @@ async def test_first_message_drives_scripted_turn():
         await wait_status(client, run_id, "WAITING_INPUT")
         resp = await open_stream(client, run_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
+        events = drop_title_events(events)
         types = [e["event"] for e in events]
         assert types == [
             "run.started",
@@ -262,6 +268,7 @@ async def test_second_turn_after_completed_turn_replays_new_events_only():
         await wait_status(client, run_id, "WAITING_INPUT")
         resp = await open_stream(client, run_id)
         first, _ = await collect_sse(resp, deadline_s=1.0)
+        first = drop_title_events(first)
         assert first[-1]["event"] == "turn.completed"
         await resp.aclose()
 
@@ -270,7 +277,7 @@ async def test_second_turn_after_completed_turn_replays_new_events_only():
         # 以首回合末尾为断点重连：只补发第二回合
         resp = await open_stream(client, run_id, last_event_id=int(first[-1]["id"]))
         second, _ = await collect_sse(resp, deadline_s=1.0)
-        types = [e["event"] for e in second]
+        types = [e["event"] for e in drop_title_events(second)]
         assert types[0] == "user.message", types
         assert "run.started" not in types
 
@@ -474,8 +481,10 @@ async def test_resume_from_canceled_run_carries_session():
         body = r.json()
         assert body["resumed_from"] == run_a
         assert body["status"] == "WAITING_INPUT"
-        # 工厂收到源 run 的 SDK 会话 id（来自其回合 Result），而非全新会话
-        assert app.state.session_factory.session_ids == [None, "sess_fake_1"]
+        # 工厂收到源 run 的 SDK 会话 id（来自其回合 Result），而非全新会话；
+        # 中途混入的 None 调用是标题生成的一次性会话（与部署会话同工厂）
+        ids = app.state.session_factory.session_ids
+        assert "sess_fake_1" in ids and ids[-1] == "sess_fake_1", ids
 
         # 续接会话照常执行首条指令
         run_b = body["run_id"]
@@ -484,6 +493,7 @@ async def test_resume_from_canceled_run_carries_session():
         await wait_status(client, run_b, "WAITING_INPUT")
         resp = await open_stream(client, run_b)
         events, _ = await collect_sse(resp, deadline_s=1.0)
+        events = drop_title_events(events)
         assert [e["event"] for e in events][-1] == "turn.completed"
 
 
@@ -498,7 +508,8 @@ async def test_resume_from_failed_run_allowed():
         r = await client.post("/api/runs", json={"resume_from": run_a})
         assert r.status_code == 200, r.text
         assert r.json()["resumed_from"] == run_a
-        assert app.state.session_factory.session_ids == [None, "sess_fake_1"]
+        ids = app.state.session_factory.session_ids
+        assert "sess_fake_1" in ids and ids[-1] == "sess_fake_1", ids
 
 
 async def test_resume_from_non_terminal_run_conflicts():
@@ -585,6 +596,7 @@ async def test_resume_carries_history_into_new_stream():
 
         run_b = (await client.post("/api/runs", json={"resume_from": run_a})).json()["run_id"]
         events, _ = await collect_sse(await open_stream(client, run_b), deadline_s=1.0)
+        events = drop_title_events(events)
         types = [e["event"] for e in events]
         assert types[0] == "run.started"
         assert types[1] == "resumed.history"
@@ -602,6 +614,7 @@ async def test_resume_carries_history_into_new_stream():
         await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续"})
         await wait_status(client, run_b, "WAITING_INPUT")
         events2, _ = await collect_sse(await open_stream(client, run_b), deadline_s=1.0)
+        events2 = drop_title_events(events2)
         assert [e["event"] for e in events2][-1] == "turn.completed"
         assert int(events2[-1]["id"]) > int(events[-1]["id"])
 

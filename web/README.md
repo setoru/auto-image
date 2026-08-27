@@ -35,6 +35,7 @@ python web/tests/test_history.py    # 列表摘要、只读约束、假 transcri
 python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 python web/tests/test_redact.py     # 事件出口脱敏（形状正则 + 已知值清单）
 python web/tests/test_sdk.py        # options 契约（系统提示词、固定上限、无值守写权限）
+python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会话/幂等/写回）
 ```
 
 ## 模块
@@ -50,6 +51,7 @@ python web/tests/test_sdk.py        # options 契约（系统提示词、固定�
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的恢复：state 簿记里的挂起 run 恢复为可聊（原 run_id、事件流从 transcript 重放），其余 transcript 以 session 粒度重建为历史 run（ENDED，只读可续接） |
 | `state.py` | 挂起 run 的落盘簿记（`~/.auto-image-web/state.json`，全量原子替换）：run ↔ session 映射与状态机状态，transcript 里没有的东西；损坏降级为纯历史重建 |
+| `title.py` | 会话标题 LLM 生成（Codex 同构，research/codex-session-title.md）：首条指令到达即起一次性无工具会话生成，成功落 run.title + `run.title_changed` 事件 + transcript custom-title 行；失败静默维持截断标题 |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
 

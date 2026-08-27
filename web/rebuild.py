@@ -97,6 +97,7 @@ def restore_active_runs(manager, store, records, get_session_messages):
         run.resumed_from = record.get("resumed_from")
         run.stage = record.get("stage")
         run.first_prompt = record.get("first_prompt")
+        run.title = record.get("title")
         run.created_at = record["created_at"]
         manager.register(run)
         manager.adopt_ids([run.run_id])
@@ -114,6 +115,9 @@ def _rebuild_run(manager, store, info, messages):
     run.status = ENDED
     run.session_id = info.session_id
     run.first_prompt = getattr(info, "first_prompt", None)
+    # 标题优先读 transcript 的 custom-title 行（title.py 生成后写回），
+    # 没有则维持 first_prompt 截断
+    run.title = getattr(info, "custom_title", None)
     started_ms = getattr(info, "created_at", None) or getattr(info, "last_modified", 0)
     run.created_at = started_ms / 1000 if started_ms else time.time()
     run.ended_at = (getattr(info, "last_modified", 0) or 0) / 1000 or None

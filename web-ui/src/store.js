@@ -9,6 +9,7 @@ import { useSyncExternalStore } from 'react'
 // 与服务端内部事件协议一致的事件类型全集
 export const EVENT_TYPES = [
   'run.started',
+  'run.title_changed',
   'user.message',
   'agent.thinking',
   'agent.message',
@@ -149,6 +150,7 @@ function appendTo(runId, event) {
   if (!run || run.events.some((ev) => ev.seq === event.seq)) return
   const patch = { events: [...run.events, event] }
   if (event.type === 'stage.changed') patch.stage = event.payload.stage
+  if (event.type === 'run.title_changed') patch.title = event.payload.title
   if (event.type === 'turn.completed') patch.result = event.payload.result
   if (isActive(run.status)) {
     if (event.type === 'turn.completed' || event.type === 'turn.stopped') {
@@ -177,6 +179,7 @@ function makeRun(overrides) {
     status: null,
     stage: null,
     firstPrompt: null,
+    title: null,
     resumedFrom: null,
     events: [],
     result: null,
@@ -204,6 +207,7 @@ export async function loadRuns() {
         status: s.status,
         stage: s.stage,
         firstPrompt: s.first_prompt,
+        title: s.title ?? null,
         resumedFrom: s.resumed_from,
         startedAt: s.started_at * 1000,
         endedAt: s.ended_at ? s.ended_at * 1000 : null,

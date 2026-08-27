@@ -20,6 +20,7 @@ from claude_agent_sdk import (
     UserMessage,
     get_session_messages,
     list_sessions,
+    rename_session,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

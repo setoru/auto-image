@@ -37,6 +37,7 @@ class Run:
         self.stage = None
         self.created_at = time.time()
         self.first_prompt = None
+        self.title = None            # LLM 生成标题（title.py），列表展示优先于截断
         self.pending_prompt = None
         self.next_input = asyncio.Event()
         self.session = None
@@ -53,6 +54,7 @@ class Run:
             "status": self.status,
             "stage": self.stage,
             "first_prompt": self.first_prompt,
+            "title": self.title,
             "started_at": self.created_at,
             "ended_at": self.ended_at,
             "resumed_from": self.resumed_from,
@@ -108,6 +110,7 @@ class RunManager:
             # 任务名继承源头最早标题：接续会话与源是同一任务的延续，
             # 不随接续后的首条新消息改名（intervene 只对无名 run 命名）
             run.first_prompt = source.first_prompt
+            run.title = source.title
         self.runs[run.run_id] = run
         return run
 

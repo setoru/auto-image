@@ -22,17 +22,22 @@ from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
 from web.tests.support import StreamingASGITransport  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 
+
+def drop_title_events(events):
+    """剔除 run.title_changed（标题生成异步落流、时序自由，断言不关心）。"""
+    return [e for e in events if e["event"] != "run.title_changed"]
+
 HEARTBEAT = 0.05
 
-# 与 SDKSessionInfo 同形：重启重建只读这些字段（first_prompt / created_at /
-# last_modified / session_id）
-def session_info(session_id, first_prompt, created_ms, last_ms=None):
+# 与 SDKSessionInfo 同形：重启重建只读这些字段（first_prompt / custom_title /
+# created_at / last_modified / session_id）
+def session_info(session_id, first_prompt, created_ms, last_ms=None, custom_title=None):
     return SimpleNamespace(
         session_id=session_id,
-        summary=first_prompt,
+        summary=custom_title or first_prompt,
         last_modified=last_ms if last_ms is not None else created_ms + 5_000,
         file_size=1024,
-        custom_title=None,
+        custom_title=custom_title,
         first_prompt=first_prompt,
         git_branch="feat/web-mvp",
         cwd="/proj",
@@ -123,7 +128,7 @@ async def test_list_endpoint_returns_summaries_without_clearing_old_runs():
 
 async def test_rebuild_restores_history_viewable():
     infos = [session_info("11111111-2222-3333-4444-555555555555", "部署 nginx 1.25 到 server-a",
-                          created_ms=1_700_000_000_000)]
+                          created_ms=1_700_000_000_000, custom_title="部署 nginx")]
     app = history_app(infos, lambda sid: deploy_transcript())
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -132,6 +137,7 @@ async def test_rebuild_restores_history_viewable():
         run = runs[0]
         assert run["status"] == "ENDED"  # 重启找回的历史：终态，非执行中
         assert run["first_prompt"] == "部署 nginx 1.25 到 server-a"  # 名字来自 SDK first_prompt
+        assert run["title"] == "部署 nginx"  # 标题来自 transcript 的 custom-title 行
         assert run["started_at"] == 1_700_000_000.0
         assert run["stage"] == "GUIDE"
         run_id = run["run_id"]
@@ -201,7 +207,7 @@ async def test_rebuilt_run_serves_as_resume_source():
         await wait_status(client, new_id, "WAITING_INPUT")
         resp = await open_stream(client, new_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
-        assert [e["event"] for e in events][-1] == "turn.completed"
+        assert [e["event"] for e in drop_title_events(events)][-1] == "turn.completed"
 
 
 async def test_rebuild_skips_messageless_and_broken_sessions():

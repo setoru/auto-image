@@ -60,6 +60,7 @@ def _record(run):
         "status": run.status,
         "stage": run.stage,
         "first_prompt": run.first_prompt,
+        "title": run.title,
         "created_at": run.created_at,
         "session_id": run.session_id,
         "resumed_from": run.resumed_from,

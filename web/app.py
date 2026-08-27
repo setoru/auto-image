@@ -23,6 +23,7 @@ from . import redact as redact_mod
 from . import runs as runs_mod
 from . import sdk as sdk_mod
 from . import state as state_mod
+from . import title as title_mod
 from .events import EventStore
 from .runs import RunManager
 from .sdk import SDKSessionFactory
@@ -71,6 +72,15 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     def persist():
         """状态变更点统一落盘（全量原子替换，见 state.save_state）。"""
         state_mod.save_state(manager.runs.values(), state_file)
+
+    def maybe_assign_title(run, text):
+        """无名 run 的首条指令到达即起标题生成（Codex 同构：不等回合完成）。
+        接续会话已继承源标题（title 非空），自然跳过。"""
+        if run.title is None:
+            return asyncio.create_task(
+                title_mod.assign_title(run, text, factory, store, on_change=persist)
+            )
+        return None
 
     # 服务重启语义：簿记里的挂起会话先恢复（可聊、resume 重建连接），CLI 侧
     # transcript 再重建其余历史（只读回看 + 续接起点）；正在执行的任务不自动
@@ -147,6 +157,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
+        maybe_assign_title(run, text)
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
@@ -161,6 +172,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
+        if text is not None:
+            maybe_assign_title(run, text)
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
