@@ -1,0 +1,291 @@
+/* A 形态样式：基础 token / reset / 输入条 / 错误条 + A 布局（header / 侧栏 / tabs / 消息流）
+   + 产物（侧栏产物卡 / 产物 tab 的 markdown·json 渲染）。 */
+
+:root {
+  --surface: #ffffff;
+  --surface-dim: #f6f8fa;
+  --surface-deep: #eef1f4;
+  --ink: #1f2328;
+  --ink-2: #57606a;
+  --ink-3: #8b949e;
+  --line: #d0d7de;
+  --accent: #0969da;
+  --ok: #1a7f37;
+  --warn: #9a6700;
+  --bad: #cf222e;
+  --mono: "Consolas", ui-monospace, "SFMono-Regular", Menlo, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
+
+* { box-sizing: border-box; }
+html, body, #root { height: 100%; margin: 0; }
+body {
+  font-family: var(--sans);
+  color: var(--ink);
+  background: var(--surface-dim);
+  font-size: 14px;
+  line-height: 1.5;
+}
+button {
+  font: inherit;
+  cursor: pointer;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink);
+  border-radius: 6px;
+  padding: 4px 12px;
+}
+button:hover { background: var(--surface-dim); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ---- 空态 ---- */
+.empty-state {
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  color: var(--ink-2);
+}
+.empty-state .big { font-size: 18px; color: var(--ink); }
+.artifact-empty { display: flex; align-items: center; justify-content: center; height: 100%; color: var(--ink-3); flex: 1; }
+
+/* ---- 409 / 提交错误条 ---- */
+.error-bar {
+  margin: 0;
+  padding: 6px 14px;
+  background: #fff1f0;
+  color: var(--bad);
+  border-top: 1px solid #ffd0cc;
+  font-size: 13px;
+}
+
+/* ---- 对话输入条 ---- */
+.chat-bar {
+  display: flex; gap: 8px; align-items: center;
+  padding: 10px 14px; border-top: 1px solid var(--line); background: var(--surface);
+}
+.chat-bar input {
+  flex: 1; font: inherit; border: 1px solid var(--line); border-radius: 6px;
+  padding: 7px 10px; background: var(--surface);
+}
+.chat-bar input:disabled { background: var(--surface-dim); color: var(--ink-3); }
+.chat-bar button { border-color: var(--line); }
+.chat-new { flex-shrink: 0; color: var(--accent); border-color: var(--accent); }
+.chat-continue {
+  flex-shrink: 0; background: var(--surface); border: 1px solid var(--line);
+  border-radius: 8px; padding: 4px 12px; font-size: 12.5px; cursor: pointer;
+  white-space: nowrap;
+}
+.chat-continue:hover:not(:disabled) { border-color: var(--ink-2); }
+.chat-continue:disabled { color: var(--ink-3); cursor: default; }
+.chat-act { flex-shrink: 0; min-width: 96px; }
+.chat-act:disabled { color: var(--ink-3); }
+
+/* ---- A 形态布局 ---- */
+.va-root { height: 100%; display: flex; flex-direction: column; background: var(--surface); position: relative; }
+
+.va-head {
+  display: flex; gap: 12px; align-items: center;
+  padding: 8px 16px; border-bottom: 1px solid var(--line); font-size: 13px;
+}
+.va-runid { font-family: var(--mono); color: var(--ink-2); }
+.va-spacer { flex: 1; }
+.va-stage { font-weight: 600; }
+.va-elapsed { font-family: var(--mono); color: var(--ink-2); }
+.va-conn { color: var(--warn); }
+.va-task-select {
+  font: inherit; font-size: 12.5px; border: 1px solid var(--line); border-radius: 6px;
+  padding: 3px 6px; background: var(--surface); color: var(--ink-2);
+  max-width: 280px; text-overflow: ellipsis;
+}
+
+.dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.dot.tone-running { background: var(--accent); animation: va-pulse 1.2s infinite; }
+.dot.tone-ok { background: var(--ok); }
+.dot.tone-warn { background: var(--warn); }
+.dot.tone-bad { background: var(--bad); }
+@keyframes va-pulse { 50% { opacity: 0.35; } }
+
+.va-body { flex: 1; display: flex; min-height: 0; }
+.va-main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
+
+/* ---- 消息流 ---- */
+.va-stream {
+  flex: 1; overflow-y: auto; padding: 12px 18px 90px;
+  font-family: var(--mono); font-size: 13px;
+}
+.va-msg { padding: 2px 0; font-size: 15px; }
+.va-msg p { margin: 0; }
+/* 用户消息：右侧浅蓝气泡，文字与正文同款（15px/深色） */
+.va-user {
+  width: fit-content; max-width: 80%; margin: 8px 0 8px auto;
+  padding: 6px 12px; border-radius: 12px;
+  background: #dbeafe; color: var(--ink); white-space: pre-wrap;
+  font-size: 15px;
+}
+/* 工具操作行：小字灰色、工具名加粗；折叠行单行截断（主参数），展开见
+   脱敏全文（限高内自滚动）；▶ 运行中 / ✓ 完成（同灰），一次调用一行 */
+.va-tool { margin: 1px 0; font-size: 12px; }
+.va-tool summary {
+  display: block; cursor: pointer; list-style: none; user-select: none;
+  color: var(--ink-3); padding: 1px 0 1px 20px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.va-tool summary b { font-weight: 600; }
+.va-tool summary::-webkit-details-marker { display: none; }
+/* 展开体：输入/输出各一块（浅底圆角块），限高内自滚动 */
+.va-tool-detail { margin: 2px 0 4px 20px; display: flex; flex-direction: column; gap: 6px; }
+.va-tool-io {
+  background: var(--surface-dim); border: 1px solid var(--line);
+  border-radius: 6px; padding: 6px 10px;
+}
+.va-tool-io-title { font-size: 10.5px; color: var(--ink-3); margin-bottom: 2px; }
+.va-tool-io-text {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  color: var(--ink-2); font-size: 12px; max-height: 320px; overflow: auto;
+}
+/* TodoWrite checkbox 列表：完成划线灰、进行中加粗、待办灰 */
+.va-todos { font-size: 12px; }
+.va-todo { padding: 1px 0; }
+.va-todo.completed { color: var(--ink-3); text-decoration: line-through; }
+.va-todo.in_progress { color: var(--ink); font-weight: 600; }
+.va-todo.pending { color: var(--ink-2); }
+/* diff 行染色：+ 绿 / - 红 / 头部与上下文灰 */
+.va-diff span { display: block; }
+.va-diff .add { color: var(--ok); background: #e6ffec; }
+.va-diff .del { color: var(--bad); background: #ffebe9; }
+.va-diff .meta { color: var(--ink-3); }
+.va-diff .ctx { color: var(--ink-2); }
+.va-canceled { color: var(--warn); text-align: center; margin: 8px 0; }
+.va-paused { color: var(--warn); text-align: center; margin: 8px 0; }
+.va-failed { color: var(--bad); text-align: center; margin: 8px 0; }
+.va-empty-hint { color: var(--ink-3); text-align: center; margin-top: 24px; }
+
+.va-stage-line {
+  display: flex; align-items: center; gap: 10px;
+  color: var(--ink-2); margin: 12px 0 4px; font-size: 12px;
+}
+.va-stage-line::before, .va-stage-line::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+
+.va-thinking { margin: 2px 0; }
+.va-thinking summary {
+  cursor: pointer; list-style: none; color: var(--ink-3); font-size: 11.5px;
+  padding: 1px 0; user-select: none;
+}
+.va-thinking summary::-webkit-details-marker { display: none; }
+.va-thinking[open] summary { margin-bottom: 2px; }
+.va-thinking-body {
+  border-left: 2px solid var(--line); color: var(--ink-2);
+  font-size: 12px; padding: 2px 0 2px 10px; white-space: pre-wrap;
+}
+
+.va-result {
+  margin-top: 14px; border: 1px solid var(--line);
+  border-radius: 6px; padding: 10px 12px; background: var(--surface-dim);
+}
+.va-result-title { font-family: var(--sans); font-weight: 600; font-size: 13px; margin-bottom: 6px; }
+.va-result .va-md { font-size: 12.5px; }
+
+.va-jump {
+  position: sticky; bottom: 10px; margin-left: auto; margin-right: 18px; display: block;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.15);
+}
+
+/* ---- 任务详情侧栏 ---- */
+.va-side {
+  width: 280px; flex-shrink: 0; border-right: 1px solid var(--line);
+  display: flex; flex-direction: column; min-height: 0; background: var(--surface);
+  overflow-y: auto;
+}
+.va-side-head {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line);
+  position: sticky; top: 0; background: var(--surface);
+}
+.va-side-title-text { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
+.va-side-toggle { padding: 1px 8px; font-size: 13px; color: var(--ink-2); }
+.va-side-open { font-size: 12px; color: var(--ink-2); flex-shrink: 0; }
+.va-side-cards { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
+.va-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: flex; flex-direction: column; gap: 4px; }
+.va-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
+.va-card-big { font-size: 17px; font-weight: 700; }
+.va-card-line { font-size: 12.5px; color: var(--ink-2); }
+
+/* ---- 主区 tabs ---- */
+.va-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px; flex-shrink: 0; }
+.va-tabs button {
+  border: none; background: transparent; border-radius: 6px 6px 0 0;
+  padding: 7px 14px; color: var(--ink-2); font-size: 13px; border-bottom: 2px solid transparent;
+}
+.va-tabs button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+.va-tabs button:disabled { opacity: 0.4; }
+.va-tab-body { flex: 1; min-height: 0; display: flex; }
+
+/* ---------- 产物：侧栏产物卡（目录分组折叠） ---------- */
+
+.va-art-group { display: flex; flex-direction: column; gap: 2px; }
+/* 组头：目录名 + 文件数，点击展开/收起 */
+.va-art-dir-head {
+  display: flex; align-items: baseline; gap: 5px; width: 100%;
+  padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); text-align: left;
+}
+.va-art-dir-head:hover { background: var(--surface-dim); }
+.va-art-dir-arrow { flex-shrink: 0; width: 10px; color: var(--ink-3); font-weight: 400; }
+.va-art-count { margin-left: auto; flex-shrink: 0; color: var(--ink-3); font-size: 11px; font-weight: 400; }
+.va-art-item {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
+  font-family: var(--mono); font-size: 12px; color: var(--ink); text-align: left;
+}
+.va-art-item:hover { background: var(--surface-dim); }
+.va-art-item.on { background: var(--surface-deep); font-weight: 600; }
+.va-art-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.va-art-size { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+
+/* 阶段徽标：四阶段各一色（列表与产物 tab 头共用） */
+.va-art-badge {
+  flex-shrink: 0; padding: 0 6px; border-radius: 999px; font-size: 10px; font-weight: 600;
+  letter-spacing: 0.03em; color: #fff; background: var(--ink-3);
+}
+.va-art-badge.s-guide { background: #8250df; }
+.va-art-badge.s-install { background: var(--accent); }
+.va-art-badge.s-verify { background: var(--ok); }
+.va-art-badge.s-archive { background: var(--warn); }
+
+/* ---------- 产物：主区产物 tab ---------- */
+
+.va-artifact { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.va-artifact-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 16px;
+  border-bottom: 1px solid var(--line); background: var(--surface-dim);
+}
+.va-artifact-name { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+.va-artifact-dir {
+  margin-left: auto; color: var(--ink-3); font-size: 11px; font-family: var(--mono);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
+}
+.va-artifact-raw {
+  flex: 1; margin: 0; padding: 16px; overflow: auto;
+  font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
+}
+
+/* markdown 渲染（marked 输出）：表格 / 代码块 / 验证契约 blockquote */
+.va-artifact-md { flex: 1; overflow: auto; padding: 16px 24px; font-size: 13.5px; line-height: 1.65; }
+.va-md h1, .va-md h2, .va-md h3 { border-bottom: 1px solid var(--line); padding-bottom: 4px; }
+.va-md pre {
+  background: var(--surface-dim); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; overflow: auto; font-family: var(--mono); font-size: 12.5px;
+}
+.va-md code { font-family: var(--mono); font-size: 12.5px; background: var(--surface-dim); padding: 1px 4px; border-radius: 4px; }
+.va-md pre code { background: none; padding: 0; }
+.va-md table { border-collapse: collapse; margin: 8px 0; }
+.va-md th, .va-md td { border: 1px solid var(--line); padding: 4px 10px; font-size: 12.5px; }
+.va-md th { background: var(--surface-dim); }
+.va-md blockquote {
+  margin: 8px 0; padding: 6px 12px; border-left: 3px solid var(--warn);
+  background: #fff8c5; border-radius: 0 6px 6px 0; color: var(--ink-2);
+}
+.va-md img { max-width: 100%; }
