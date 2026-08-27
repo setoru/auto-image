@@ -44,7 +44,7 @@ DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                artifact_root=None, deploy_config=None, turn_timeout=None, scope_config=None,
                list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
-    state_path=None):
+    state_path=None, title_factory=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
     与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。
@@ -53,13 +53,16 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
     residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。
-    state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。"""
+    state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。
+    title_factory 为标题生成会话工厂（测试缝；生产为独立 cwd 的隔离配置，
+    transcript 不落项目根、不进重启重建的发现层）。"""
     # 已知凭据值入脱敏清单（幂等；scope 缺失时只剩形状正则防线）
     redact_mod.load_scope_secrets(scope_config or DEFAULT_SCOPE_CONFIG)
     app = FastAPI(title="auto-image deploy web")
     manager = RunManager()
     store = EventStore()
     factory = session_factory or SDKSessionFactory()
+    titles = title_factory or sdk_mod.TitleSessionFactory()
     turn_timeout = sdk_mod.TURN_TIMEOUT_SECONDS if turn_timeout is None else turn_timeout
     artifact_root = Path(artifact_root) if artifact_root is not None else DEFAULT_ARTIFACT_ROOT
     file_stages = artifacts_mod.load_file_stages(deploy_config or DEFAULT_DEPLOY_CONFIG)
@@ -78,7 +81,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         接续会话已继承源标题（title 非空），自然跳过。"""
         if run.title is None:
             return asyncio.create_task(
-                title_mod.assign_title(run, text, factory, store, on_change=persist)
+                title_mod.assign_title(run, text, titles, store, on_change=persist)
             )
         return None
 

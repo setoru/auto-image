@@ -88,6 +88,27 @@ def default_options(resume_session_id=None):
     )
 
 
+# 标题生成的一次性会话 cwd：服务私有目录，transcript 落它名下的项目目录
+# （~/.claude/projects/-tmp-auto-image-titles），不进项目根的发现层——
+# 重启 rebuild 的 list_sessions(directory=项目根) 不会把标题会话当历史任务
+# 捡进列表（Codex 的 ephemeral 线程同款隔离语义，SDK 无 ephemeral 开关，
+# 以 cwd 分流实现）。CLI 要求 cwd 存在，导入时创建（幂等）。
+TITLE_SESSION_CWD = "/tmp/auto-image-titles"
+Path(TITLE_SESSION_CWD).mkdir(parents=True, exist_ok=True)
+
+
+def title_options():
+    """标题会话 options：与部署会话无关的极简配置——默认模型、无系统提示词
+    覆盖、setting_sources 清空（不载项目提示词/技能/MCP）、无工具、上限收紧。"""
+    return ClaudeAgentOptions(
+        cwd=TITLE_SESSION_CWD,
+        system_prompt="You generate concise session titles. Output only the title text.",
+        setting_sources=[],
+        tools=[],
+        max_turns=1,
+    )
+
+
 def to_dict(message):
     """SDK dataclass 消息 → CLI JSON 形状 dict；不认识的消息为零形状
     （无 type 字段，映射层自然忽略：partial 增量、system、限流等）。"""
@@ -140,8 +161,8 @@ class SDKSession:
     """与会话抽象同形：async with 连接/断开，query/interrupt 透传，
     receive_response 把每回合消息适配成 CLI JSON 形状再产出。"""
 
-    def __init__(self, session_id=None):
-        self._client = ClaudeSDKClient(options=default_options(session_id))
+    def __init__(self, session_id=None, options=None):
+        self._client = ClaudeSDKClient(options=options or default_options(session_id))
 
     async def __aenter__(self):
         await self._client.__aenter__()
@@ -164,6 +185,13 @@ class SDKSession:
 class SDKSessionFactory:
     def __call__(self, session_id=None):
         return SDKSession(session_id)
+
+
+class TitleSessionFactory:
+    """标题生成会话工厂：独立 options（title_options），不经部署会话配置。"""
+
+    def __call__(self, session_id=None):
+        return SDKSession(options=title_options())
 
 
 def list_project_sessions(project_root=None):

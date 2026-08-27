@@ -104,24 +104,18 @@ def make_app(script=None):
 
 async def test_first_message_assigns_title_and_emits_event():
     """首条消息 → 事件流出现 run.title_changed，摘要与 transcript 写回到位。
-    工厂创建次序：先部署会话、后标题会话（同工厂两用）。"""
+    标题会话经独立 title_factory（生产为隔离 cwd 配置，不落项目根 transcript）。"""
     title_script = [{"type": "result", "subtype": "success", "result": "「部署 nginx」"}]
+    title_calls = []
 
-    class TwoPhaseFactory(FakeSessionFactory):
-        """第 1 次调用 = 部署会话；第 2 次 = 标题会话（不同剧本）。"""
-        def __init__(self):
-            super().__init__(script=DEFAULT_SCRIPT, delay=0.02)
-            self.title_script = title_script
-
+    class TitleFactory:
         def __call__(self, session_id=None):
-            self.session_ids.append(session_id)
-            if len(self.session_ids) == 1:
-                return FakeSession(script=self.script, delay=self.delay, session_id="sess_deploy")
-            return FakeSession(script=self.title_script, session_id="sess_title")
+            title_calls.append(session_id)
+            return FakeSession(script=title_script, session_id="sess_title")
 
-    factory = TwoPhaseFactory()
     app = create_app(
-        session_factory=factory,
+        session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02),
+        title_factory=TitleFactory(),
         heartbeat_interval=0.05,
         list_sessions_fn=lambda: [],
         scope_config="/nonexistent-scope.yaml",
@@ -149,22 +143,45 @@ async def test_first_message_assigns_title_and_emits_event():
             summary = (await client.get(f"/api/runs/{run_id}")).json()
             assert summary["title"] == "部署 nginx"
         # transcript 写回：以部署会话的 session_id、清洗后的标题
-        assert renames == [("sess_deploy", "部署 nginx")], renames
+        assert renames == [("sess_fake_1", "部署 nginx")], renames
+        assert title_calls == [None]  # 标题会话全新起、无续接
     finally:
         sdk_mod.rename_session = orig_rename
 
 
+async def test_title_session_isolated_from_discovery():
+    """标题会话 options 与部署会话隔离：独立 cwd（transcript 落服务私有项目
+    目录，不进项目根的 list_sessions 发现层）、无工具、上限收紧——
+    重启后任务列表不会冒出标题会话条目。"""
+    options = sdk_mod.title_options()
+    assert options.cwd == sdk_mod.TITLE_SESSION_CWD != str(sdk_mod.PROJECT_ROOT)
+    assert options.tools == []
+    assert options.max_turns == 1
+    # cwd 对应的项目目录与项目根不同名（transcript 分流验证）
+    import re
+
+    sanitize = lambda p: re.sub(r"[^A-Za-z0-9]", "-", p)  # noqa: E731
+    assert sanitize(sdk_mod.TITLE_SESSION_CWD) != sanitize(str(sdk_mod.PROJECT_ROOT))
+
+
 async def test_second_message_does_not_retitle():
     """标题只生成一次：第二回合不再触发（无第二个标题会话）。"""
-    seen = []
+    deploy_calls = []
+    title_calls = []
 
     class CountingFactory(FakeSessionFactory):
         def __call__(self, session_id=None):
-            seen.append(session_id)
+            deploy_calls.append(session_id)
             return super().__call__(session_id)
+
+    class TitleFactory:
+        def __call__(self, session_id=None):
+            title_calls.append(session_id)
+            return FakeSession(script=[{"type": "result", "subtype": "success", "result": "部署 nginx"}])
 
     app = create_app(
         session_factory=CountingFactory(script=DEFAULT_SCRIPT, delay=0.02),
+        title_factory=TitleFactory(),
         heartbeat_interval=0.05,
         list_sessions_fn=lambda: [],
         scope_config="/nonexistent-scope.yaml",
@@ -178,8 +195,8 @@ async def test_second_message_does_not_retitle():
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
         await wait_status(client, run_id, "WAITING_INPUT")
         await asyncio.sleep(0.1)
-    # 部署会话 1 次（两回合同一连接）+ 标题会话 1 次 = 2；第二回合不再生成
-    assert len(seen) == 2, seen
+    # 部署会话 1 次（两回合同一连接）+ 标题会话 1 次；第二回合不再生成
+    assert len(deploy_calls) == 1 and len(title_calls) == 1, (deploy_calls, title_calls)
 
 
 async def main():
