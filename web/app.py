@@ -77,10 +77,12 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         """状态变更点统一落盘（全量原子替换，见 state.save_state）。"""
         state_mod.save_state(manager.runs.values(), state_file)
 
-    def maybe_assign_title(run, text):
-        """无名 run 的首条指令到达即起标题生成（Codex 同构：不等回合完成）。
-        接续会话已继承源标题（title 非空），自然跳过。"""
-        if run.title is None:
+    def maybe_assign_title(run, text, is_first):
+        """新对话的首条指令到达即起标题生成（Codex 同构：不等回合完成）。
+        is_first 由调用方在 intervene 前快照（intervene 首条指令写
+        first_prompt，事后无法判定）——续聊/接续/重启恢复的老会话一律不再
+        生成（否则续聊指令被总结成「继续执行任务」类标题）。"""
+        if is_first:
             return asyncio.create_task(
                 title_mod.assign_title(run, text, titles, store, on_change=persist)
             )
@@ -155,13 +157,14 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         text = (body or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(status_code=422, detail="text required")
+        is_first = run.first_prompt is None  # 快照先于 intervene（它写 first_prompt）
         try:
             # 本会话执行中：intervene 先请求停止，本端点返回后执行打断
             manager.intervene(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
-        maybe_assign_title(run, text)
+        maybe_assign_title(run, text, is_first)
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
@@ -171,13 +174,13 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         text = (body or {}).get("text")
         if text is not None and (not isinstance(text, str) or not text.strip()):
             raise HTTPException(status_code=422, detail="text must be non-empty")
+        is_first = run.first_prompt is None and text is not None
         try:
             manager.intervene(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
-        if text is not None:
-            maybe_assign_title(run, text)
+        maybe_assign_title(run, text, is_first)
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 

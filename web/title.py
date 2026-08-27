@@ -72,13 +72,14 @@ async def generate_title(user_text, session_factory):
 
 
 async def assign_title(run, user_text, session_factory, store, on_change=None):
-    """run 的标题生成入口：无名 run 以首条指令起生成，成功即落三处——
+    """run 的标题生成入口：新对话首条指令起生成，成功即落三处——
     run.title（内存权威）、事件流 run.title_changed（前端即时改名）、
     transcript custom-title 行（重启 rebuild 找回）。
 
-    幂等：已有 title（接续继承）或 run 已终态（生成期间被关闭）时不写。
-    session_id 在回合 Result 才提取，标题可能先到：写回 transcript 前等
-    session_id 就绪（settle_event），等不到（首回合即失败/关闭）只落内存。
+    幂等：已有 title 或 run 已终态（生成期间被关闭）时不写；只对新对话
+    调用（调用方以 first_prompt 判定），续聊不再生成。session_id 在回合
+    Result 才提取，标题可能先到：写回 transcript 前等 session_id 就绪，
+    等不到（首回合即失败/关闭）只落内存。
     """
     if run.title is not None or run.status in TERMINAL:
         return
