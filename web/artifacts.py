@@ -15,19 +15,21 @@ from pathlib import Path
 
 import yaml
 
+from .normalize import ARCHIVE, GUIDE, INSTALL, VERIFY
+
 # deploy.config.yaml 的产物文件键 → 所属阶段（config 是文件名的唯一权威源，
 # 改名 / 加键只动 config：改名自动跟随，新键不在此映射即无徽标）
 CONFIG_KEY_STAGES = {
-    "install_file": "GUIDE",
-    "verify_file": "GUIDE",
-    "install_result_file": "INSTALL",
-    "install_issues_file": "INSTALL",
-    "install_meta_file": "INSTALL",
-    "verify_result_file": "VERIFY",
-    "verify_issues_file": "VERIFY",
-    "archive_result_file": "ARCHIVE",
-    "deploy_list_file": "ARCHIVE",
-    "archive_issues_file": "ARCHIVE",
+    "install_file": GUIDE,
+    "verify_file": GUIDE,
+    "install_result_file": INSTALL,
+    "install_issues_file": INSTALL,
+    "install_meta_file": INSTALL,
+    "verify_result_file": VERIFY,
+    "verify_issues_file": VERIFY,
+    "archive_result_file": ARCHIVE,
+    "deploy_list_file": ARCHIVE,
+    "archive_issues_file": ARCHIVE,
 }
 
 
@@ -43,7 +45,7 @@ def load_file_stages(config_path):
         pattern = data[key]
         suffixes.append((pattern.replace("{{software}}", ""), stage))
     # 流水线汇总由 deploy skill 编排层直接落盘（不进 deploy.config.yaml）
-    suffixes.append(("-pipeline-result.md", "ARCHIVE"))
+    suffixes.append(("-pipeline-result.md", ARCHIVE))
     return tuple(suffixes)
 
 

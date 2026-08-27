@@ -2,8 +2,10 @@
 
 Codex 同构（research/codex-session-title.md）：一次性无工具会话、输入限
 960 字节、6 句硬约束 prompt、客户端二次清洗、失败静默维持临时标题——
-降级永不比不做更差。与部署会话完全隔离：独立连接、无工具无 MCP、
-setting_sources 清空（不载项目提示词与技能）、自带超时。
+降级永不比不做更差。与部署会话完全隔离：独立连接、独立 cwd（/tmp/
+auto-image-titles，transcript 不进项目根发现层）、无工具无 MCP、自带
+超时。setting_sources 保持默认——认证经 user settings env 注入，清空
+即 not logged in（见 sdk.title_options）。
 
 写回经 sdk.rename_session 往 transcript 追加 custom-title 行（customTitle
 优先于 aiTitle 被读回），rebuild 据此跨重启找回标题。

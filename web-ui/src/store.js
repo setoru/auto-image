@@ -160,11 +160,11 @@ function appendTo(runId, event) {
     }
     if (event.type === 'run.failed') {
       patch.status = 'FAILED'
-      patch.endedAt = Date.now()
+      patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
     }
     if (event.type === 'run.canceled') {
       patch.status = 'CANCELED'
-      patch.endedAt = Date.now()
+      patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
     }
     if (event.type === 'run.ended') patch.status = 'ENDED'
   }

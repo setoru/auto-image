@@ -139,8 +139,6 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                 run.run_id, run.resumed_from,
                 skip_types={"run.started", "run.canceled", "run.failed", "run.ended", "resumed.history"},
             )
-        # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
-        _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
         run.task = asyncio.create_task(run_agent(run, factory, store, on_change=persist))
         persist()
         return {"run_id": run.run_id, "status": run.status, "resumed_from": run.resumed_from}
@@ -279,10 +277,6 @@ def _get_run_or_404(manager, run_id):
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
-
-
-def _run_dir(run_id):
-    return Path("/tmp/auto-image-runs") / run_id
 
 
 def residual_cli_processes():
