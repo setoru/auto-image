@@ -99,11 +99,13 @@ Path(TITLE_SESSION_CWD).mkdir(parents=True, exist_ok=True)
 
 def title_options():
     """标题会话 options：与部署会话无关的极简配置——默认模型、无系统提示词
-    覆盖、setting_sources 清空（不载项目提示词/技能/MCP）、无工具、上限收紧。"""
+    覆盖、无工具、上限收紧。setting_sources 保持默认（user 在场）：本环境
+    认证（ANTHROPIC_AUTH_TOKEN / BASE_URL）经 ~/.claude/settings.json 的
+    env 注入，清空即 not logged in；项目级（.claude/、CLAUDE.md）随独立
+    cwd 天然不载入，无需在此排除。"""
     return ClaudeAgentOptions(
         cwd=TITLE_SESSION_CWD,
         system_prompt="You generate concise session titles. Output only the title text.",
-        setting_sources=[],
         tools=[],
         max_turns=1,
     )

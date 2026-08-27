@@ -152,11 +152,13 @@ async def test_first_message_assigns_title_and_emits_event():
 async def test_title_session_isolated_from_discovery():
     """标题会话 options 与部署会话隔离：独立 cwd（transcript 落服务私有项目
     目录，不进项目根的 list_sessions 发现层）、无工具、上限收紧——
-    重启后任务列表不会冒出标题会话条目。"""
+    重启后任务列表不会冒出标题会话条目。setting_sources 保持默认：认证经
+    user settings env 注入，清空会导致 CLI not logged in（实测踩坑）。"""
     options = sdk_mod.title_options()
     assert options.cwd == sdk_mod.TITLE_SESSION_CWD != str(sdk_mod.PROJECT_ROOT)
     assert options.tools == []
     assert options.max_turns == 1
+    assert options.setting_sources is None  # 认证依赖 user settings，不可清空
     # cwd 对应的项目目录与项目根不同名（transcript 分流验证）
     import re
 
