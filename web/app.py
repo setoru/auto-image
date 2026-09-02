@@ -48,14 +48,13 @@ DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
-               artifact_roots=None, deploy_config=None, turn_timeout=None, scope_config=None,
+               artifact_roots=None, deploy_config=None, scope_config=None,
                list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
     state_path=None, title_factory=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_roots
     （根名 → 目录映射）与 deploy_config 同理注入（产物目录与文件名约定
     造桩用），默认项目根下。
-    turn_timeout 为回合 wall-clock 上限（终局语义），默认 sdk 层固定值。
     scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
 
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
@@ -71,7 +70,6 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     store.bind_runs(manager.runs)
     factory = session_factory or SDKSessionFactory()
     titles = title_factory or sdk_mod.TitleSessionFactory()
-    turn_timeout = sdk_mod.TURN_TIMEOUT_SECONDS if turn_timeout is None else turn_timeout
     artifact_roots = {name: Path(p) for name, p in (artifact_roots or DEFAULT_ARTIFACT_ROOTS).items()}
     file_stages = artifacts_mod.load_file_stages(deploy_config or DEFAULT_DEPLOY_CONFIG)
     app.state.run_manager = manager
@@ -107,7 +105,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     if restored:
         logging.getLogger("web").info("服务重启后恢复 %d 条挂起会话（可继续对话）", len(restored))
         for run in restored:
-            run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout, on_change=persist))
+            run.task = asyncio.create_task(run_agent(run, factory, store, on_change=persist))
     rebuilt = rebuild_mod.rebuild_history(
         manager, store,
         list_sessions_fn or sdk_mod.list_project_sessions,
@@ -148,9 +146,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                 run.run_id, run.resumed_from,
                 skip_types={"run.started", "run.canceled", "run.failed", "run.ended", "resumed.history"},
             )
-        # 服务端侧 run 目录（事件日志导出、run 元信息；不参与 Agent 执行）
-        _run_dir(run.run_id).mkdir(parents=True, exist_ok=True)
-        run.task = asyncio.create_task(run_agent(run, factory, store, turn_timeout, on_change=persist))
+        run.task = asyncio.create_task(run_agent(run, factory, store, on_change=persist))
         persist()
         return {"run_id": run.run_id, "status": run.status, "resumed_from": run.resumed_from}
 
@@ -322,10 +318,6 @@ def _get_run_or_404(manager, run_id):
     if run is None:
         raise HTTPException(status_code=404, detail="run not found")
     return run
-
-
-def _run_dir(run_id):
-    return Path("/tmp/auto-image-runs") / run_id
 
 
 def residual_cli_processes():

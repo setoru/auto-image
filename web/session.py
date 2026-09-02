@@ -9,9 +9,12 @@ ClaudeSDKClient，测试注入脚本化假实现），工厂以续接源 session
 run_agent 在回合收尾按该标记区分 turn.stopped 与 turn.completed（真 SDK
 被打断的回合以 result=None 的 error Result 收尾，但判定以本端标记为权威）。
 
-回合终局语义：turn_timeout（wall-clock 秒）超时、Result 的错误 subtype
-（max_turns 触发、执行错误等）都落到 run.failed——会话进 FAILED 终态、
-断开 SDK 连接，不自动重试（服务重启语义一致）。
+回合终局语义：Result 的错误 subtype（max_turns 触发、执行错误等）落到
+run.failed——会话进 FAILED 终态、断开 SDK 连接，不自动重试（服务重启
+语义一致）。回合执行不设服务端超时：单回合即一条完整部署流水线，
+四阶段串行 + 云操作轮询可远超小时级，主动掐断会把已提交的云操作
+留在中间态；回合收尾依赖 SDK 侧最终产出 Result 或异常，CLI 挂死时
+run 停 RUNNING，由用户停止/关闭兜底。
 """
 import asyncio
 import time
@@ -25,13 +28,12 @@ class TurnFailure(Exception):
     """回合终局失败（Result 错误 subtype）：run_agent 的异常收尾转 run.failed。"""
 
 
-async def run_agent(run, session_factory, store, turn_timeout=None, on_change=None):
+async def run_agent(run, session_factory, store, on_change=None):
     """驱动一条会话：等指令 → 执行回合 → 回挂起，直到会话被关闭或异常。
 
-    turn_timeout 由服务端固定传入（sdk.TURN_TIMEOUT_SECONDS）；None 仅限
-    测试直接驱动，表示不限时。run.started 与接续历史由 create_run 同步段
-    先行写入（见 app.py），本协程从等输入开始。on_change 在回合收尾与
-    终局收尾后回调（服务端挂簿记落盘用，None 为无簿记）。"""
+    run.started 与接续历史由 create_run 同步段先行写入（见 app.py），本协程
+    从等输入开始。on_change 在回合收尾与终局收尾后回调（服务端挂簿记落盘
+    用，None 为无簿记）。"""
     def changed():
         if on_change is not None:
             on_change()
@@ -47,14 +49,7 @@ async def run_agent(run, session_factory, store, turn_timeout=None, on_change=No
                 text = run.pending_prompt
                 store.append(run.run_id, "user.message", {"text": text})
                 await session.query(text)
-                try:
-                    await asyncio.wait_for(
-                        _drain_turn(run, session, store), timeout=turn_timeout
-                    )
-                except asyncio.TimeoutError:
-                    raise TimeoutError(
-                        f"回合执行超过 {turn_timeout:.0f} 秒上限，会话已终止"
-                    ) from None
+                await _drain_turn(run, session, store)
                 # 回合收尾即簿记变更点：状态回挂起 / session_id 首次提取 /
                 # stage 推进都在此刻定格
                 changed()

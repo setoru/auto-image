@@ -21,10 +21,11 @@ const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED
 // 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框。
 // 线上不断言「可继续」——活会话输入条已表达，历史回放里则与只读语义相悖
 function turnCompletedRow(ev, prev) {
+  const result = String(ev.payload.result ?? '').trim()
+  if (!result) return null // 空结果（重启重建的历史常见）不成空框
   const dup =
     prev?.type === 'agent.message' &&
-    String(prev.payload.text ?? '').trim() === String(ev.payload.result ?? '').trim() &&
-    ev.payload.result?.trim()
+    String(prev.payload.text ?? '').trim() === result
   if (dup) return <div className="va-stage-line">─ 回合完成 ─</div>
   return (
     <div className="va-result">
@@ -350,13 +351,13 @@ function ArtifactView() {
   )
 }
 
-// 任务详情侧栏：产物卡（阶段与回合汇总常驻 header 与消息流，不重复设卡）
-function TaskSide({ run, onClose }) {
+// 任务详情侧栏：产物卡（阶段与回合汇总常驻 header 与消息流，不重复设卡）。
+// 开合是一枚钮（PinToggle，渲染于 App 内），本组件只承载内容
+function TaskSide({ run }) {
   return (
-    <aside className="va-side">
+    <aside className="va-side" id="task-side">
       <div className="va-side-head">
         <span className="va-side-title-text">任务详情</span>
-        <button className="va-side-toggle" onClick={onClose} title="收起侧栏">«</button>
       </div>
       <div className="va-side-cards">
         <ArtifactCard />
@@ -425,11 +426,6 @@ export default function App() {
             ))}
           </select>
         )}
-        {run && !sideOpen && (
-          <button className="va-side-open" onClick={() => setSideOpen(true)} title="展开任务详情栏">
-            » 详情
-          </button>
-        )}
         {run ? (
           <>
             <span className="va-runid">{run.runId}</span>
@@ -437,7 +433,7 @@ export default function App() {
             <span>{STATUS_LABEL[run.status]}</span>
             {run.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
             <span className="va-spacer" />
-            <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : '—'}</span>
+            <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : null}</span>
             <span className="va-elapsed" title="累计执行：各回合之和，扣除等待输入">
               总计时间：{fmtActive(run, s.now)}
             </span>
@@ -452,7 +448,19 @@ export default function App() {
       </header>
 
       <div className="va-body">
-        {sideOpen && <TaskSide run={run} onClose={() => setSideOpen(false)} />}
+        {sideOpen && <TaskSide run={run} />}
+        {run && (
+          <button
+            className={`va-side-pin${sideOpen ? ' open' : ''}`}
+            onClick={() => setSideOpen(!sideOpen)}
+            title={sideOpen ? '收起侧栏' : '展开侧栏'}
+            aria-label={sideOpen ? '收起侧栏' : '展开侧栏'}
+            aria-expanded={sideOpen}
+            aria-controls="task-side"
+          >
+            <span className="va-btn-sym" aria-hidden="true">{sideOpen ? '«' : '»'}</span>
+          </button>
+        )}
         <div className="va-main">
           {!run ? (
             <div className="empty-state">

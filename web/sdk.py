@@ -25,10 +25,9 @@ from claude_agent_sdk import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# 方案第 9 节「固定上限」的取值：一个完整部署回合的 turns 预算与
-# wall-clock 上限（秒）；超时的终局语义在 session 层表达（run.failed）
+# 方案第 9 节「固定上限」的取值：一个完整部署回合的 turns 预算；
+# 不设 wall-clock 超时（理由与实测记录见 session.py 模块注释）
 MAX_TURNS = 200
-TURN_TIMEOUT_SECONDS = 3600.0
 THINKING_BUDGET_TOKENS = 10000
 
 # 方案第 9 节「系统提示词至少要求」的六要素原文基线

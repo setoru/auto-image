@@ -20,19 +20,21 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from .normalize import ARCHIVE, GUIDE, INSTALL, VERIFY
+
 # deploy.config.yaml 的产物文件键 → 所属阶段（config 是文件名的唯一权威源，
 # 改名 / 加键只动 config：改名自动跟随，新键不在此映射即无徽标）
 CONFIG_KEY_STAGES = {
-    "install_file": "GUIDE",
-    "verify_file": "GUIDE",
-    "install_result_file": "INSTALL",
-    "install_issues_file": "INSTALL",
-    "install_meta_file": "INSTALL",
-    "verify_result_file": "VERIFY",
-    "verify_issues_file": "VERIFY",
-    "archive_result_file": "ARCHIVE",
-    "deploy_list_file": "ARCHIVE",
-    "archive_issues_file": "ARCHIVE",
+    "install_file": GUIDE,
+    "verify_file": GUIDE,
+    "install_result_file": INSTALL,
+    "install_issues_file": INSTALL,
+    "install_meta_file": INSTALL,
+    "verify_result_file": VERIFY,
+    "verify_issues_file": VERIFY,
+    "archive_result_file": ARCHIVE,
+    "deploy_list_file": ARCHIVE,
+    "archive_issues_file": ARCHIVE,
 }
 
 # rpm 流水线产物约定（rpm-build / rpm-verify / rpm-archive 的内置默认文件
@@ -41,15 +43,18 @@ CONFIG_KEY_STAGES = {
 # 一致，-rpm-result / -rpm-issues / -rpm-deliver-list / -rpm.sh 仅此处能
 # 匹配。.rpm 同时覆盖 .src.rpm 与依赖包（rpms/{binary,source,deps}/ 归档
 # 收集的包，归档阶段落盘、本质是构建产物 → BUILD）。
+# 阶段值取 normalize 常量（单来源）；BUILD 为 rpm 流水线独有阶段、不在
+# deploy 四阶段之列，仅此处使用故保留本地字面量。
+RPM_BUILD = "BUILD"
 RPM_FILE_STAGES = (
-    ("-rpm-verify-result.md", "VERIFY"),
-    ("-rpm-verify-issues.md", "VERIFY"),
-    ("-rpm-result.md", "BUILD"),
-    ("-rpm-issues.md", "BUILD"),
-    ("-rpm-archive-result.md", "ARCHIVE"),
-    ("-rpm-deliver-list.md", "ARCHIVE"),
-    ("-rpm.sh", "ARCHIVE"),
-    (".rpm", "BUILD"),
+    ("-rpm-verify-result.md", VERIFY),
+    ("-rpm-verify-issues.md", VERIFY),
+    ("-rpm-result.md", RPM_BUILD),
+    ("-rpm-issues.md", RPM_BUILD),
+    ("-rpm-archive-result.md", ARCHIVE),
+    ("-rpm-deliver-list.md", ARCHIVE),
+    ("-rpm.sh", ARCHIVE),
+    (".rpm", RPM_BUILD),
 )
 
 # 二进制产物后缀：内容端点（文本浏览）不适用，清单带 binary 标记、前端
@@ -78,7 +83,7 @@ def load_file_stages(config_path):
         pattern = data[key]
         suffixes.append((pattern.replace("{{software}}", ""), stage))
     # 流水线汇总由 deploy skill 编排层直接落盘（不进 deploy.config.yaml）
-    suffixes.append(("-pipeline-result.md", "ARCHIVE"))
+    suffixes.append(("-pipeline-result.md", ARCHIVE))
     suffixes.extend(RPM_FILE_STAGES)
     return tuple(suffixes)
 

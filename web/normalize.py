@@ -12,11 +12,15 @@ import json
 
 from .redact import redact_text
 
+# 流水线四阶段的唯一字面值来源（阶段名枚举只写一处）：事件推导与产物
+# 徽标（artifacts.CONFIG_KEY_STAGES）都取这些值，加阶段改这里 + config 键
+GUIDE, INSTALL, VERIFY, ARCHIVE = "GUIDE", "INSTALL", "VERIFY", "ARCHIVE"
+
 STAGE_BY_SUBAGENT = {
-    "deploy-guide": "GUIDE",
-    "deploy-install": "INSTALL",
-    "deploy-verify": "VERIFY",
-    "deploy-archive": "ARCHIVE",
+    "deploy-guide": GUIDE,
+    "deploy-install": INSTALL,
+    "deploy-verify": VERIFY,
+    "deploy-archive": ARCHIVE,
 }
 
 # 子 agent 工具的 CLI 名：新名 Agent，Task 为旧名/事件重放剧本兼容
