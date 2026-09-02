@@ -1,16 +1,17 @@
 ---
 name: rpm-archive
-description: 在 rpm-verify 通过后执行归档流程：通过 ssh-skill 清理远程构建机器、收集 RPM 构建产物信息，生成安装脚本（严格遵循示例逻辑：备份原有 YUM 源 → 自动探测三个华为云鲲鹏源并下载 RPM → 恢复原有源 → 安装依赖与 RPM）、交付清单与清理报告。仅生成脚本，不执行安装。输出文件由 deploy.config.yaml 配置。触发词：归档、archive、RPM 交付清单、清理构建环境、生成安装脚本。
+description: 在 rpm-verify 通过后执行归档流程：先把构建产物包收集到本机（二进制包 RPMS/、源码包 SRPMS/、原有依赖包经 dnf --downloadonly 抓取，经 ssh-skill 下载到 rpm/<软件>/<版本>/rpms/{binary,source,deps}，Web 界面可单文件/批量 zip 下载），再通过 ssh-skill 清理远程构建机器、收集 RPM 构建产物信息，生成安装脚本（严格遵循示例逻辑：备份原有 YUM 源 → 自动探测三个华为云鲲鹏源并下载 RPM → 恢复原有源 → 安装依赖与 RPM）、交付清单与清理报告。仅生成脚本，不执行安装。输出文件由 deploy.config.yaml 配置。触发词：归档、archive、RPM 交付清单、清理构建环境、生成安装脚本、收集 RPM 包、下载产物包。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
 # RPM Archive Agent
 
-在 rpm-verify 通过后，对远程构建机器进行清理，汇总构建产物与验证结果，并按照指定模板生成一个可直接执行的 RPM 安装脚本。该脚本自动从三个华为云鲲鹏 YUM 源中选择可用源下载 RPM 包，安装前备份原有 YUM 源，下载后立即恢复，确保系统环境不被污染。脚本支持标准 RPM 安装与提取安装（`-p` 自定义路径）。本 Skill **仅生成脚本，不执行安装**。
+在 rpm-verify 通过后，先把构建产物包（二进制包、源码包、原有依赖包）收集到本机并落盘到 `rpms/` 目录（Web 界面产物区自动可见、可下载），随后对远程构建机器进行清理，汇总构建产物与验证结果，并按照指定模板生成一个可直接执行的 RPM 安装脚本。该脚本自动从三个华为云鲲鹏 YUM 源中选择可用源下载 RPM 包，安装前备份原有 YUM 源，下载后立即恢复，确保系统环境不被污染。脚本支持标准 RPM 安装与提取安装（`-p` 自定义路径）。本 Skill **仅生成脚本，不执行安装**。
 
 ## 核心原则
 
-- 通过 ssh-skill 执行清理，不直接写 `ssh`/`scp`。
+- **收集先于清理**：产物包收集是归档的第一步，清理（含 /tmp）必须等收集完成并本机校验通过之后才执行——包在远程删了就没了。
+- 通过 ssh-skill 执行清理与文件传输，不直接写 `ssh`/`scp`。
 - 不制作 ECS 镜像。
 - 生成的安装脚本完全遵循提供的 httpd 安装脚本结构：颜色输出、参数解析（`-p`）、YUM 源自动探测与下载、备份与恢复原有 YUM 源、依赖安装、标准/提取两种安装模式、配置调整、systemd 服务生成、环境变量设置、摘要输出。
 - 脚本中的临时 YUM 源使用后即恢复，不对系统产生持久修改。
@@ -19,7 +20,10 @@ tools: Read, Write, Bash, Glob, Grep
 ## ssh-skill 调用
 
 ```bash
+# 远程命令
 python .claude/skills/ssh-skill/scripts/ssh_execute.py <别名> "<命令>"
+# 远程 → 本机文件下载（--recursive 支持目录递归）
+python .claude/skills/ssh-skill/scripts/ssh_download.py <别名> <远程路径> <本地路径> --recursive
 ```
 
 ## 配置文件
@@ -31,6 +35,7 @@ rpm_archive:
   result_file: "rpm/{{software}}/{{version}}/{{software}}-rpm-archive-result.md"
   deliver_list_file: "rpm/{{software}}/{{version}}/{{software}}-rpm-deliver-list.md"
   install_script_file: "rpm/{{software}}/{{version}}/install-rpm.sh"
+  package_dir: "rpm/{{software}}/{{version}}/rpms"   # 产物包收集落盘目录（binary/ source/ deps/ 三子目录）
 
 unknown_version: "latest"
 default_server_alias: ""
@@ -40,7 +45,7 @@ ssh_skill_scripts: ".claude/skills/ssh-skill/scripts"
 ## 输入
 
 1. **软件名称**（必需）
-2. **目标服务器别名**（必需，用于清理）
+2. **目标服务器别名**（必需，用于清理与产物收集）
 3. **软件版本**（可选，默认 `unknown_version`）
 4. **RPM 在 YUM 源中的相对路径**（可选；若缺失则从构建指南推测或使用占位符）
 5. 可选覆盖输出路径
@@ -48,14 +53,28 @@ ssh_skill_scripts: ".claude/skills/ssh-skill/scripts"
 ## 工作流程
 
 1. 读取 `deploy.config.yaml`，校验入参。
-2. 确认目标机器可达（清理用）。
-3. 执行清理（bash_history、dnf cache、/tmp、authorized_keys），失败记录警告但不中断。
-4. 收集构建与验证信息：
+2. 确认目标机器可达（收集与清理用）。
+3. **收集 RPM 产物包到本机**（第一步实质动作；清理之前执行，顺序不可颠倒——清理会清 /tmp，包删了不可再生）：
+   - **定位构建产物**（远程）：
+     - 二进制包：`~/rpmbuild/RPMS/**/*.rpm`（含架构子目录，如 `aarch64/`）
+     - 源码包：`~/rpmbuild/SRPMS/*.src.rpm`（SPEC + 源码 tarball 都在内，无需单收 tarball）
+   - **收集原有依赖包**（非本流水线构建、安装时需要的仓库 RPM）：
+     - 依赖清单 = rpm-build 结果中的 BuildRequires 去掉 `-devel` 后缀、去重（与安装脚本的 RUNTIME_DEPS 同源）
+     - 远程抓取（首选，dnf 核心功能无需插件）：`dnf install -y --downloadonly --releasever=<系统版本> --downloaddir=/tmp/rpm-collect/deps <RUNTIME_DEPS>`
+     - 已安装的包不会重复下载时，改用 `dnf reinstall -y --downloadonly --downloaddir=... <同一清单>`；或安装 dnf-plugins-core 后 `dnf download --resolve --alldeps --destdir=... <清单>`（此法会动系统，仅在前两者不可用时用）
+     - 校验 deps/ 非空且每个文件以 `.rpm` 结尾；个别依赖拉不到时记录警告，不中断
+   - **远程归拢**：`mkdir -p /tmp/rpm-collect/{binary,source}`，把 RPMS/SRPMS 下的包复制进去（平铺保文件名）
+   - **拉取到本机**（ssh-skill，不用 scp；本机目录先 mkdir -p）：
+     `python .claude/skills/ssh-skill/scripts/ssh_download.py <别名> /tmp/rpm-collect/ <package_dir>/ --recursive`
+   - **本机校验**：`binary/`、`source/`、`deps/` 三子目录文件数与远程一致、每个文件大小 > 0；对每个包算 sha256（远程、本机各一次，不一致记入问题清单）
+   - **失败语义**：`binary/` 为空 = 构建产物缺失，**归档结论记 ❌**、在报告中显著标注（不静默跳过），其余交付物照常生成；`source/`、`deps/` 部分失败记 ⚠️ 警告后继续
+4. 执行清理（bash_history、dnf cache、/tmp、authorized_keys——/tmp 清理顺带收走 /tmp/rpm-collect 暂存目录），失败记录警告但不中断。
+5. 收集构建与验证信息：
    - 读取 `rpm-build` 结果文件（路径由配置 `rpm_build.result_file` 决定，如 `rpm/{{software}}/{{version}}/{{software}}-rpm-result.md`），提取：软件包名、版本、架构、构建依赖（BuildRequires）、主二进制名、默认端口、YUM 源中 RPM 的相对路径（如有）。
    - 读取 `rpm-verify` 结果文件（仅用于交付清单状态）。
-5. 生成安装脚本 `install-rpm.sh`（完整模板见下），将提取的变量注入脚本。
-6. 写入清理报告（`rpm-archive-result.md`）和交付清单（`rpm-deliver-list.md`）。
-7. 完成后回复**三个文件的路径**及整体结论。
+6. 生成安装脚本 `install-rpm.sh`（完整模板见下），将提取的变量注入脚本。
+7. 写入清理报告（`rpm-archive-result.md`）和交付清单（`rpm-deliver-list.md`），交付清单中列出 `rpms/` 三个子目录的文件、大小、sha256 与下载方式。
+8. 完成后回复**三个文件的路径 + `rpms/` 目录路径与各子目录文件数**及整体结论。
 
 ## 安装脚本模板（最终版，含备份/恢复）
 
@@ -463,10 +482,17 @@ main
 # <软件名> RPM 归档清理报告
 > 软件：<software> <version> | 目标：<alias> | 日期：<YYYY-MM-DD>
 
+## 产物包收集（清理之前完成）
+- binary/（构建二进制包）：<N> 个 · ✅/❌（❌ 时注明原因）
+- source/（源码包）：<N> 个 · ✅/⚠️
+- deps/（原有依赖包）：<N> 个 · ✅/⚠️
+- sha256 双端核对：<全部一致 / 不一致清单>
+- 本机落盘：rpm/<software>/<version>/rpms/
+
 ## 清理结果
 - bash_history：✅
 - dnf cache：✅
-- /tmp 临时文件：✅
+- /tmp 临时文件：✅（含收集暂存目录 /tmp/rpm-collect）
 - authorized_keys：✅
 
 ## 问题与异常
@@ -481,7 +507,22 @@ main
 
 ## RPM 包信息
 - 包名：<PKG_NAME>-<TARGET_VER>-1.<ARCH>.rpm
-- 下载方式：安装脚本自动从华为云鲲鹏源获取
+- 下载方式：
+  - **本机已收集**：`rpm/<software>/<version>/rpms/`（见下「产物包」），
+    Web 界面产物区可单文件下载、勾选后打包 zip 下载
+  - 异机安装：安装脚本自动从华为云鲲鹏源获取
+
+## 产物包（已收集到本机）
+> 目录：`rpm/<software>/<version>/rpms/` · Web 界面（产物区）支持单文件 ⤓ 下载与批量 zip 下载
+
+### binary/（构建二进制包）
+- <文件名> · <大小> · sha256: <前 12 位>
+
+### source/（源码包，含 SPEC 与源码 tarball）
+- <文件名> · <大小> · sha256: <前 12 位>
+
+### deps/（原有依赖包）
+- <文件名> · <大小> · sha256: <前 12 位>
 
 ## 构建依赖（运行时已安装）
 <RUNTIME_DEPS>
@@ -508,7 +549,8 @@ main
 
 - 不执行生成的安装脚本。
 - 不直接使用 `ssh`/`scp`，统一走 ssh-skill。
+- 不在产物包收集完成前执行清理（/tmp 会被清掉，收集暂存目录在其中）。
 - 不制作 ECS 镜像。
 - 不修改配置文件本身。
 
-完成后必须回复：清理报告路径、交付清单路径、安装脚本路径及整体结论。
+完成后必须回复：清理报告路径、交付清单路径、安装脚本路径、`rpms/` 目录路径（含 binary/source/deps 各自文件数）及整体结论。

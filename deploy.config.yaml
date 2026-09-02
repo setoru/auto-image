@@ -40,6 +40,15 @@ archive_result_file: "{{software}}-archive-result.md"
 deploy_list_file: "{{software}}-deploy-list.md"
 archive_issues_file: "{{software}}-archive-issues.md"
 
+# --- rpm-archive（RPM 流水线归档；输出位于 rpm/ 树，键与 rpm agent 内置默认一致） ---
+# package_dir：归档开始时收集的产物包落盘目录（binary/ 构建二进制包、
+# source/ 源码包、deps/ 原有依赖包三子目录），Web 界面产物区自动可见可下载
+rpm_archive:
+  result_file: "rpm/{{software}}/{{version}}/{{software}}-rpm-archive-result.md"
+  deliver_list_file: "rpm/{{software}}/{{version}}/{{software}}-rpm-deliver-list.md"
+  install_script_file: "rpm/{{software}}/{{version}}/install-rpm.sh"
+  package_dir: "rpm/{{software}}/{{version}}/rpms"
+
 # --- 运行时（install / verify / archive 共用） ---
 default_server_alias: ""                       # 默认目标机器别名；留空则要求 prompt 提供
 ssh_skill_scripts: ".claude/skills/ssh-skill/scripts"

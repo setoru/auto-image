@@ -80,3 +80,54 @@ export function fmtSize(bytes) {
   if (bytes == null) return ''
   return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`
 }
+
+// ---------- 产物目录树（清单平铺分组 → 嵌套树） ----------
+
+// 服务端清单组键（"rpm/httpd/2.4.57" 形）按 / 拆段逐级挂载：节点.path 即
+// 组键（勾选/下载的寻址前缀），files 为该目录自身组内文件，count 为子树
+// 文件总数。子目录次序取首见次序——组间已按最新落盘降序，各级天然「最新
+// 在前」；返回根层节点（deploy、rpm……），空清单返回 []。
+export function artifactTree(groups) {
+  const roots = []
+  const byPath = new Map()
+  for (const g of groups) {
+    let node = null
+    let path = ''
+    for (const seg of g.dir.split('/')) {
+      path = path ? `${path}/${seg}` : seg
+      let child = byPath.get(path)
+      if (!child) {
+        child = { name: seg, path, dirs: [], files: [] }
+        byPath.set(path, child)
+        const holder = node ?? { dirs: roots }
+        holder.dirs.push(child)
+      }
+      node = child
+    }
+    if (node) node.files = g.files
+  }
+  const tally = (n) => n.files.length + n.dirs.reduce((sum, d) => sum + tally(d), 0)
+  for (const r of roots) r.count = tally(r)
+  return roots
+}
+
+// 节点子树全部文件的根前缀相对路径（目录行三态勾选 / 卡头全选的勾选集）
+export function subtreeRels(node) {
+  const out = node.files.map((f) => `${node.path}/${f.name}`)
+  for (const d of node.dirs) out.push(...subtreeRels(d))
+  return out
+}
+
+// 默认展开路径集：最新一组（groups[0]，服务端按落盘时间降序）及其各级
+// 祖先——沿用旧平铺形态「默认展开最新一组」的行为，未手动动过的目录才生效
+export function defaultOpenPaths(groups) {
+  const open = new Set()
+  const first = groups[0]?.dir
+  if (!first) return open
+  let path = ''
+  for (const seg of first.split('/')) {
+    path = path ? `${path}/${seg}` : seg
+    open.add(path)
+  }
+  return open
+}

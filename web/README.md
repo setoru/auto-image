@@ -47,7 +47,7 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 会话驱动循环（一条 run = 一条会话） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
-| `artifacts.py` | deploy/ 全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取与路径约束 |
+| `artifacts.py` | deploy/ + rpm/ 多根全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的恢复：state 簿记里的挂起 run 恢复为可聊（原 run_id、事件流从 transcript 重放），其余 transcript 以 session 粒度重建为历史 run（ENDED，只读可续接） |
 | `state.py` | 挂起 run 的落盘簿记（`~/.auto-image-web/state.json`，全量原子替换）：run ↔ session 映射与状态机状态，transcript 里没有的东西；损坏降级为纯历史重建 |
