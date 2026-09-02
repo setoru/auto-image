@@ -1,9 +1,11 @@
 // 共享会话状态：多会话并行（并发上限内的执行中回合可多个），动作经
-// HTTP/SSE 与服务端交互。每个活跃会话一条常驻 EventSource（断线浏览器
-// 自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；已收事件按 seq 去重）。
+// HTTP/SSE 与服务端交互。每个打开的标签页一条常驻 EventSource（attach 后
+// 切走不断，断线浏览器自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；
+// 已收事件按 seq 去重）。
 //
-// 停止 / 结束 / 克隆的干预端点见后端 web/（run_turn 按 stop_requested 标记
-// 区分 turn.stopped 与 turn.completed）；失败时如实把错误显示在提示条上。
+// 标签页是纯客户端视图：closeTab 只断 SSE 不断会话，会话仍在列表里，
+// 重新打开（selectRun）恢复原会话；「结束会话」才是服务端动作。
+// 非查看中的标签页状态点/排序由 GET /api/runs 摘要轮询驱动。
 import { useSyncExternalStore } from 'react'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
@@ -44,10 +46,12 @@ const CONFLICT_HINT = {
 }
 
 const listeners = new Set()
-// order 即任务下拉次序：最新在前（服务端列表同序，新建前插）
+// order：全部会话的列表序（含未打开的，服务端列表同源）；openTabs：当前
+// 打开着的标签页（viewRunId ⊆ openTabs）
 let state = {
   runs: {},
   order: [],
+  openTabs: [],
   viewRunId: null,
   submitError: null,
   now: Date.now(),
@@ -132,6 +136,8 @@ function onStreamEvent(runId, es, e) {
 }
 
 function attachStream(runId) {
+  const run = state.runs[runId]
+  if (!run || run.es) return // 常驻一条：已挂不重挂
   const es = new EventSource(`/api/runs/${runId}/events`)
   es.onopen = () => setRun(runId, { connection: 'live' })
   es.onerror = () => {
@@ -170,8 +176,8 @@ function appendTo(runId, event) {
 
 // ---------- HTTP ----------
 
-// run 对象的唯一构造点：服务端摘要（loadRuns）与新建响应（createRun）
-// 共用同一形状，字段差异由 overrides 给出
+// run 对象的唯一构造点：服务端摘要（loadRuns/轮询）与新建/克隆响应共用
+// 同一形状，字段差异由 overrides 给出
 function makeRun(overrides) {
   return {
     runId: null,
@@ -191,9 +197,10 @@ function makeRun(overrides) {
   }
 }
 
-// 启动加载：拉全量 run 摘要恢复任务下拉（服务重启后经 transcript 重放，
-// 全部可续聊、ENDED 只读回看）；首屏即回放查看中的那条。尽力而为，失败从空开始。
-// ENDED 会话重放完自动关流（session.ended），READY/RUNNING 常驻等待续聊。
+// 启动加载：拉全量 run 摘要恢复会话列表（服务重启后经 transcript 重放，
+// 全部可续聊、ENDED 只读回看）；首屏打开最新一条的标签页。尽力而为，
+// 失败从空开始。ENDED 会话重放完自动关流（session.ended），READY/RUNNING
+// 常驻等待续聊。
 export async function loadRuns() {
   try {
     const resp = await fetch('/api/runs')
@@ -203,27 +210,54 @@ export async function loadRuns() {
     const map = {}
     const order = []
     for (const s of runs) {
-      map[s.run_id] = makeRun({
-        runId: s.run_id,
-        status: s.status,
-        stage: s.stage,
-        firstPrompt: s.first_prompt,
-        title: s.title ?? null,
-        resumedFrom: s.resumed_from,
-        startedAt: s.started_at * 1000,
-        endedAt: s.ended_at ? s.ended_at * 1000 : null,
-        lastEventAt: s.last_event_at ? s.last_event_at * 1000 : null,
-      })
+      map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
       order.push(s.run_id)
     }
     set({
       runs: { ...state.runs, ...map },
-      order: [...order, ...state.order],
+      order,
       viewRunId: state.viewRunId ?? order[0],
     })
-    attachStream(state.viewRunId)
+    // 首屏：打开最新一条（viewRunId 未定）；后续轮询发现的新会话不自动开
+    if (!state.openTabs.includes(state.viewRunId)) openTab(state.viewRunId)
   } catch {
     // 历史加载失败不打断使用：界面从空会话开始
+  }
+}
+
+// 摘要 → run 的合并（loadRuns 与轮询共用同一形状）
+function mergeSummary(run, s) {
+  return {
+    ...run,
+    status: s.status,
+    stage: s.stage,
+    firstPrompt: s.first_prompt,
+    title: s.title ?? null,
+    resumedFrom: s.resumed_from,
+    startedAt: s.started_at * 1000,
+    endedAt: s.ended_at ? s.ended_at * 1000 : null,
+    lastEventAt: s.last_event_at ? s.last_event_at * 1000 : null,
+  }
+}
+
+// 摘要轮询：驱动非查看中标签页的状态点与排序（SSE 只覆盖打开的标签页，
+// 他人会话或重启新会话只有列表最知道）。轻字段覆盖，不动 events/es。
+setInterval(() => pollSummaries(), 5000)
+
+async function pollSummaries() {
+  try {
+    const resp = await fetch('/api/runs')
+    if (!resp.ok) return
+    const { runs } = await resp.json()
+    const map = {}
+    const order = []
+    for (const s of runs) {
+      map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
+      order.push(s.run_id)
+    }
+    set({ runs: { ...state.runs, ...map }, order })
+  } catch {
+    // 轮询失败静默：SSE 在的标签页不受影响，下个周期再试
   }
 }
 
@@ -241,6 +275,7 @@ export async function createRun() {
     set({
       runs: { ...state.runs, [run.runId]: run },
       order: [run.runId, ...state.order],
+      openTabs: [run.runId, ...state.openTabs],
       viewRunId: run.runId,
       submitError: null,
     })
@@ -266,6 +301,7 @@ export async function cloneRun() {
     set({
       runs: { ...state.runs, [run.runId]: run },
       order: [run.runId, ...state.order],
+      openTabs: [run.runId, ...state.openTabs],
       viewRunId: run.runId,
       submitError: null,
     })
@@ -318,12 +354,37 @@ export async function endRun() {
   }
 }
 
+// 打开标签页（loadRuns 首屏发现用）：进 openTabs 并挂流
+function openTab(runId) {
+  const run = state.runs[runId]
+  if (!run) return
+  if (!state.openTabs.includes(runId)) set({ openTabs: [...state.openTabs, runId] })
+  attachStream(runId)
+}
+
+// 切换标签页 = 只切查看（挂上 SSE 回放历史），不创建会话、不产生服务端动作
 export function selectRun(runId) {
   const run = state.runs[runId]
   if (!run) return
   set({ viewRunId: runId })
-  // 切换到的会话尚无事件流（列表加载来的历史）：接上即回放（终态重放完自动关流）
-  if (!run.es) attachStream(runId)
+  openTab(runId)
+}
+
+// 关闭标签页 = 只关视图：断 SSE、会话仍在列表（摘要轮询继续盯它），
+// 重新打开恢复原会话。关的是查看中的标签页时切到相邻标签
+export function closeTab(runId) {
+  const run = state.runs[runId]
+  if (!run) return
+  if (run.es) {
+    run.es.close()
+    setRun(runId, { es: null, connection: 'idle' })
+  }
+  const idx = state.openTabs.indexOf(runId)
+  if (idx === -1) return
+  const openTabs = state.openTabs.filter((id) => id !== runId)
+  let viewRunId = state.viewRunId
+  if (viewRunId === runId) viewRunId = openTabs[Math.min(idx, openTabs.length - 1)] ?? null
+  set({ openTabs, viewRunId })
 }
 
 // ---------- 产物 ----------

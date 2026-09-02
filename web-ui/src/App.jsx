@@ -1,18 +1,17 @@
 // A 形态 —— Claude Code 会话的 Web 对话界面。
-// header（run_id · 会话状态 · 当前阶段 · 时长 · 结束会话）+ 左侧可收起
-// 任务详情栏（产物卡）+ 主区双 tab（会话 | 产物）
-// + 底部常驻对话输入条。多会话并存时 header 出现切换下拉。
+// 顶部标签栏（多会话并行、独立状态点）+ header（run_id · 会话状态 ·
+// 当前阶段 · 时长 · 结束会话）+ 左侧可收起任务详情栏（产物卡）
+// + 主区双 tab（会话 | 产物）+ 底部常驻对话输入条。
 import { useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize, artifactTree, subtreeRels, defaultOpenPaths } from './derive.js'
+import { fmtActive, fmtLastActivity, fmtSize, artifactTree, subtreeRels, defaultOpenPaths } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
+import Tabs from './components/Tabs.jsx'
 
 const STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
-// 下拉三态（执行中/挂起/已结束）：终态（显式结束的 ENDED）归「已结束」
-const TASK_STATUS_LABEL = { RUNNING: '执行中', READY: '挂起' }
 const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
 const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 
@@ -411,21 +410,6 @@ export default function App() {
   return (
     <div className="va-root">
       <header className="va-head">
-        {s.order.length > 1 && (
-          <select
-            className="va-task-select"
-            value={s.viewRunId ?? ''}
-            onChange={(e) => store.selectRun(e.target.value)}
-            title="切换查看会话"
-          >
-            {s.order.map((id) => (
-              <option key={id} value={id}>
-                {firstPromptPreview(s.runs[id])} · {id} · {TASK_STATUS_LABEL[s.runs[id].status] ?? '已结束'}
-                {resumeMark(s.runs[id], s.runs)}
-              </option>
-            ))}
-          </select>
-        )}
         {run ? (
           <>
             <span className="va-runid">{run.runId}</span>
@@ -446,6 +430,8 @@ export default function App() {
           <span className="va-runid">auto-image 部署会话</span>
         )}
       </header>
+
+      <Tabs />
 
       <div className="va-body">
         {sideOpen && <TaskSide run={run} />}

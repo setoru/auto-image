@@ -7,11 +7,6 @@ export function firstPromptText(run) {
   return run.firstPrompt ?? run.events.find((e) => e.type === 'user.message')?.payload.text ?? null
 }
 
-// 会话是否已有首条指令（输入条占位文案判定）
-export function hasPrompt(run) {
-  return firstPromptText(run) != null
-}
-
 // 任务名 = LLM 标题（服务端 title / 事件流 session.title_changed）优先，
 // 回退首条指令截断（生成中/失败/老会话）
 export function firstPromptPreview(run, max = 18) {
@@ -78,6 +73,44 @@ export function fmtLastActivity(run) {
 export function fmtSize(bytes) {
   if (bytes == null) return ''
   return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`
+}
+
+// ---------- 标签栏（多会话视图） ----------
+
+// 最后活动时刻：事件 ts（SSE / 摘要轮询同步进 run）优先，无活动的新会话
+// 回退创建时刻——新建因此天然排最前
+export function lastActivityAt(run) {
+  return run?.lastEventAt ?? run?.startedAt ?? 0
+}
+
+// 标签排序：最后活动降序（最近工作的会话总在手边）
+export function byLastActivity(tabIds, runs) {
+  return [...tabIds].sort((a, b) => lastActivityAt(runs[b]) - lastActivityAt(runs[a]))
+}
+
+// 标签状态点：● 执行中 / ○ 等待指令 / ! 最近回合失败 / ■ 已结束。
+// 失败标记由事件流倒序判定：最后一条回合开卷/收尾洗掉它，只有落在流尾的
+// turn.failed 才标 ！；未回放的会话（仅轮询摘要，无事件）只剩状态可用。
+export function tabDot(run) {
+  if (!run) return 'ready'
+  if (run.status === 'RUNNING') return 'running'
+  if (run.status === 'ENDED') return 'ended'
+  for (let i = run.events.length - 1; i >= 0; i--) {
+    const t = run.events[i].type
+    if (t === 'turn.failed') return 'failed'
+    if (t === 'turn.started' || t === 'turn.completed' || t === 'turn.stopped' || t === 'turn.interrupted') return 'ready'
+  }
+  return 'ready'
+}
+
+// 当前执行中的会话数（顶部运行计数：并行负载与并发上限预判）
+export function runningCount(runs) {
+  return Object.values(runs).filter((r) => r.status === 'RUNNING').length
+}
+
+// RUNNING 标题提示的会话集：排除当前查看中的（正看着的无需提醒）
+export function runningOthers(runs, viewRunId) {
+  return Object.values(runs).filter((r) => r.status === 'RUNNING' && r.runId !== viewRunId)
 }
 
 // ---------- 产物目录树（清单平铺分组 → 嵌套树） ----------
