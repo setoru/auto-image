@@ -85,10 +85,11 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    配 `allowed_tools=["mcp__exa-search__*"]` 放行；复测抓取 nginx.org
    成功。内置工具中只读 Bash 随 `claude_code` 预设放行；写路径需
    `permission_mode`（见第 8 条）。
-7. **回合上限**：`max_turns=200` 与回合级 wall-clock 超时（默认 3600 秒，
-   `sdk.TURN_TIMEOUT_SECONDS`）都是终局语义：Result 的错误 subtype（兜底
-   判定：只有 `success` 是正常完成）或超时都以 `run.failed` 收尾、会话进
-   FAILED、断开 SDK 连接，不自动重试。
+7. **回合上限**：`max_turns=200` 是终局语义：Result 的错误 subtype（兜底
+   判定：只有 `success` 是正常完成）以 `run.failed` 收尾、会话进 FAILED、
+   断开 SDK 连接，不自动重试。**无 wall-clock 超时**（曾有 3600 秒上限，
+   已删）：单回合即完整部署流水线，四阶段串行 + 云操作轮询（IMS 制镜像）
+   可超小时级，服务端主动掐断会把已提交的云操作留在中间态。
 
 8. **无值守会话的写权限**（真部署实测）：`claude_code` 工具预设只放行
    只读 Bash，Write 与 Bash 写路径一律被权限系统拦截（guide 只能把指南

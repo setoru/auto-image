@@ -108,7 +108,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .dot.tone-bad { background: var(--bad); }
 @keyframes va-pulse { 50% { opacity: 0.35; } }
 
-.va-body { flex: 1; display: flex; min-height: 0; }
+.va-body { flex: 1; display: flex; min-height: 0; position: relative; }
 .va-main { flex: 1; display: flex; flex-direction: column; min-width: 0; position: relative; }
 
 /* ---- 消息流 ---- */
@@ -205,8 +205,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   position: sticky; top: 0; background: var(--surface);
 }
 .va-side-title-text { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
-.va-side-toggle { padding: 1px 8px; font-size: 13px; color: var(--ink-2); }
-.va-side-open { font-size: 12px; color: var(--ink-2); flex-shrink: 0; }
+/* 侧栏开合 pin 钮：竖向把手形（窄宽、加高、pill 圆角），垂直居中、
+   随栏缘水平移动——展开时骑缝在 280px 栏界线上，收起时滑回主区左缘
+   贴边；图标随态换向（«/»），浮层带影分层 */
+.va-side-pin {
+  position: absolute; top: 50%; left: 280px; z-index: 5;
+  transform: translate(-50%, -50%);
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 14px; height: 44px; padding: 0; font-size: 12px;
+  color: var(--ink-2); border-color: var(--line);
+  background: var(--surface);
+  border-radius: 999px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15);
+  transition: left 0.18s ease;
+}
+.va-side-pin:not(.open) { left: 7px; }
+.va-side-pin:hover { background: var(--surface-dim); color: var(--ink); }
+.va-btn-sym { font-family: var(--mono); line-height: 1; }
 .va-side-cards { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
 .va-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: flex; flex-direction: column; gap: 4px; }
 .va-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }

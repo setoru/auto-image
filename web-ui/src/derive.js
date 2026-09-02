@@ -28,16 +28,15 @@ export function resumeMark(run, runs) {
   return ` ↩ 接续『${firstPromptPreview(runs[run.resumedFrom])}』`
 }
 
-export function fmtElapsed(startedAt, now) {
-  if (!startedAt) return '--:--'
-  const s = Math.max(0, Math.floor(((now || Date.now()) - startedAt) / 1000))
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
-}
-
 // 累计执行时长：各回合（user.message → 回合收尾）求和，扣除等待输入的
-// 空档；执行中的回合以 now 收口。重放历史无回合收尾时（异常中断）该回
-// 回合不计。
+// 空档；执行中的回合以 now 收口。终态会话直接用 endedAt - startedAt 兜底
+// 定格（方案：终态以服务端 endedAt 定格总时长）——跨重载时事件 ts 是
+// 服务端时刻，不会随 Date.now() 无限增长。无 endedAt 的终态（异常边界）
+// 退回事件求和，未闭合的回合不计。
 export function activeSeconds(run, now) {
+  if (run.endedAt != null && run.startedAt != null) {
+    return Math.max(0, Math.floor((run.endedAt - run.startedAt) / 1000))
+  }
   let total = 0
   let turnStart = null
   for (const ev of run.events) {
@@ -47,7 +46,9 @@ export function activeSeconds(run, now) {
       turnStart = null
     }
   }
-  if (turnStart != null) total += Math.max(0, (now || Date.now()) / 1000 - turnStart)
+  if (turnStart != null && run.status !== 'CANCELED' && run.status !== 'FAILED' && run.status !== 'ENDED') {
+    total += Math.max(0, (now || Date.now()) / 1000 - turnStart)
+  }
   return Math.floor(total)
 }
 

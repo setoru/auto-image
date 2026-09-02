@@ -11,7 +11,7 @@ import os
 import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from web.sdk import EXA_MCP_SERVER, SYSTEM_PROMPT, TURN_TIMEOUT_SECONDS, default_options  # noqa: E402
+from web.sdk import EXA_MCP_SERVER, SYSTEM_PROMPT, default_options  # noqa: E402
 
 
 def test_system_prompt_covers_control_boundary():
@@ -35,7 +35,6 @@ def test_options_pin_control_boundary():
     options = default_options()
     assert options.system_prompt == SYSTEM_PROMPT
     assert options.max_turns == 200
-    assert TURN_TIMEOUT_SECONDS == 3600.0
 
 
 def test_options_grant_unattended_write_permission():

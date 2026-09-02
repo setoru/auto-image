@@ -563,30 +563,6 @@ async def test_max_turns_result_fails_run():
         assert "leak-me" not in message  # 摘要脱敏：密码不外泄
 
 
-async def test_turn_timeout_fails_run():
-    """回合 wall-clock 超时 → FAILED + run.failed 携带超时摘要（终局语义，
-    会话断连不自动重试）。"""
-    app = create_app(
-        session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=1.0),
-        heartbeat_interval=HEARTBEAT,
-        turn_timeout=0.1,
-        list_sessions_fn=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
-        state_path=tempfile.mkdtemp() + "/state.json",
-    )
-    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
-        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
-        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
-        await wait_status(client, run_id, "FAILED")
-        events = await wait_replay(client, run_id, lambda evs: evs[-1]["event"] == "run.failed")
-        message = events[-1]["data"]["message"]
-        assert "超时" in message or "超过" in message
-        assert "0" in message  # 摘要带上限值
-        # 后续指令被拒：终态 run 不接受干预
-        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
-        assert r.status_code == 409
-
-
 async def test_resume_carries_history_into_new_stream():
     """接续创建的新会话事件流自带源会话历史（CLI resume 的体验）：
     run.started → resumed.history 分隔 → 源会话事件（跳过生命周期事件，
