@@ -4,7 +4,7 @@
 身份。回合完成（turn.completed）、被停止（turn.stopped）或失败
 （turn.failed）都不结束会话——一律回 READY，下一条指令即续聊；会话终态
 只有用户显式结束（end → ENDED，不可续聊只能克隆，墓碑入册防重启复活）。
-历史重建（rebuild.py）暂以 ENDED 承载重启找回的历史（合流见后续）。
+重启恢复（rebuild.py）全量重放 transcript，墓碑会话重放后仍标 ENDED。
 
 并发：无全局门禁，任意多会话可同时各跑一个回合；执行中回合数由
 max_parallel 限制（WEB_MAX_PARALLEL_RUNS，send 时检查——新建、克隆不占
@@ -45,6 +45,7 @@ class Run:
         self.session_id = None       # SDK 会话 id（回合 Result 提取，resume 用）
         self.resume_session_id = None  # 回合起连接时的续接源（克隆/恢复带入）
         self.resumed_from = None     # 克隆来源 run_id（对外呈现）
+        self.clone_source = None     # 克隆血缘（落克隆链镜像用，见 app.persist）
         self.stop_requested = False  # 停止请求标记：turn.stopped 的权威判定
         self.ended_at = None         # ENDED 时刻（时长定格；非终态为 None）
         self.last_event_at = None    # 最后活动时刻（时长冻结点；rebuild 兜底）
@@ -136,6 +137,7 @@ class RunManager:
             raise Conflict(SESSION_RUNNING)
         new = self.create()
         new.resumed_from = run.run_id
+        new.clone_source = run.run_id
         new.resume_session_id = run.session_id  # 回合以此续接源起新连接
         # 标题继承：克隆与源是同一任务的分叉，first_prompt 不再生成标题
         new.first_prompt = run.first_prompt

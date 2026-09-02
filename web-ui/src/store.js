@@ -191,8 +191,8 @@ function makeRun(overrides) {
   }
 }
 
-// 启动加载：拉全量 run 摘要恢复任务下拉（服务重启后历史经 transcript 重建，
-// 终态只读回看、挂起可续聊）；首屏即回放查看中的那条。尽力而为，失败从空开始。
+// 启动加载：拉全量 run 摘要恢复任务下拉（服务重启后经 transcript 重放，
+// 全部可续聊、ENDED 只读回看）；首屏即回放查看中的那条。尽力而为，失败从空开始。
 // ENDED 会话重放完自动关流（session.ended），READY/RUNNING 常驻等待续聊。
 export async function loadRuns() {
   try {
@@ -293,7 +293,7 @@ export async function send(text) {
   const run = state.runs[state.viewRunId]
   if (!run || !trimmed) return false
   if (!isOperable(run.status)) {
-    // 只读会话（已结束/重启找回的历史）不静默吞掉输入，给出出路提示
+    // 只读会话（已结束）不静默吞掉输入，给出出路提示
     fail('该会话只读（已结束）——「+ 新建」或克隆该会话后继续')
     return false
   }

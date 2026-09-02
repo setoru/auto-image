@@ -48,7 +48,7 @@ DEFAULT_ARTIFACT_ROOTS = {
 DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.yaml"
 # 运行时真实凭据源（ak/sk/ECS 密码值进脱敏已知清单，见 redact.load_scope_secrets）
 DEFAULT_SCOPE_CONFIG = Path(__file__).resolve().parent.parent / "scope.yaml"
-# 挂起会话的落盘簿记（服务重启恢复可聊；同一 HOME 下多实例共用一份）
+# 恢复簿记（墓碑 + 身份映射 + 克隆链镜像；同一 HOME 下多实例共用一份）
 DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
 # 并发上限（数执行中回合；新建、克隆、标题生成不占名额）
 DEFAULT_MAX_PARALLEL_RUNS = 10
@@ -67,7 +67,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。
     state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。
     title_factory 为标题生成会话工厂（测试缝；生产为独立 cwd 的隔离配置，
-    transcript 不落项目根、不进重启重建的发现层）。
+    transcript 不落项目根、不进重启恢复的发现层）。
     max_parallel_runs 为并发上限（默认 WEB_MAX_PARALLEL_RUNS 环境变量，
     缺省 10；测试注入收紧）。"""
     # 已知凭据值入脱敏清单（幂等；scope 缺失时只剩形状正则防线）
@@ -88,9 +88,18 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     app.state.heartbeat_interval = heartbeat_interval
     state_file = Path(state_path) if state_path is not None else DEFAULT_STATE_PATH
 
+    # 克隆链镜像（session_id → 来源 run_id）：transcript 里没有克隆血缘，
+    # 簿记撤销后克隆链父指针无从找回——克隆挂 run.clone_source，persist 时
+    # （首回合建立 session_id 后）随身份映射一并入册；启动时从簿记播种
+    clone_sources = {}
+
     def persist():
-        """状态变更点统一落盘（全量原子替换，见 state.save_state）。"""
-        state_mod.save_state(manager.runs.values(), state_file)
+        """状态变更点统一落盘（墓碑 + 身份映射 + 克隆链镜像，全量原子替换，
+        见 state.save_state）。"""
+        for r in manager.runs.values():
+            if r.clone_source and r.session_id:
+                clone_sources[r.session_id] = r.clone_source
+        state_mod.save_state(manager.runs.values(), state_file, clone_sources)
 
     def maybe_assign_title(run, text, is_first):
         """新对话的首条指令到达即起标题生成（Codex 同构：不等回合完成）。
@@ -108,25 +117,19 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         收尾即散；任务引用挂 run 供 stop / end 定向。"""
         run.turn_task = asyncio.create_task(run_turn(run, text, factory, store, on_change=persist))
 
-    # 服务重启语义：簿记里的挂起会话先恢复（可聊、resume 重建连接），CLI 侧
-    # transcript 再重建其余历史（只读回看 + 克隆起点）；正在执行的任务不自动
-    # 重试（RUNNING 降级挂起 + turn.interrupted 提示）；残留 CLI 子进程只告警
-    # 不杀（可能处于云操作中间态）
-    restored = rebuild_mod.restore_active_runs(
-        manager, store,
-        state_mod.load_state(state_file),
-        get_session_messages_fn or sdk_mod.project_session_messages,
-    )
-    if restored:
-        logging.getLogger("web").info("服务重启后恢复 %d 条挂起会话（可继续对话）", len(restored))
-    rebuilt = rebuild_mod.rebuild_history(
+    # 服务重启语义：全量 transcript 重放恢复所有会话（可续聊），state 簿记
+    # （墓碑 + 身份映射 + 克隆链镜像）叠加；未收尾回合补 turn.interrupted
+    # 提示，不自动重试；残留 CLI 子进程只告警不杀（可能处于云操作中间态）
+    bookkeeping = state_mod.load_state(state_file)
+    clone_sources.update(bookkeeping["clone_sources"])
+    restored = rebuild_mod.recover_sessions(
         manager, store,
         list_sessions_fn or sdk_mod.list_project_sessions,
         get_session_messages_fn or sdk_mod.project_session_messages,
-        skip_sessions={r.session_id for r in restored},
+        bookkeeping,
     )
-    if rebuilt:
-        logging.getLogger("web").info("服务重启后找回 %d 条历史会话", len(rebuilt))
+    if restored:
+        logging.getLogger("web").info("服务重启后重放恢复 %d 条会话（可续聊）", len(restored))
     residual_pids = (residual_cli_scan or residual_cli_processes)()
     if residual_pids:
         logging.getLogger("web").warning(

@@ -208,16 +208,15 @@ async def test_second_message_does_not_retitle():
 
 
 async def test_continued_session_does_not_retitle():
-    """续聊不生成标题：重启恢复的老会话（first_prompt 非空、title 未生成过）
+    """续聊不生成标题：重启重放恢复的老会话（first_prompt 非空、title 未生成过）
     继续对话，不得把续聊指令总结成标题（「继续执行任务」类）——只有新对话
     的首条指令触发生成。"""
     state_dir = tempfile.mkdtemp()
     state_path = Path(state_dir) / "state.json"
-    state_path.write_text(json.dumps({"runs": [{
-        "run_id": "run_1", "status": "READY", "stage": None,
-        "first_prompt": "部署 nginx", "title": None, "created_at": 1000.0,
-        "session_id": "sess_x", "resumed_from": None,
-    }]}, ensure_ascii=False), encoding="utf-8")
+    state_path.write_text(json.dumps(
+        {"ended_sessions": [], "sessions": {"run_1": "sess_x"}, "clone_sources": {}},
+        ensure_ascii=False,
+    ), encoding="utf-8")
     title_calls = []
 
     class TitleFactory:

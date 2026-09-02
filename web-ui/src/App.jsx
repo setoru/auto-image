@@ -11,7 +11,7 @@ import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize, ar
 import ChatBar from './components/ChatBar.jsx'
 
 const STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
-// 下拉三态（执行中/挂起/已结束）：所有终态（含重启找回的 ENDED）归「已结束」
+// 下拉三态（执行中/挂起/已结束）：终态（显式结束的 ENDED）归「已结束」
 const TASK_STATUS_LABEL = { RUNNING: '执行中', READY: '挂起' }
 const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
 const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
@@ -19,10 +19,10 @@ const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 // 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
 // result 就是最后一条 assistant 文本（CLI Result 语义），重复成框是噪音；
 // 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框。
-// 线上不断言「可继续」——活会话输入条已表达，历史回放里则与只读语义相悖
+// 线上不断言「可继续」——活会话输入条已表达，只读回放里则与语义相悖
 function turnCompletedRow(ev, prev) {
   const result = String(ev.payload.result ?? '').trim()
-  if (!result) return null // 空结果（重启重建的历史常见）不成空框
+  if (!result) return null // 空结果（重放的历史常见）不成空框
   const dup =
     prev?.type === 'agent.message' &&
     String(prev.payload.text ?? '').trim() === result
@@ -416,7 +416,7 @@ export default function App() {
             className="va-task-select"
             value={s.viewRunId ?? ''}
             onChange={(e) => store.selectRun(e.target.value)}
-            title="切换查看会话（历史会话只读回放）"
+            title="切换查看会话"
           >
             {s.order.map((id) => (
               <option key={id} value={id}>

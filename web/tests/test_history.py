@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""历史列表与重启重建主缝测试 —— 列表摘要、只读约束、假 transcript 驱动的重建。
+"""历史列表与重启重放主缝测试 —— 列表摘要、可续聊约束、假 transcript 驱动的重放。
 
 缝：同 test_api 的 ASGI 测试客户端；list_sessions / get_session_messages
 注入假实现（SDKSessionInfo / SessionMessage 同形的 SimpleNamespace），
@@ -126,7 +126,7 @@ async def test_list_endpoint_returns_summaries_without_clearing_old_runs():
         assert {x["run_id"] for x in runs} == {empty, busy, third}
 
 
-async def test_rebuild_restores_history_viewable():
+async def test_replay_restores_history_chattable():
     infos = [session_info("11111111-2222-3333-4444-555555555555", "部署 nginx 1.25 到 server-a",
                           created_ms=1_700_000_000_000, custom_title="部署 nginx")]
     app = history_app(infos, lambda sid: deploy_transcript())
@@ -135,18 +135,18 @@ async def test_rebuild_restores_history_viewable():
         runs = (await client.get("/api/runs")).json()["runs"]
         assert len(runs) == 1, runs
         run = runs[0]
-        assert run["status"] == "ENDED"  # 重启找回的历史：终态，非执行中
+        assert run["status"] == "READY"  # 重放历史：可续聊，非只读终态
         assert run["first_prompt"] == "部署 nginx 1.25 到 server-a"  # 名字来自 SDK first_prompt
         assert run["title"] == "部署 nginx"  # 标题来自 transcript 的 custom-title 行
         assert run["started_at"] == 1_700_000_000.0
         assert run["stage"] == "GUIDE"
-        # 历史无逐事件时刻，最后活动以 transcript 落盘时刻近似（= ended_at）
-        assert run["last_event_at"] == run["ended_at"], run
+        # 历史无逐事件时刻，最后活动以 transcript 落盘时刻近似
+        assert run["last_event_at"] == 1_700_000_005.0, run
         run_id = run["run_id"]
 
-        # 事件流从 transcript 消息重新映射：session.started 起步、session.ended 收尾
+        # 事件流从 transcript 消息重新映射：session.started 起步、无终态收尾
         resp = await open_stream(client, run_id)
-        events, pings = await collect_sse(resp, deadline_s=2.0)
+        events, pings = await collect_sse(resp, deadline_s=0.5)
         types = [e["event"] for e in events]
         assert types == [
             "session.started",
@@ -162,8 +162,7 @@ async def test_rebuild_restores_history_viewable():
             "turn.started",
             "user.message",
             "agent.message",
-            "turn.completed",
-            "session.ended",
+            "turn.interrupted",  # 末回合无下一条输入收口：如实呈现截断，不伪造完成
         ], types
         seqs = [int(e["id"]) for e in events]
         assert seqs == list(range(1, len(events) + 1)), seqs
@@ -173,27 +172,30 @@ async def test_rebuild_restores_history_viewable():
         assert events[9]["data"]["result"] == events[8]["data"]["text"]
         # transcript 重放同样过脱敏与映射路径
         assert "HWPFEJ9AB3CDEFGHIJKL" not in str(events)
-        # 终态重放完毕流正常关闭（只读回放不靠心跳保活）
-        assert pings == 0, pings
+        # 无终态收尾事件：重放完毕流保持连接（心跳保活等待续聊）
+        assert pings >= 1, pings
+
+        # 直接续聊：同会话发指令照常执行
+        r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续之前的部署"})
+        assert r.status_code == 200, r.text
+        await wait_status(client, run_id, "READY")
 
 
-async def test_rebuilt_run_is_readonly_and_not_auto_retried():
+async def test_replayed_run_interventions_allowed():
     sid = "11111111-2222-3333-4444-555555555555"
     app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)], lambda s: deploy_transcript())
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         run_id = (await client.get("/api/runs")).json()["runs"][0]["run_id"]
-        # 历史 run 无干预入口：stop / messages / end 一律 session_not_active
+        # 重放会话可干预（可续聊、可停止、可结束），不再是只读历史
         for path in ("messages", "stop", "end"):
             r = await client.post(f"/api/runs/{run_id}/{path}", json={"text": "继续"} if path == "messages" else {})
-            assert r.status_code == 409, (path, r.text)
-            assert r.json() == {"detail": "session_not_active"}, (path, r.text)
-        # 重启前在执行的任务不自动重试：不占执行权，新建不受阻
-        r = await client.post("/api/runs", json={})
-        assert r.status_code == 200, r.text
+            assert r.status_code == 200, (path, r.text)
+        assert (await client.get(f"/api/runs/{run_id}")).json()["status"] == "ENDED"
+        # 结束后墓碑入册：重启不再复活（test_state 覆盖端到端）
 
 
-async def test_rebuilt_run_serves_as_clone_source():
+async def test_replayed_run_serves_as_clone_source():
     sid = "11111111-2222-3333-4444-555555555555"
     app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)], lambda s: deploy_transcript())
     transport = StreamingASGITransport(app=app)
@@ -210,11 +212,11 @@ async def test_rebuilt_run_serves_as_clone_source():
         resp = await open_stream(client, new_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
         assert [e["event"] for e in drop_title_events(events)][-1] == "turn.completed"
-        # 工厂收到重建 run 找回的 SDK 会话 id（transcript 里的 session_id）
+        # 工厂收到重放 run 找回的 SDK 会话 id（transcript 里的 session_id）
         assert app.state.session_factory.session_ids[-1] == sid
 
 
-async def test_rebuild_skips_messageless_and_broken_sessions():
+async def test_replay_skips_messageless_and_broken_sessions():
     ok_sid = "11111111-2222-3333-4444-555555555555"
     empty_sid = "99999999-8888-7777-6666-555555555555"
     broken_sid = "77777777-6666-5555-4444-333333333333"

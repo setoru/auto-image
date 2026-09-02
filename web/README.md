@@ -36,7 +36,7 @@ WEB_HOST=0.0.0.0 WEB_PORT=8123 python -m web   # 外部可访问（见下）
 ```bash
 python web/tests/test_api.py        # ASGI 主缝（假会话驱动）
 python web/tests/test_artifacts.py  # 产物端点（临时目录造桩）
-python web/tests/test_history.py    # 列表摘要、只读约束、假 transcript 驱动的重启重建
+python web/tests/test_history.py    # 列表摘要、可续聊约束、假 transcript 驱动的重启重放
 python web/tests/test_normalize.py  # 消息映射与阶段推导纯函数断言
 python web/tests/test_redact.py     # 事件出口脱敏（形状正则 + 已知值清单）
 python web/tests/test_sdk.py        # options 契约（系统提示词、固定上限、无值守写权限）
@@ -47,15 +47,15 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 
 | 文件 | 职责 |
 | --- | --- |
-| `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 流（id=seq、Last-Event-ID 重放、心跳保活）、启动接线（历史重建 + 残留 CLI 告警） |
+| `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 流（id=seq、Last-Event-ID 重放、心跳保活）、启动接线（重放恢复 + 残留 CLI 告警） |
 | `runs.py` | 会话状态机（READY/RUNNING/ENDED 三态、无全局门禁）、回合计数（`WEB_MAX_PARALLEL_RUNS`）、clone/end 校验与 409 判定收敛（turn_in_progress / session_running / parallel_limit_reached / session_not_active） |
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
 | `session.py` | 回合执行（send 起回合级 asyncio.Task，SDK 连接只包住一个回合） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | deploy/ + rpm/ 多根全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
-| `rebuild.py` | 服务重启后的恢复：state 簿记里的挂起 run 恢复为可聊（原 run_id、事件流从 transcript 重放），其余 transcript 以 session 粒度重建为历史 run（ENDED，只读可续接） |
-| `state.py` | 挂起 run 的落盘簿记（`~/.auto-image-web/state.json`，全量原子替换）：run ↔ session 映射与状态机状态，transcript 里没有的东西；损坏降级为纯历史重建 |
+| `rebuild.py` | 服务重启后的恢复（单一流程）：全量 transcript 按 session 粒度重放 + state 簿记叠加——身份映射命中的沿用原 run_id，墓碑会话标 ENDED；重放会话一律 READY 可续聊，未收尾回合（transcript 推导 turn_open）补 `turn.interrupted` 不伪造完成 |
+| `state.py` | 恢复簿记（`~/.auto-image-web/state.json`，全量原子替换）：墓碑（用户 ENDED 的 session_id 集合）+ 身份映射（run_id ↔ session_id）+ 克隆链镜像（session_id → 来源 run_id），仅此三样（stage/title/first_prompt 从 transcript 重放推导）；损坏降级为无墓碑无映射的重放，不阻断启动 |
 | `title.py` | 会话标题 LLM 生成（Codex 同构，research/codex-session-title.md）：首条指令到达即起一次性无工具会话生成，成功落 run.title + `session.title_changed` 事件 + transcript custom-title 行；失败静默维持截断标题；克隆会话继承源标题不再生成 |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
@@ -122,22 +122,23 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    被杀断开连接，远端进程是否终止取决于远端 shell 配置，**不保证**——
    按「已提交的云操作不可撤销」对待。断连后以 `resume=session_id` 新建
    会话实测可续接，上下文完整（能复述被打断前的指令）。
-13. **重启重建的 transcript 形状**（历史列表实测，本机 119 条真实会话、
-   全量重建约 2 秒）：`get_session_messages` 只回可见的 user/assistant 链
+13. **重启重放的 transcript 形状**（历史列表实测，本机 119 条真实会话、
+   全量重放约 2 秒）：`get_session_messages` 只回可见的 user/assistant 链
    （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
-   条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重建的
-   run 状态 ENDED（终态，可回看可克隆），流以 `session.ended` 收尾后正常
-   关闭。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
-14. **服务重启的挂起恢复**（state 簿记 + 真 SDK 实测）：簿记只存活跃 run
-   （READY / RUNNING，无 session_id 的首回合未完成 run 不入册），每次状态
-   变更即全量原子写。重启后挂起 run 以原 run_id 恢复可聊——事件流从
-   transcript 重放、send 起的回合以自身 session resume 新连接（实测恢复后
-   发消息，agent 记得重启前的约定）。簿记里的 RUNNING 降级 READY +
-   `turn.interrupted` 事件（未收尾回合不自动重跑：已提交的云操作不可重复
-   执行）；恢复占用的 session 不再重复建历史条目。簿记损坏/缺失一律降级
-   为纯历史重建，不阻断启动。kill -9 实测：崩溃窗口内丢失的最后一次状态
-   变更由 transcript 存在性校验兜底（读不到即丢弃）。
+   条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重放的
+   run 状态 READY（可续聊可克隆），流无终态收尾事件、重放完毕保持连接
+   等待续聊。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
+14. **服务重启的恢复**（state 簿记 + 真 SDK 实测）：簿记只存墓碑（用户
+   ENDED 的 session_id）、身份映射（run_id ↔ session_id，无 session_id 的
+   首回合未完成 run 天然不入册）与克隆链镜像（session_id → 来源 run_id），每次状态变更即全量原子写。重启后全量
+   transcript 重放：映射命中的以原 run_id 恢复可聊——send 起的回合以
+   自身 session resume 新连接（实测恢复后发消息，agent 记得重启前的
+   约定）；墓碑会话保持 ENDED 不复活。未收尾回合（末回合无下一条输入
+   收口）补 `turn.interrupted` 不自动重跑（已提交的云操作不可重复执行）。
+   簿记损坏/缺失一律降级为无墓碑无映射的重放，不阻断启动。kill -9 实测：
+   崩溃窗口内丢失的最后一次状态变更由 transcript 存在性校验兜底（读不到
+   即丢弃）。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。
