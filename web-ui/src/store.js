@@ -25,7 +25,7 @@ export const EVENT_TYPES = [
 ]
 
 // 会触发产物清单刷新的事件：阶段推进（新产物落盘）与回合/会话收尾。
-// 清单是 deploy/ 全量镜像（与查看中的会话无关），任一 run 触发都全局刷新
+// 清单是 deploy/ + rpm/ 全量镜像（与查看中的会话无关），任一 run 触发都全局刷新
 const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'run.canceled', 'run.failed', 'run.ended']
 
 const RUNNING = 'RUNNING'
@@ -50,8 +50,10 @@ let state = {
   viewRunId: null,
   submitError: null,
   now: Date.now(),
-  artifacts: { groups: [] }, // deploy/ 全量产物（目录分组，全局不属于任何 run）
+  artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
   artifact: null,            // 当前查看中的产物内容（单槽，点击整体替换）
+  artifactSel: {},           // 批量下载勾选集（relPath → true，随清单刷新剪枝）
+  artifactZipping: false,    // zip 打包请求进行中（按钮防重复触发）
 }
 
 // 时长走针仅在会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
@@ -314,20 +316,74 @@ export function selectRun(runId) {
 
 // ---------- 产物 ----------
 
+// 清单组 → 组内全部文件的根前缀相对路径（勾选/下载的寻址形态）
+export function groupRelPaths(group) {
+  return group.files.map((f) => (group.dir ? `${group.dir}/${f.name}` : f.name))
+}
+
+// 勾选集剪枝：清单刷新后消失的文件移出勾选（否则 zip 请求会带上已
+// 不存在的路径——服务端会跳过，但计数与按钮文案先骗了人）
+function pruneSelection(groups) {
+  const listed = new Set()
+  for (const g of groups) for (const p of groupRelPaths(g)) listed.add(p)
+  const next = {}
+  for (const p of Object.keys(state.artifactSel)) if (listed.has(p)) next[p] = true
+  return next
+}
+
 // 清单刷新：阶段推进/终态事件触发（无 run 参数，全局镜像）
 export async function refreshArtifacts() {
   try {
     const resp = await fetch('/api/artifacts')
     if (!resp.ok) return
-    set({ artifacts: await resp.json() })
+    const data = await resp.json()
+    set({ artifacts: data, artifactSel: pruneSelection(data.groups) })
   } catch {
     // 清单刷新是尽力而为：失败不打断会话观察，下次阶段事件再试
   }
 }
 
-// 查看单个产物：内容按需拉取（缓存于全局单槽），产物 tab 渲染。
-// relPath 形如 "pi/0.84.2/pi-config"；逐段编码（整段 encode 会把 / 也编码）
-export async function openArtifact(relPath) {
+// 勾选单个产物（行内复选框）
+export function toggleArtifactSel(relPath) {
+  const next = { ...state.artifactSel }
+  if (next[relPath]) delete next[relPath]
+  else next[relPath] = true
+  set({ artifactSel: next })
+}
+
+// 批量勾选/取消一组路径（组头全选、卡头全选用）
+export function setArtifactSel(relPaths, on) {
+  const next = { ...state.artifactSel }
+  for (const p of relPaths) {
+    if (on) next[p] = true
+    else delete next[p]
+  }
+  set({ artifactSel: next })
+}
+
+export function clearArtifactSel() {
+  set({ artifactSel: {} })
+}
+
+// 查看单个产物：文本内容按需拉取（缓存于全局单槽），产物 tab 渲染；
+// 二进制产物（清单带 binary 标记，如 rpms/ 下的 .rpm 包）不拉内容，
+// 直接以占位视图呈现（元信息来自清单条目）+ 下载按钮。
+// relPath 形如 "rpm/nginx/1.25.3/nginx-rpm-result.md"；逐段编码（整段
+// encode 会把 / 也编码）
+export async function openArtifact(relPath, entry) {
+  if (entry?.binary) {
+    const cut = relPath.lastIndexOf('/')
+    set({
+      artifact: {
+        dir: cut > 0 ? relPath.slice(0, cut) : '',
+        name: entry.name,
+        stage: entry.stage ?? null,
+        size: entry.size ?? null,
+        binary: true,
+      },
+    })
+    return
+  }
   try {
     const resp = await fetch(`/api/artifacts/file/${relPath.split('/').map(encodeURIComponent).join('/')}`)
     const data = await resp.json().catch(() => ({}))
@@ -338,6 +394,49 @@ export async function openArtifact(relPath) {
     set({ artifact: data })
   } catch (err) {
     fail(`打开产物失败：${err.message}`)
+  }
+}
+
+// 单文件下载：服务端带附件头，临时 <a> 触发浏览器下载（不离开当前页）
+export function downloadArtifact(relPath) {
+  const a = document.createElement('a')
+  a.href = `/api/artifacts/download/${relPath.split('/').map(encodeURIComponent).join('/')}`
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+}
+
+// 批量下载：勾选集 POST 到 zip 端点，blob 经 objectURL 触发下载；文件名
+// 取服务端 Content-Disposition（auto-image-artifacts-<n>-<时间戳>.zip）
+export async function downloadArtifactZip() {
+  const paths = Object.keys(state.artifactSel)
+  if (!paths.length || state.artifactZipping) return
+  set({ artifactZipping: true })
+  try {
+    const resp = await fetch('/api/artifacts/zip', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ paths }),
+    })
+    if (!resp.ok) {
+      const data = await resp.json().catch(() => ({}))
+      fail(`打包下载失败：${data.detail || `HTTP ${resp.status}`}`)
+      return
+    }
+    const disposition = resp.headers.get('Content-Disposition') || ''
+    const match = disposition.match(/filename="?([^";]+)"?/)
+    const url = URL.createObjectURL(await resp.blob())
+    const a = document.createElement('a')
+    a.href = url
+    a.download = match ? match[1] : 'auto-image-artifacts.zip'
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (err) {
+    fail(`打包下载失败：${err.message}`)
+  } finally {
+    set({ artifactZipping: false })
   }
 }
 

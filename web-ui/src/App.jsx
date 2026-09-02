@@ -7,13 +7,13 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize } from './derive.js'
+import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize, artifactTree, subtreeRels, defaultOpenPaths } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 
 const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已关闭', FAILED: '失败', ENDED: '已结束' }
 // 下拉三态（执行中/挂起/已结束）：所有终态（含重启找回的 ENDED）归「已结束」
 const TASK_STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '挂起' }
-const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档' }
+const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
 const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED: 'warn' }
 
 // 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
@@ -172,47 +172,133 @@ function StageBadge({ stage }) {
   return <span className={`va-art-badge s-${stage.toLowerCase()}`}>{stage}</span>
 }
 
-// 产物卡：deploy/ 全量镜像，按目录分组（组头带文件数，点击展开/收起），
-// 点击文件在主区产物 tab 查看。约定命名的带阶段徽标，非约定的（.v1 备份、
-// 杂项）无徽标平铺；目录按最新落盘时间降序（服务端排好）
+// 目录树节点：目录行（箭头 + 三态勾选 + 目录名 + 子树文件数）+ 本目录文件
+// 行 + 子目录递归（缩进 + 竖参考线）。目录行勾选作用于子树全部文件（三态：
+// 全选 / 部分半选 / 无）；展开状态由父级 toggles 字典集中管理，未动过的
+// 目录落到 defaultOpen（最新一组所在路径自动展开）。
+function ArtDir({ node, toggles, setToggles, defaultOpen }) {
+  const s = store.useRunState()
+  const open = toggles[node.path] ?? defaultOpen.has(node.path)
+  const rels = subtreeRels(node)
+  const selCount = rels.reduce((n, p) => n + (s.artifactSel[p] ? 1 : 0), 0)
+  const allOn = rels.length > 0 && selCount === rels.length
+  const some = selCount > 0 && !allOn
+  const toggleOpen = () => setToggles({ ...toggles, [node.path]: !open })
+  return (
+    <div className="va-art-group">
+      <div
+        className="va-art-dir-head"
+        role="button"
+        tabIndex={0}
+        onClick={toggleOpen}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault()
+            toggleOpen()
+          }
+        }}
+        title={node.path}
+      >
+        <span className="va-art-dir-arrow">{open ? '▾' : '▸'}</span>
+        <input
+          type="checkbox"
+          className="va-art-check"
+          checked={allOn}
+          ref={(el) => {
+            if (el) el.indeterminate = some
+          }}
+          onChange={() => store.setArtifactSel(rels, !allOn)}
+          onClick={(e) => e.stopPropagation()}
+          title="勾选本目录（含子目录）全部文件"
+        />
+        <span className="va-art-name">{node.name}</span>
+        <span className="va-art-count" title="本目录（含子目录）文件数">{node.count}</span>
+      </div>
+      {open && (
+        <div className="va-art-children">
+          {node.files.map((f) => {
+            const rel = `${node.path}/${f.name}`
+            return (
+              <div
+                key={f.name}
+                role="button"
+                tabIndex={0}
+                className={`va-art-item${s.artifact?.dir === node.path && s.artifact?.name === f.name ? ' on' : ''}`}
+                onClick={() => store.openArtifact(rel, f)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') store.openArtifact(rel)
+                }}
+                title={f.name}
+              >
+                <input
+                  type="checkbox"
+                  className="va-art-check"
+                  checked={!!s.artifactSel[rel]}
+                  onChange={() => store.toggleArtifactSel(rel)}
+                  onClick={(e) => e.stopPropagation()}
+                />
+                {f.stage ? <StageBadge stage={f.stage} /> : null}
+                <span className="va-art-name">{f.name}</span>
+                <span className="va-art-size">{fmtSize(f.size)}</span>
+                <button
+                  className="va-art-dl"
+                  title="下载此文件"
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    store.downloadArtifact(rel)
+                  }}
+                >
+                  ⤓
+                </button>
+              </div>
+            )
+          })}
+          {node.dirs.map((d) => (
+            <ArtDir key={d.path} node={d} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpen} />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+// 产物卡：deploy/ + rpm/ 全量镜像，目录树形态（服务端平铺分组派生成嵌套
+// 树，子目录按最新落盘在前），点击文件在主区产物 tab 查看。约定命名的带
+// 阶段徽标，非约定的（.v1 备份、杂项）无徽标平铺。每行可勾选（目录行/
+// 卡头可整棵子树全选），单文件 ⤓ 下载、勾选集一键打包 zip 下载。
+// 行与目录头是 div 而非 button：内部还嵌复选框与下载按钮，交互件不嵌套。
 function ArtifactCard() {
   const s = store.useRunState()
   const groups = s.artifacts.groups
   const [toggles, setToggles] = useState({})
-  const fileCount = groups.reduce((n, g) => n + g.files.length, 0)
+  const roots = artifactTree(groups)
+  const fileCount = roots.reduce((n, r) => n + r.count, 0)
+  const selCount = Object.keys(s.artifactSel).length
   return (
     <div className="va-card">
       <div className="va-card-title">产物 · {fileCount}</div>
-      {groups.length === 0 && <div className="va-card-line">deploy/ 下暂无产物</div>}
-      {groups.map((g, i) => {
-        const open = toggles[g.dir] ?? i === 0 // 未动过的目录默认展开最新一组
-        return (
-          <div key={g.dir} className="va-art-group">
-            <button
-              className="va-art-dir-head"
-              onClick={() => setToggles({ ...toggles, [g.dir]: !open })}
-              title={g.dir}
-            >
-              <span className="va-art-dir-arrow">{open ? '▾' : '▸'}</span>
-              <span className="va-art-name">{g.dir || '(根目录)'}</span>
-              <span className="va-art-count">{g.files.length}</span>
-            </button>
-            {open &&
-              g.files.map((f) => (
-                <button
-                  key={f.name}
-                  className={`va-art-item${s.artifact?.dir === g.dir && s.artifact?.name === f.name ? ' on' : ''}`}
-                  onClick={() => store.openArtifact(g.dir ? `${g.dir}/${f.name}` : f.name)}
-                  title={f.name}
-                >
-                  {f.stage ? <StageBadge stage={f.stage} /> : null}
-                  <span className="va-art-name">{f.name}</span>
-                  <span className="va-art-size">{fmtSize(f.size)}</span>
-                </button>
-              ))}
-          </div>
-        )
-      })}
+      {fileCount > 0 && (
+        <div className="va-art-tools">
+          <button onClick={() => store.setArtifactSel(roots.flatMap(subtreeRels), true)}>
+            全选
+          </button>
+          <button onClick={() => store.clearArtifactSel()} disabled={selCount === 0}>
+            清空
+          </button>
+          <button
+            className="va-art-zip"
+            onClick={() => store.downloadArtifactZip()}
+            disabled={selCount === 0 || s.artifactZipping}
+            title="勾选的产物打包成一个 zip 下载"
+          >
+            {s.artifactZipping ? '打包中…' : `下载 zip${selCount ? ` (${selCount})` : ''}`}
+          </button>
+        </div>
+      )}
+      {roots.length === 0 && <div className="va-card-line">deploy/ · rpm/ 下暂无产物</div>}
+      {roots.map((r) => (
+        <ArtDir key={r.path} node={r} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpenPaths(groups)} />
+      ))}
     </div>
   )
 }
@@ -229,15 +315,34 @@ function ArtifactView() {
   }
   const isJson = artifact.name.endsWith('.json')
   const html = isJson ? '' : mdToHtml(artifact.content)
+  const rel = artifact.dir ? `${artifact.dir}/${artifact.name}` : artifact.name
   return (
     <div className="va-artifact">
       <div className="va-artifact-head">
         {artifact.stage && <StageBadge stage={artifact.stage} />}
         <span className="va-artifact-name">{artifact.name}</span>
         <span className="va-artifact-dir">{artifact.dir}</span>
+        <button
+          className="va-artifact-dl"
+          onClick={() => store.downloadArtifact(rel)}
+          title="下载此文件"
+        >
+          ⤓ 下载
+        </button>
       </div>
       {isJson ? (
         <pre className="va-artifact-raw">{artifact.content}</pre>
+      ) : artifact.binary ? (
+        <div className="va-artifact-binary">
+          <div className="va-artifact-binary-icon">📦</div>
+          <div className="va-artifact-binary-name">{artifact.name}</div>
+          <div className="va-artifact-binary-size">
+            二进制产物{artifact.size ? ` · ${fmtSize(artifact.size)}` : ''}，不支持在线预览
+          </div>
+          <button className="va-artifact-binary-dl" onClick={() => store.downloadArtifact(rel)}>
+            ⤓ 下载此文件
+          </button>
+        </div>
       ) : (
         <div className="va-artifact-md va-md" dangerouslySetInnerHTML={{ __html: html }} />
       )}

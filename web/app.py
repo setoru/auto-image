@@ -11,10 +11,11 @@ import asyncio
 import json
 import logging
 import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import artifacts as artifacts_mod
@@ -31,8 +32,13 @@ from .session import run_agent
 
 # 前端构建产物（vite build 输出），存在才挂载；开发时走 vite dev proxy
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent.parent / "web-ui" / "dist"
-# 流水线产物根（deploy.config.yaml 的 output_dir 固定前缀），Agent cwd 即项目根
-DEFAULT_ARTIFACT_ROOT = Path(__file__).resolve().parent.parent / "deploy"
+# 流水线产物根：deploy（deploy.config.yaml 的 output_dir 固定前缀）+ rpm
+# （rpm-build/verify/archive 落盘处）。键即清单组与 URL 里的根前缀段，
+# Agent cwd 即项目根
+DEFAULT_ARTIFACT_ROOTS = {
+    "deploy": Path(__file__).resolve().parent.parent / "deploy",
+    "rpm": Path(__file__).resolve().parent.parent / "rpm",
+}
 # 产物文件名约定的权威源（见 artifacts.load_file_stages）
 DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.yaml"
 # 运行时真实凭据源（ak/sk/ECS 密码值进脱敏已知清单，见 redact.load_scope_secrets）
@@ -42,12 +48,13 @@ DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
-               artifact_root=None, deploy_config=None, turn_timeout=None, scope_config=None,
+               artifact_roots=None, deploy_config=None, turn_timeout=None, scope_config=None,
                list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
     state_path=None, title_factory=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
-    测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_root
-    与 deploy_config 同理注入（产物目录与文件名约定造桩用），默认项目根下。
+    测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_roots
+    （根名 → 目录映射）与 deploy_config 同理注入（产物目录与文件名约定
+    造桩用），默认项目根下。
     turn_timeout 为回合 wall-clock 上限（终局语义），默认 sdk 层固定值。
     scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
 
@@ -65,7 +72,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     factory = session_factory or SDKSessionFactory()
     titles = title_factory or sdk_mod.TitleSessionFactory()
     turn_timeout = sdk_mod.TURN_TIMEOUT_SECONDS if turn_timeout is None else turn_timeout
-    artifact_root = Path(artifact_root) if artifact_root is not None else DEFAULT_ARTIFACT_ROOT
+    artifact_roots = {name: Path(p) for name, p in (artifact_roots or DEFAULT_ARTIFACT_ROOTS).items()}
     file_stages = artifacts_mod.load_file_stages(deploy_config or DEFAULT_DEPLOY_CONFIG)
     app.state.run_manager = manager
     app.state.event_store = store
@@ -199,23 +206,57 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         persist()
         return {"run_id": run.run_id, "status": run.status}
 
-    # 产物浏览不依赖会话存在（deploy/ 全量镜像，含历史轮次）
+    # 产物浏览不依赖会话存在（deploy/ + rpm/ 全量镜像，含历史轮次）
     @app.get("/api/artifacts")
     async def list_artifacts():
-        return artifacts_mod.browse(artifact_root, file_stages)
+        return artifacts_mod.browse(artifact_roots, file_stages)
 
     # /file/ 前缀段：{rel_path:path} 可匹配空串，无前缀段会与清单端点路由歧义
     @app.get("/api/artifacts/file/{rel_path:path}")
     async def read_artifact(rel_path: str):
-        found = artifacts_mod.read(artifact_root, file_stages, rel_path)
+        found = artifacts_mod.read(artifact_roots, file_stages, rel_path)
         if found is None:
             raise HTTPException(status_code=404, detail="artifact not found")
         entry, target = found
+        if entry.get("binary"):  # 二进制产物无文本内容，指引到下载端点
+            raise HTTPException(
+                status_code=422,
+                detail=f"binary artifact; use /api/artifacts/download/{rel_path}",
+            )
         try:
             content = target.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):  # 二进制产物按不可读处理，不 500
             raise HTTPException(status_code=404, detail="artifact not found") from None
         return {**entry, "content": content}
+
+    # 单文件下载：原始字节走附件响应（浏览端点只读文本，.sh 等非文本与
+    # 将来的二进制产物从这里拿全量原文件）
+    @app.get("/api/artifacts/download/{rel_path:path}")
+    async def download_artifact(rel_path: str):
+        found = artifacts_mod.resolve(artifact_roots, file_stages, rel_path)
+        if found is None:
+            raise HTTPException(status_code=404, detail="artifact not found")
+        _entry, target = found
+        return FileResponse(target, filename=target.name)
+
+    # 批量打包下载：POST {"paths": [根前缀相对路径…]} → 一个 zip（保留
+    # deploy/…、rpm/… 目录树；越界/缺失项如实跳过，一个都收不到 404）
+    @app.post("/api/artifacts/zip")
+    async def zip_artifacts(body: dict | None = None):
+        paths = (body or {}).get("paths")
+        if not isinstance(paths, list) or not paths or not all(
+            isinstance(p, str) and p for p in paths
+        ):
+            raise HTTPException(status_code=422, detail="paths required")
+        stream, count = artifacts_mod.zip_files(artifact_roots, file_stages, paths)
+        if stream is None:
+            raise HTTPException(status_code=404, detail="no artifacts to zip")
+        name = f"auto-image-artifacts-{count}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.zip"
+        return StreamingResponse(
+            stream,
+            media_type="application/zip",
+            headers={"Content-Disposition": f'attachment; filename="{name}"'},
+        )
 
     @app.get("/api/runs/{run_id}/events")
     async def event_stream(run_id: str, request: Request):

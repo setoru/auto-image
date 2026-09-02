@@ -223,12 +223,23 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-tabs button:disabled { opacity: 0.4; }
 .va-tab-body { flex: 1; min-height: 0; display: flex; }
 
-/* ---------- 产物：侧栏产物卡（目录分组折叠） ---------- */
+/* ---------- 产物：侧栏产物卡（目录树） ---------- */
 
 .va-art-group { display: flex; flex-direction: column; gap: 2px; }
-/* 组头：目录名 + 文件数，点击展开/收起 */
+/* 子层（文件行 + 子目录）：缩进 + 竖参考线标出树层级 */
+.va-art-children {
+  display: flex; flex-direction: column; gap: 2px;
+  margin-left: 11px; padding-left: 8px;
+  border-left: 1px solid var(--line);
+}
+/* 卡头工具行：全选 / 清空 / 勾选集打包 zip */
+.va-art-tools { display: flex; gap: 6px; align-items: center; }
+.va-art-tools button { padding: 2px 8px; font-size: 11.5px; }
+.va-art-zip { color: var(--accent); border-color: var(--accent); }
+/* 组头：整组勾选框 + 目录名 + 文件数，点击展开/收起（div 承载：内部还嵌
+   复选框，交互件不嵌套进 button） */
 .va-art-dir-head {
-  display: flex; align-items: baseline; gap: 5px; width: 100%;
+  display: flex; align-items: center; gap: 5px; width: 100%;
   padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
   font-family: var(--mono); font-size: 12px; font-weight: 600; color: var(--ink); text-align: left;
 }
@@ -236,7 +247,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-art-dir-arrow { flex-shrink: 0; width: 10px; color: var(--ink-3); font-weight: 400; }
 .va-art-count { margin-left: auto; flex-shrink: 0; color: var(--ink-3); font-size: 11px; font-weight: 400; }
 .va-art-item {
-  display: flex; align-items: baseline; justify-content: space-between; gap: 6px;
+  display: flex; align-items: center; justify-content: space-between; gap: 6px;
   padding: 3px 6px; border: 0; border-radius: 6px; background: none; cursor: pointer;
   font-family: var(--mono); font-size: 12px; color: var(--ink); text-align: left;
 }
@@ -244,6 +255,13 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-art-item.on { background: var(--surface-deep); font-weight: 600; }
 .va-art-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .va-art-size { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
+/* 行内 / 组头勾选框与单文件下载按钮 */
+.va-art-check { flex-shrink: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.va-art-dl {
+  flex-shrink: 0; padding: 0 5px; font-size: 12px; line-height: 1.5;
+  color: var(--ink-3); border-color: transparent; background: none;
+}
+.va-art-dl:hover { color: var(--accent); background: var(--surface-deep); }
 
 /* 阶段徽标：四阶段各一色（列表与产物 tab 头共用） */
 .va-art-badge {
@@ -254,6 +272,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-art-badge.s-install { background: var(--accent); }
 .va-art-badge.s-verify { background: var(--ok); }
 .va-art-badge.s-archive { background: var(--warn); }
+.va-art-badge.s-build { background: #bf3989; }
 
 /* ---------- 产物：主区产物 tab ---------- */
 
@@ -263,6 +282,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   border-bottom: 1px solid var(--line); background: var(--surface-dim);
 }
 .va-artifact-name { font-family: var(--mono); font-size: 13px; font-weight: 600; }
+/* 产物查看头部的单文件下载按钮（dir 靠 margin-left:auto 推右，按钮随之） */
+.va-artifact-dl { flex-shrink: 0; padding: 3px 10px; font-size: 12px; }
 .va-artifact-dir {
   margin-left: auto; color: var(--ink-3); font-size: 11px; font-family: var(--mono);
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; direction: rtl;
@@ -271,6 +292,19 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   flex: 1; margin: 0; padding: 16px; overflow: auto;
   font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word;
 }
+
+/* 二进制产物占位视图（.rpm 包等）：不做文本预览，给元信息 + 下载出口 */
+.va-artifact-binary {
+  flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 8px; color: var(--ink-2);
+}
+.va-artifact-binary-icon { font-size: 34px; }
+.va-artifact-binary-name {
+  font-family: var(--mono); font-size: 13px; font-weight: 600; color: var(--ink);
+  max-width: 60%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.va-artifact-binary-size { font-size: 12.5px; color: var(--ink-3); }
+.va-artifact-binary-dl { color: var(--accent); border-color: var(--accent); margin-top: 6px; }
 
 /* markdown 渲染（marked 输出）：表格 / 代码块 / 验证契约 blockquote */
 .va-artifact-md { flex: 1; overflow: auto; padding: 16px 24px; font-size: 13.5px; line-height: 1.65; }

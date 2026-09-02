@@ -4,5 +4,11 @@
 # 仓库根共享凭证（ecs-skill + ims-skill），含 AK/SK 明文
 /scope.yaml
 
-# deploy-install 运行时元数据（临时产物，不含密码，但不属于交付产物）
-/deploy/**/*-install-meta.json
+# 流水线运行时产物（安装/验证/归档结果、指南、RPM 包），仅本地交付，不入库
+/deploy/
+/guides/
+/rpm/
+
+# 本地运行环境与日志
+/.venv/
+/web-server.log
