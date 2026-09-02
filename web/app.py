@@ -1,16 +1,21 @@
-"""FastAPI 应用：创建会话 / 干预（停止·投递·关闭）/ SSE 事件流。
+"""FastAPI 应用：创建会话 / 发送·停止·克隆·结束 / SSE 事件流。
 
 错误统一走 HTTPException 默认响应体；SSE 的 id 即内部事件 seq，
 空闲时按 heartbeat_interval 发 `: ping` 注释行保活。
 
-停止的执行动作（session.interrupt）在 intervene 置标记之后由 HTTP 层
-调用——标记与 run_agent 的回合收尾在单线程事件循环上互斥，interrupt
+停止的执行动作（session.interrupt）在 request_stop 置标记之后由 HTTP 层
+调用——标记与 run_turn 的回合收尾在单线程事件循环上互斥，interrupt
 晚于回合结束时停止目标已达成，无需把失败放大成错误。
+
+end 的收尾序列（RUNNING 中）：end 校验 → 取消在飞回合任务（回合不补
+收尾事件）→ session.ended 作为流的最后一条事件 → 墓碑入册。
 """
 import asyncio
 import json
 import logging
+import os
 import subprocess
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -26,9 +31,9 @@ from . import sdk as sdk_mod
 from . import state as state_mod
 from . import title as title_mod
 from .events import EventStore
-from .runs import RunManager
+from .runs import ENDED, RunManager
 from .sdk import SDKSessionFactory
-from .session import run_agent
+from .session import run_turn
 
 # 前端构建产物（vite build 输出），存在才挂载；开发时走 vite dev proxy
 DEFAULT_STATIC_DIR = Path(__file__).resolve().parent.parent / "web-ui" / "dist"
@@ -45,27 +50,32 @@ DEFAULT_DEPLOY_CONFIG = Path(__file__).resolve().parent.parent / "deploy.config.
 DEFAULT_SCOPE_CONFIG = Path(__file__).resolve().parent.parent / "scope.yaml"
 # 挂起会话的落盘簿记（服务重启恢复可聊；同一 HOME 下多实例共用一份）
 DEFAULT_STATE_PATH = Path.home() / ".auto-image-web" / "state.json"
+# 并发上限（数执行中回合；新建、克隆、标题生成不占名额）
+DEFAULT_MAX_PARALLEL_RUNS = 10
 
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                artifact_roots=None, deploy_config=None, scope_config=None,
                list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
-    state_path=None, title_factory=None):
+    state_path=None, title_factory=None, max_parallel_runs=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_roots
     （根名 → 目录映射）与 deploy_config 同理注入（产物目录与文件名约定
     造桩用），默认项目根下。
     scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
-
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
     residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。
     state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。
     title_factory 为标题生成会话工厂（测试缝；生产为独立 cwd 的隔离配置，
-    transcript 不落项目根、不进重启重建的发现层）。"""
+    transcript 不落项目根、不进重启重建的发现层）。
+    max_parallel_runs 为并发上限（默认 WEB_MAX_PARALLEL_RUNS 环境变量，
+    缺省 10；测试注入收紧）。"""
     # 已知凭据值入脱敏清单（幂等；scope 缺失时只剩形状正则防线）
     redact_mod.load_scope_secrets(scope_config or DEFAULT_SCOPE_CONFIG)
     app = FastAPI(title="auto-image deploy web")
-    manager = RunManager()
+    limit = max_parallel_runs if max_parallel_runs is not None else int(
+        os.environ.get("WEB_MAX_PARALLEL_RUNS", DEFAULT_MAX_PARALLEL_RUNS))
+    manager = RunManager(max_parallel=limit)
     store = EventStore()
     store.bind_runs(manager.runs)
     factory = session_factory or SDKSessionFactory()
@@ -84,8 +94,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
     def maybe_assign_title(run, text, is_first):
         """新对话的首条指令到达即起标题生成（Codex 同构：不等回合完成）。
-        is_first 由调用方在 intervene 前快照（intervene 首条指令写
-        first_prompt，事后无法判定）——续聊/接续/重启恢复的老会话一律不再
+        is_first 由调用方在 begin_turn 前快照（begin_turn 首条指令写
+        first_prompt，事后无法判定）——续聊/克隆/重启恢复的老会话一律不再
         生成（否则续聊指令被总结成「继续执行任务」类标题）。"""
         if is_first:
             return asyncio.create_task(
@@ -93,9 +103,14 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             )
         return None
 
+    def start_turn(run, text):
+        """起回合任务（begin_turn 校验通过后调用）：按回合开合连接，
+        收尾即散；任务引用挂 run 供 stop / end 定向。"""
+        run.turn_task = asyncio.create_task(run_turn(run, text, factory, store, on_change=persist))
+
     # 服务重启语义：簿记里的挂起会话先恢复（可聊、resume 重建连接），CLI 侧
-    # transcript 再重建其余历史（只读回看 + 续接起点）；正在执行的任务不自动
-    # 重试（RUNNING 降级挂起 + run.interrupted 提示）；残留 CLI 子进程只告警
+    # transcript 再重建其余历史（只读回看 + 克隆起点）；正在执行的任务不自动
+    # 重试（RUNNING 降级挂起 + turn.interrupted 提示）；残留 CLI 子进程只告警
     # 不杀（可能处于云操作中间态）
     restored = rebuild_mod.restore_active_runs(
         manager, store,
@@ -104,8 +119,6 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     )
     if restored:
         logging.getLogger("web").info("服务重启后恢复 %d 条挂起会话（可继续对话）", len(restored))
-        for run in restored:
-            run.task = asyncio.create_task(run_agent(run, factory, store, on_change=persist))
     rebuilt = rebuild_mod.rebuild_history(
         manager, store,
         list_sessions_fn or sdk_mod.list_project_sessions,
@@ -127,26 +140,11 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
     @app.post("/api/runs")
     async def create_run(body: dict | None = None):
-        resume_from = (body or {}).get("resume_from")
-        if resume_from is not None and manager.get(resume_from) is None:
-            raise HTTPException(status_code=404, detail="run not found")
-        try:
-            run = manager.create(resume_from)
-        except runs_mod.Conflict as exc:
-            raise HTTPException(status_code=409, detail=exc.detail) from exc
+        run = manager.create()
         store.create(run.run_id)
-        # 会话流同步开卷：run.started 先行；接续创建时带入源会话全部历史
-        # （CLI resume 的浏览体验），seq 重新编号、断点续传语义不变
-        store.append(run.run_id, "run.started", {})
-        if run.resumed_from is not None:
-            store.append(run.run_id, "resumed.history", {"resumed_from": run.resumed_from})
-            # 源流的生命周期事件不转录：源的起点/接续标记/收尾都不是新会话的
-            # 状态——终态收尾被前端当成本 run 的终态会关流判死，接续后无法续聊
-            store.adopt_history(
-                run.run_id, run.resumed_from,
-                skip_types={"run.started", "run.canceled", "run.failed", "run.ended", "resumed.history"},
-            )
-        run.task = asyncio.create_task(run_agent(run, factory, store, on_change=persist))
+        # 会话流同步开卷：session.started 先行（无历史转录——续接语义已由
+        # clone 承担，新建即全新会话）
+        store.append(run.run_id, "session.started", {})
         persist()
         return {"run_id": run.run_id, "status": run.status, "resumed_from": run.resumed_from}
 
@@ -160,45 +158,62 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         text = (body or {}).get("text")
         if not isinstance(text, str) or not text.strip():
             raise HTTPException(status_code=422, detail="text required")
-        is_first = run.first_prompt is None  # 快照先于 intervene（它写 first_prompt）
+        is_first = run.first_prompt is None  # 快照先于 begin_turn（它写 first_prompt）
         try:
-            # 本会话执行中：intervene 先请求停止，本端点返回后执行打断
-            manager.intervene(run, text)
+            manager.begin_turn(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
         maybe_assign_title(run, text, is_first)
-        await _interrupt_if_requested(run)
+        start_turn(run, text)
         return {"run_id": run.run_id, "status": run.status}
 
     @app.post("/api/runs/{run_id}/stop")
     async def stop_run(run_id: str, body: dict | None = None):
         run = _get_run_or_404(manager, run_id)
-        text = (body or {}).get("text")
-        if text is not None and (not isinstance(text, str) or not text.strip()):
-            raise HTTPException(status_code=422, detail="text must be non-empty")
-        is_first = run.first_prompt is None and text is not None
         try:
-            manager.intervene(run, text)
+            manager.request_stop(run)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         persist()
-        maybe_assign_title(run, text, is_first)
         await _interrupt_if_requested(run)
         return {"run_id": run.run_id, "status": run.status}
 
-    @app.post("/api/runs/{run_id}/cancel")
-    async def cancel_run(run_id: str):
+    @app.post("/api/runs/{run_id}/clone")
+    async def clone_run(run_id: str):
         run = _get_run_or_404(manager, run_id)
         try:
-            manager.cancel(run)
+            new = manager.clone(run)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
-        run.task.cancel()
+        store.create(new.run_id)
+        store.append(new.run_id, "session.started", {})
+        # 源流转录进新会话（seq 重新编号）：生命周期事件不是新会话的状态
+        # ——源的 session.ended 会被前端当成本流终态关流判死，克隆后无法续聊
+        store.adopt_history(
+            new.run_id, run.run_id,
+            skip_types={"session.started", "session.ended"},
+        )
+        persist()
+        return {"run_id": new.run_id, "status": new.status, "resumed_from": run.run_id}
+
+    @app.post("/api/runs/{run_id}/end")
+    async def end_run(run_id: str):
+        run = _get_run_or_404(manager, run_id)
         try:
-            await run.task  # 等收尾（run.canceled 已入事件流）再返回
-        except asyncio.CancelledError:
-            pass
+            manager.end(run)
+        except runs_mod.Conflict as exc:
+            raise HTTPException(status_code=409, detail=exc.detail) from exc
+        if run.turn_task is not None:
+            run.turn_task.cancel()
+            try:
+                await run.turn_task  # 等取消收尾（回合不补事件）再写终态
+            except asyncio.CancelledError:
+                pass
+            run.turn_task = None
+        run.status = ENDED
+        run.ended_at = time.time()
+        store.append(run.run_id, "session.ended", {})
         persist()
         return {"run_id": run.run_id, "status": run.status}
 
@@ -267,8 +282,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                     for event in store.replay_from(run_id, seen):
                         seen = event["seq"]
                         yield _sse_chunk(event)
-                    # 终态且历史重放完毕：正常结束流
-                    if run.status in runs_mod.TERMINAL and store.is_complete(run_id, seen):
+                    # ENDED 且历史重放完毕：正常结束流（唯一会话终态）
+                    if run.status == ENDED and store.is_complete(run_id, seen):
                         return
                     try:
                         await asyncio.wait_for(flag.wait(), timeout=heartbeat_interval)
@@ -289,8 +304,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
 
 async def _interrupt_if_requested(run):
-    """执行 intervene 排队的打断。回合可能刚好已自然结束（停止目标视为
-    达成）、会话可能尚未建立（创建后立即干预的窗口），两种情形均跳过；
+    """执行 request_stop 排队的打断。回合可能刚好已自然结束（停止目标视为
+    达成）、会话可能尚未建立（回合任务刚起的窗口），两种情形均跳过；
     打断本身失败不改变服务端权威状态（回合如何收尾以事件流为准）。"""
     if not run.stop_requested or run.session is None:
         return

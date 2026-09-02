@@ -2,8 +2,8 @@
 
 对话内容的单一事实源是 CLI 侧 transcript（~/.claude/projects），本模块只存
 transcript 里没有的服务簿记：run ↔ session 映射与状态机状态。只入册活跃
-run（WAITING_INPUT / RUNNING）——终态 run 由 rebuild 从 transcript 找回为
-只读历史，无 session_id 的 run（首回合未完成即中断）无法 resume，均不入册。
+run（READY / RUNNING）——终态 run（ENDED）由 rebuild 从 transcript 找回，
+无 session_id 的 run（首回合未完成即中断）无法 resume，均不入册。
 
 写入为全量原子替换（tmp + rename），每次状态变更即写：run 数量小、字段
 十来项，代价可忽略；kill -9 的窗口内最多丢最后一次变更，由 transcript
@@ -16,9 +16,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from .runs import RUNNING, WAITING_INPUT
+from .runs import READY, RUNNING
 
-ACTIVE = {WAITING_INPUT, RUNNING}
+ACTIVE = {READY, RUNNING}
 logger = logging.getLogger("web")
 
 

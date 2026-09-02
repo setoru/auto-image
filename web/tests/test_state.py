@@ -1,5 +1,5 @@
-"""落盘簿记与重启恢复：挂起会话恢复为可聊（原 run_id、resume 重建连接）、
-RUNNING 降级 + run.interrupted 提示、transcript 读不到丢弃、恢复占用不与
+"""落盘簿记与重启恢复：挂起会话恢复为可聊（原 run_id、send 时 resume 起新回合）、
+RUNNING 降级 + turn.interrupted 提示、transcript 读不到丢弃、恢复占用不与
 历史重建重复、id 计数续号、簿记损坏降级。"""
 import asyncio
 import json
@@ -14,7 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from web.app import create_app  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
-from web.runs import RunManager, WAITING_INPUT  # noqa: E402
+from web.runs import READY, RunManager  # noqa: E402
 from web.state import load_state, save_state  # noqa: E402
 from web.tests.support import StreamingASGITransport  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
@@ -44,7 +44,7 @@ def write_state(path, records):
     path.write_text(json.dumps({"runs": records}, ensure_ascii=False), encoding="utf-8")
 
 
-def suspended_record(run_id="run_1", session_id="sess_x", status="WAITING_INPUT"):
+def suspended_record(run_id="run_1", session_id="sess_x", status="READY"):
     return {
         "run_id": run_id, "status": status, "stage": None,
         "first_prompt": "部署 nginx", "created_at": 1000.0,
@@ -75,11 +75,11 @@ async def test_save_load_roundtrip_and_filters():
         path = Path(d) / "state.json"
         manager = RunManager()
         live = manager.create()           # 挂起、有 session：入册
-        live.status = WAITING_INPUT
+        live.status = READY
         live.session_id = "sess_live"
         live.first_prompt = "部署 nginx"
         no_session = manager.create()     # 首回合未完成：不入册
-        no_session.status = WAITING_INPUT
+        no_session.status = READY
         save_state(manager.runs.values(), path)
         records = load_state(path)
         assert [r["run_id"] for r in records] == [live.run_id], records
@@ -108,7 +108,7 @@ async def test_restart_restores_suspended_run_chattable():
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app_a), base_url="http://testserver") as client:
             run_id = (await client.post("/api/runs", json={})).json()["run_id"]
             await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
-            await wait_status(client, run_id, "WAITING_INPUT")
+            await wait_status(client, run_id, "READY")
         records = load_state(state_path)
         assert [r["run_id"] for r in records] == [run_id], records
         sid = records[0]["session_id"]
@@ -120,14 +120,14 @@ async def test_restart_restores_suspended_run_chattable():
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app_b), base_url="http://testserver") as client:
             runs = (await client.get("/api/runs")).json()["runs"]
             assert [r["run_id"] for r in runs] == [run_id], runs  # 原条目，无重复
-            assert runs[0]["status"] == "WAITING_INPUT"
+            assert runs[0]["status"] == "READY"
             events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
             types = [e["event"] for e in events]
             assert "user.message" in types and "turn.completed" in types, types
-            assert "run.ended" not in types  # 历史重建的只读收尾不出现
+            assert "session.ended" not in types  # 历史重建的只读收尾不出现（恢复路径）
             r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
             assert r.status_code == 200, r.text
-            await wait_status(client, run_id, "WAITING_INPUT")
+            await wait_status(client, run_id, "READY")
         assert factory_b.session_ids[0] == sid  # 协程以原 session 续接重建连接
 
 
@@ -138,9 +138,9 @@ async def test_restart_running_record_downgrades_with_interrupted_event():
         app = restore_app(str(state_path), [session_info("sess_x", "部署 nginx", 1000)], {"sess_x": two_turn_transcript()})
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
             runs = (await client.get("/api/runs")).json()["runs"]
-            assert runs[0]["status"] == "WAITING_INPUT", runs  # 未收尾回合不重跑
+            assert runs[0]["status"] == "READY", runs  # 未收尾回合不重跑
             events, _ = await collect_sse(await open_stream(client, "run_1"), deadline_s=1.0)
-            assert [e["event"] for e in events][-1] == "run.interrupted"
+            assert [e["event"] for e in events][-1] == "turn.interrupted"
 
 
 async def test_restart_drops_record_without_transcript():

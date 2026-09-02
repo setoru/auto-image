@@ -1,45 +1,46 @@
-// 共享会话状态：多会话并存（挂起可多个、执行至多一个），动作经 HTTP/SSE
-// 与服务端交互。每个活跃会话一条常驻 EventSource（断线浏览器自动重连并
-// 携带 Last-Event-ID，服务端从 seq+1 补发；已收事件按 seq 去重）。
+// 共享会话状态：多会话并行（并发上限内的执行中回合可多个），动作经
+// HTTP/SSE 与服务端交互。每个活跃会话一条常驻 EventSource（断线浏览器
+// 自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；已收事件按 seq 去重）。
 //
-// 停止 / 关闭 / 续接的干预端点见后端 web/（run_agent 按 stop_requested 标记
+// 停止 / 结束 / 克隆的干预端点见后端 web/（run_turn 按 stop_requested 标记
 // 区分 turn.stopped 与 turn.completed）；失败时如实把错误显示在提示条上。
 import { useSyncExternalStore } from 'react'
 
-// 与服务端内部事件协议一致的事件类型全集
+// 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
+// user.message / agent.* / stage.*）
 export const EVENT_TYPES = [
-  'run.started',
-  'run.title_changed',
+  'session.started',
+  'session.title_changed',
+  'session.ended',
   'user.message',
   'agent.thinking',
   'agent.message',
   'agent.tool_started',
   'agent.tool_finished',
   'stage.changed',
+  'turn.started',
   'turn.stopped',
   'turn.completed',
-  'run.interrupted',
-  'run.canceled',
-  'run.failed',
-  'run.ended',
+  'turn.failed',
+  'turn.interrupted',
 ]
 
 // 会触发产物清单刷新的事件：阶段推进（新产物落盘）与回合/会话收尾。
 // 清单是 deploy/ + rpm/ 全量镜像（与查看中的会话无关），任一 run 触发都全局刷新
-const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'run.canceled', 'run.failed', 'run.ended']
+const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'turn.failed', 'session.ended']
 
 const RUNNING = 'RUNNING'
-const WAITING_INPUT = 'WAITING_INPUT'
-// 活跃（可继续操作）状态集合：判定值与服务端状态机一致，单处维护
-const ACTIVE = [RUNNING, WAITING_INPUT]
-export const isActive = (status) => ACTIVE.includes(status)
+const READY = 'READY'
+// 可继续操作的会话状态集合：判定值与服务端状态机一致，单处维护
+const OPERABLE = [RUNNING, READY]
+export const isOperable = (status) => OPERABLE.includes(status)
 
-// 409 detail 判定值 → 人话提示（判定值与服务端 Conflict.detail 一致，单处维护）
+// 409 detail 判定值 → 人话提示（判定值与服务端 runs.Conflict.detail 一致，单处维护）
 const CONFLICT_HINT = {
-  deployment_in_progress: '已有会话在执行（挂起中的会话不阻塞）',
-  execution_in_progress: '有会话正在执行，须先停止当前回合',
-  run_not_active: '会话已结束，不可再操作',
-  session_in_use: '源会话尚未结束，不能续接',
+  turn_in_progress: '本会话回合执行中，想改方向先点「停止」',
+  session_running: '源会话正在执行，回合结束后才能克隆',
+  parallel_limit_reached: '执行中回合已达并发上限，稍后再发',
+  session_not_active: '会话已结束，不可再操作（可克隆后继续）',
 }
 
 const listeners = new Set()
@@ -56,9 +57,9 @@ let state = {
   artifactZipping: false,    // zip 打包请求进行中（按钮防重复触发）
 }
 
-// 时长走针仅在会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
+// 时长走针仅在查看中的会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
 setInterval(() => {
-  if (executingRunId()) set({ now: Date.now() })
+  if (state.runs[state.viewRunId]?.status === RUNNING) set({ now: Date.now() })
 }, 1000)
 
 function set(patch) {
@@ -80,10 +81,6 @@ export function subscribe(l) {
 export const getState = () => state
 export function useRunState() {
   return useSyncExternalStore(subscribe, getState)
-}
-
-export function executingRunId() {
-  return state.order.find((id) => state.runs[id]?.status === RUNNING) ?? null
 }
 
 // 查看中的会话（header / 输入条 / 消息流都以它为对象）
@@ -127,11 +124,11 @@ function conflictMessage(err) {
 function onStreamEvent(runId, es, e) {
   const event = { seq: Number(e.lastEventId), type: e.type, payload: JSON.parse(e.data) }
   appendTo(runId, event)
-  // 阶段推进与终态都可能带来新落盘的产物，触发清单刷新
+  // 阶段推进与收尾都可能带来新落盘的产物，触发清单刷新
   if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
-  // 终态事件后服务端会正常结束流，主动 close 避免 EventSource 无限重连
-  // （run.ended 是重启找回历史的收尾：只读回放完毕即关流）
-  if (event.type === 'run.failed' || event.type === 'run.canceled' || event.type === 'run.ended') es.close()
+  // session.ended 后服务端会正常结束流，主动 close 避免 EventSource 无限重连
+  // （唯一会话终态事件：显式结束与重启找回的历史收尾）
+  if (event.type === 'session.ended') es.close()
 }
 
 function attachStream(runId) {
@@ -145,8 +142,8 @@ function attachStream(runId) {
 }
 
 // SSE 断线重连后服务端会全量重放，按 seq 去重；状态随事件类型同步推进
-// （重放的 stage.changed / 终态事件会重复触发清单刷新，幂等无害）。
-// 终态单向：历史回放中的 turn.* 不把已终态的 run 拉回挂起。
+// （重放的 stage.changed / 收尾事件会重复触发清单刷新，幂等无害）。
+// 单向推进：历史回放中的回合事件不把 ENDED 会话拉回可操作态。
 function appendTo(runId, event) {
   const run = state.runs[runId]
   if (!run || run.events.some((ev) => ev.seq === event.seq)) return
@@ -154,21 +151,19 @@ function appendTo(runId, event) {
   // 最后活动时刻以服务端事件 ts 为准（刷新/SSE 重放后不漂移）
   if (event.payload.ts) patch.lastEventAt = event.payload.ts * 1000
   if (event.type === 'stage.changed') patch.stage = event.payload.stage
-  if (event.type === 'run.title_changed') patch.title = event.payload.title
+  if (event.type === 'session.title_changed') patch.title = event.payload.title
   if (event.type === 'turn.completed') patch.result = event.payload.result
-  if (isActive(run.status)) {
-    if (event.type === 'turn.completed' || event.type === 'turn.stopped') {
-      patch.status = WAITING_INPUT // 回合完成/被停止 ≠ 会话结束
+  if (isOperable(run.status) || event.type === 'session.started') {
+    if (event.type === 'turn.started') patch.status = RUNNING
+    // 回合完成/被停止/失败 ≠ 会话结束：一律回 READY
+    if (event.type === 'turn.completed' || event.type === 'turn.stopped' || event.type === 'turn.failed') {
+      patch.status = READY
     }
-    if (event.type === 'run.failed') {
-      patch.status = 'FAILED'
+    if (event.type === 'turn.interrupted') patch.status = READY
+    if (event.type === 'session.ended') {
+      patch.status = 'ENDED'
       patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
     }
-    if (event.type === 'run.canceled') {
-      patch.status = 'CANCELED'
-      patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
-    }
-    if (event.type === 'run.ended') patch.status = 'ENDED'
   }
   setRun(runId, patch)
 }
@@ -198,6 +193,7 @@ function makeRun(overrides) {
 
 // 启动加载：拉全量 run 摘要恢复任务下拉（服务重启后历史经 transcript 重建，
 // 终态只读回看、挂起可续聊）；首屏即回放查看中的那条。尽力而为，失败从空开始。
+// ENDED 会话重放完自动关流（session.ended），READY/RUNNING 常驻等待续聊。
 export async function loadRuns() {
   try {
     const resp = await fetch('/api/runs')
@@ -231,15 +227,10 @@ export async function loadRuns() {
   }
 }
 
-// 新建 = 一步创建空会话（WAITING_INPUT），无中间表单；执行中置灰由 UI 保证；
-// resumeFrom 给定时从该终态会话续接上下文（「↩ 接续此会话」）
-export async function createRun(resumeFrom = null) {
-  if (executingRunId()) {
-    fail(conflictText('deployment_in_progress'))
-    return
-  }
+// 新建 = 一步创建空会话（READY），无中间表单；新建不受其他会话执行影响
+export async function createRun() {
   try {
-    const data = await postJson('/api/runs', resumeFrom ? { resume_from: resumeFrom } : {})
+    const data = await postJson('/api/runs', {})
     const run = makeRun({
       runId: data.run_id,
       status: data.status,
@@ -259,30 +250,51 @@ export async function createRun(resumeFrom = null) {
   }
 }
 
-// 停止 = CLI 的 Esc：打断执行中的回合（作用于当前执行中的会话，不一定是查看中的）
-export async function stop() {
-  const runId = executingRunId()
-  if (!runId) return
+// 克隆 = 从查看中的会话（READY/ENDED）分叉新会话：事件流转录、标题继承
+export async function cloneRun() {
+  const src = state.runs[state.viewRunId]
+  if (!src) return
   try {
-    await postJson(`/api/runs/${runId}/stop`, {})
+    const data = await postJson(`/api/runs/${src.runId}/clone`, {})
+    const run = makeRun({
+      runId: data.run_id,
+      status: data.status,
+      resumedFrom: data.resumed_from ?? null,
+      connection: 'live',
+      startedAt: Date.now(),
+    })
+    set({
+      runs: { ...state.runs, [run.runId]: run },
+      order: [run.runId, ...state.order],
+      viewRunId: run.runId,
+      submitError: null,
+    })
+    attachStream(run.runId)
+  } catch (err) {
+    fail(`克隆失败：${conflictMessage(err)}`)
+  }
+}
+
+// 停止 = CLI 的 Esc：打断查看中会话的当前回合（只作用当前会话，不误停别人）
+export async function stop() {
+  const run = state.runs[state.viewRunId]
+  if (!run || run.status !== RUNNING) return
+  try {
+    await postJson(`/api/runs/${run.runId}/stop`, {})
   } catch (err) {
     fail(`停止失败：${err.message}`)
   }
 }
 
-// 向查看中的会话发指令：挂起会话须无其他执行；执行中发送由服务端先停止再投递。
-// 返回是否投递成功（失败时输入由调用方保留）。
+// 向查看中的会话发指令：执行中发送由服务端 409（turn_in_progress）拒绝，
+// 想改方向先显式停止。返回是否投递成功（失败时输入由调用方保留）。
 export async function send(text) {
   const trimmed = (text ?? '').trim()
   const run = state.runs[state.viewRunId]
   if (!run || !trimmed) return false
-  if (!isActive(run.status)) {
+  if (!isOperable(run.status)) {
     // 只读会话（已结束/重启找回的历史）不静默吞掉输入，给出出路提示
-    fail('该会话只读（已结束或重启找回的历史）——「+ 新建」或接续该会话后继续')
-    return false
-  }
-  if (run.status === WAITING_INPUT && executingRunId()) {
-    fail(conflictText('execution_in_progress'))
+    fail('该会话只读（已结束）——「+ 新建」或克隆该会话后继续')
     return false
   }
   try {
@@ -295,14 +307,14 @@ export async function send(text) {
   }
 }
 
-// 关闭查看中的会话（执行中或挂起均可关闭）
-export async function cancel() {
+// 结束查看中的会话（显式、不可逆；执行中或挂起均可）
+export async function endRun() {
   const run = state.runs[state.viewRunId]
-  if (!run || !isActive(run.status)) return
+  if (!run || !isOperable(run.status)) return
   try {
-    await postJson(`/api/runs/${run.runId}/cancel`, {})
+    await postJson(`/api/runs/${run.runId}/end`, {})
   } catch (err) {
-    fail(`关闭会话失败：${err.message}`)
+    fail(`结束会话失败：${err.message}`)
   }
 }
 

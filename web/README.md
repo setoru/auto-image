@@ -1,6 +1,11 @@
 # web — 部署会话 Web 服务端
 
 浏览器会话式入口：新建空会话 → 输入部署指令 → SSE 实时看 agent 事件流。
+多会话并行（并发上限 `WEB_MAX_PARALLEL_RUNS`，默认 10，数执行中回合——
+新建、克隆、标题生成不占名额）；SDK 连接按回合开合，挂起会话零 CLI 进程。
+会话三态 READY / RUNNING / ENDED：回合完成、停止、失败都回 READY 可续聊；
+ENDED 只来自用户显式结束（不可续聊只能克隆，墓碑入册）。执行中发送 409
+`turn_in_progress`（想改方向先显式停止）；克隆 READY/ENDED 源分叉新身份。
 会话为 `ClaudeSDKClient` 真实现（`web/sdk.py` 经工厂注入）；测试注入脚本化
 假实现（`web/fake.py`），不触网、不启动真 SDK。
 
@@ -43,15 +48,15 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 | 文件 | 职责 |
 | --- | --- |
 | `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 流（id=seq、Last-Event-ID 重放、心跳保活）、启动接线（历史重建 + 残留 CLI 告警） |
-| `runs.py` | 会话状态机（RUNNING 唯一、挂起并存）、干预（intervene）与 409 判定；ENDED 为重启找回的历史终态 |
+| `runs.py` | 会话状态机（READY/RUNNING/ENDED 三态、无全局门禁）、回合计数（`WEB_MAX_PARALLEL_RUNS`）、clone/end 校验与 409 判定收敛（turn_in_progress / session_running / parallel_limit_reached / session_not_active） |
 | `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
-| `session.py` | 会话驱动循环（一条 run = 一条会话） |
+| `session.py` | 回合执行（send 起回合级 asyncio.Task，SDK 连接只包住一个回合） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | deploy/ + rpm/ 多根全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的恢复：state 簿记里的挂起 run 恢复为可聊（原 run_id、事件流从 transcript 重放），其余 transcript 以 session 粒度重建为历史 run（ENDED，只读可续接） |
 | `state.py` | 挂起 run 的落盘簿记（`~/.auto-image-web/state.json`，全量原子替换）：run ↔ session 映射与状态机状态，transcript 里没有的东西；损坏降级为纯历史重建 |
-| `title.py` | 会话标题 LLM 生成（Codex 同构，research/codex-session-title.md）：首条指令到达即起一次性无工具会话生成，成功落 run.title + `run.title_changed` 事件 + transcript custom-title 行；失败静默维持截断标题 |
+| `title.py` | 会话标题 LLM 生成（Codex 同构，research/codex-session-title.md）：首条指令到达即起一次性无工具会话生成，成功落 run.title + `session.title_changed` 事件 + transcript custom-title 行；失败静默维持截断标题；克隆会话继承源标题不再生成 |
 | `sdk.py` | ClaudeSDKClient 生产实现：options 全配、消息形状适配、工厂、历史读取包装 |
 | `fake.py` | 脚本化假会话（默认剧本含敏感样例），测试注入用 |
 
@@ -62,7 +67,7 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 1. **消息形状**：`receive_response` 产出 dataclass（`AssistantMessage` 等），
    `sdk.to_dict` 适配成 CLI JSON 形状 dict 后进 `normalize_message`，
    与假剧本同一条映射路径。每回合终止于 `ResultMessage`，下一轮 `query`
-   在同一连接续聊，与 `session.run_agent` 的循环结构一致。
+   在同一连接续聊。
 2. **子 agent thinking 转发**（方案风险点一）：`forward_subagent_text=True`
    下子 agent 的 thinking 块**会**随文本一并转发（parent_tool_use_id 非空的
    assistant 消息里实测出现 ThinkingBlock），子 agent 思维链在前端可见。
@@ -86,10 +91,10 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    成功。内置工具中只读 Bash 随 `claude_code` 预设放行；写路径需
    `permission_mode`（见第 8 条）。
 7. **回合上限**：`max_turns=200` 是终局语义：Result 的错误 subtype（兜底
-   判定：只有 `success` 是正常完成）以 `run.failed` 收尾、会话进 FAILED、
-   断开 SDK 连接，不自动重试。**无 wall-clock 超时**（曾有 3600 秒上限，
-   已删）：单回合即完整部署流水线，四阶段串行 + 云操作轮询（IMS 制镜像）
-   可超小时级，服务端主动掐断会把已提交的云操作留在中间态。
+   判定：只有 `success` 是正常完成）以 `turn.failed` 收尾、会话回 READY
+   可续聊（重试 = 下一条指令新连接）。**无 wall-clock 超时**（曾有 3600 秒
+   上限，已删）：单回合即完整部署流水线，四阶段串行 + 云操作轮询（IMS 制
+   镜像）可超小时级，服务端主动掐断会把已提交的云操作留在中间态。
 
 8. **无值守会话的写权限**（真部署实测）：`claude_code` 工具预设只放行
    只读 Bash，Write 与 Bash 写路径一律被权限系统拦截（guide 只能把指南
@@ -101,8 +106,7 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    ak/sk/password 值，任意上下文整值遮蔽）；实测华为云 SK 为 38 位大小写
    混合，非注释曾以为的 40 位小写。
 10. **子 agent 的异步派发失稳**（真部署实测）：CLI 的 Agent 工具支持异步
-   启动，模型可能派发后结束回合「等通知」——通知无处投递、run 挂在
-   WAITING_INPUT；更早一轮还出现过并发派发上百次 guide 的调度风暴（20 实例
+   启动，模型可能派发后结束回合「等通知」——通知无处投递、回合提前收尾；更早一轮还出现过并发派发上百次 guide 的调度风暴（20 实例
    触发 429，agent 自行终止后恢复）。系统提示词以执行纪律约束：至多一个
    子 agent 在跑、派发后 TaskOutput 阻塞等待、四阶段完成才收尾回合。
 11. **interrupt 的终止边界**（干预语义实测，脚本经 `web.sdk` 工厂走生产路径）：
@@ -123,17 +127,17 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
    条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重建的
-   run 状态 ENDED（终态，可回看可续接），流以 `run.ended` 收尾后正常
+   run 状态 ENDED（终态，可回看可克隆），流以 `session.ended` 收尾后正常
    关闭。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
 14. **服务重启的挂起恢复**（state 簿记 + 真 SDK 实测）：簿记只存活跃 run
-   （WAITING_INPUT / RUNNING，无 session_id 的首回合未完成 run 不入册），
-   每次状态变更即全量原子写。重启后挂起 run 以原 run_id 恢复可聊——事件
-   流从 transcript 重放、协程以自身 session resume 重建连接（实测恢复后
-   发消息，agent 记得重启前的约定）。簿记里的 RUNNING 降级 WAITING_INPUT
-   + `run.interrupted` 事件（未收尾回合不自动重跑：已提交的云操作不可
-   重复执行）；恢复占用的 session 不再重复建历史条目。簿记损坏/缺失一律
-   降级为纯历史重建，不阻断启动。kill -9 实测：崩溃窗口内丢失的最后一次
-   状态变更由 transcript 存在性校验兜底（读不到即丢弃）。
+   （READY / RUNNING，无 session_id 的首回合未完成 run 不入册），每次状态
+   变更即全量原子写。重启后挂起 run 以原 run_id 恢复可聊——事件流从
+   transcript 重放、send 起的回合以自身 session resume 新连接（实测恢复后
+   发消息，agent 记得重启前的约定）。簿记里的 RUNNING 降级 READY +
+   `turn.interrupted` 事件（未收尾回合不自动重跑：已提交的云操作不可重复
+   执行）；恢复占用的 session 不再重复建历史条目。簿记损坏/缺失一律降级
+   为纯历史重建，不阻断启动。kill -9 实测：崩溃窗口内丢失的最后一次状态
+   变更由 transcript 存在性校验兜底（读不到即丢弃）。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。

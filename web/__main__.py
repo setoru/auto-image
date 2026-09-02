@@ -17,8 +17,8 @@ from .app import create_app
 def main():
     port = int(os.environ.get("WEB_PORT", "8123"))
     host = os.environ.get("WEB_HOST", "127.0.0.1")
-    # 工厂形态：应用构造发生在事件循环就绪后——启动段的挂起会话恢复要
-    # create_task 起 run_agent 协程，无运行循环会崩
+    # 工厂形态：应用构造发生在事件循环就绪后——启动段的状态恢复（簿记 +
+    # transcript 重放）在无运行循环环境下会崩
     uvicorn.run(create_app, factory=True, host=host, port=port)
 
 

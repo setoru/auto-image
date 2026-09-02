@@ -2,22 +2,21 @@
 
 内存 run 记录随重启丢失，两个恢复源互补：
 - state 落盘簿记（state.py）里的挂起 run → restore_active_runs 恢复为可聊
-  会话（原 run_id、resume 重建协程）；
+  会话（原 run_id，send 时以 resume 起新回合）；
 - CLI 侧 transcript（~/.claude/projects）→ rebuild_history 以 session 粒度
-  找回纯历史 run：状态 ENDED（终态，可回看、可作为续接起点），无协程、
-  不接受干预。
+  找回纯历史 run：状态 ENDED（终态，可回看、可作为克隆起点），不接受干预。
 
 transcript 里没有 Result 消息：回合边界由「下一条真实用户输入」推导，回合
 汇总取该回合最后一条 agent 文本（CLI 的 result 同源于此）。历史重建的
-事件流以 run.ended 收尾，标记这是重启找回的历史——前端据此关闭只读回放流，
-不再重连。
+事件流以 session.ended 收尾，标记这是重启找回的历史——前端据此关闭只读回放流，
+不再重连。（恢复双路径合流为 transcript 单一路径见后续演进。）
 """
 import logging
 import time
 
 from .normalize import normalize_message
 from .redact import redact_text
-from .runs import ENDED, RUNNING, WAITING_INPUT, Run
+from .runs import ENDED, RUNNING, READY, Run
 
 logger = logging.getLogger("web")
 
@@ -71,11 +70,11 @@ def user_prompt_text(message):
 
 def restore_active_runs(manager, store, records, get_session_messages):
     """落盘簿记里的挂起 run → 恢复为可聊会话（原 run_id、事件流从 transcript
-    重放），返回恢复的 run 列表（协程由调用方 spawn：factory 以 run 自身的
-    session_id resume 重建连接）。
+    重放），返回恢复的 run 列表（回合任务由 send 按需起：resume_session_id
+    带自身 session，回合连接按回合开合）。
 
-    恢复语义：簿记里的 RUNNING 一律降级 WAITING_INPUT——重启前的未收尾
-    回合不自动重跑（已提交的云操作不可重复执行），以 run.interrupted 事件
+    恢复语义：簿记里的 RUNNING 一律降级 READY——重启前的未收尾
+    回合不自动重跑（已提交的云操作不可重复执行），以 turn.interrupted 事件
     如实呈现。transcript 读不到（被删/损坏）的记录丢弃，只降级不阻断。
     """
     restored = []
@@ -91,9 +90,9 @@ def restore_active_runs(manager, store, records, get_session_messages):
                            record["run_id"], record["session_id"])
             continue
         run = Run(record["run_id"])
-        run.status = WAITING_INPUT
+        run.status = READY
         run.session_id = record["session_id"]
-        run.resume_session_id = record["session_id"]  # 协程以自身 session 续接
+        run.resume_session_id = record["session_id"]  # 回合以自身 session 续接
         run.resumed_from = record.get("resumed_from")
         run.stage = record.get("stage")
         run.first_prompt = record.get("first_prompt")
@@ -103,10 +102,10 @@ def restore_active_runs(manager, store, records, get_session_messages):
         manager.register(run)
         manager.adopt_ids([run.run_id])
         store.create(run.run_id)
-        store.append(run.run_id, "run.started", {})
+        store.append(run.run_id, "session.started", {})
         replay_messages(run, store, messages)
         if record.get("status") == RUNNING:
-            store.append(run.run_id, "run.interrupted", {})
+            store.append(run.run_id, "turn.interrupted", {})
         restored.append(run)
         # 上面重放的事件不是真实活动（都是重启当下的时刻），恢复簿记值
         run.last_event_at = record.get("last_event_at")
@@ -126,9 +125,9 @@ def _rebuild_run(manager, store, info, messages):
     run.ended_at = (getattr(info, "last_modified", 0) or 0) / 1000 or None
     manager.register(run)
     store.create(run.run_id)
-    store.append(run.run_id, "run.started", {})
+    store.append(run.run_id, "session.started", {})
     replay_messages(run, store, messages)
-    store.append(run.run_id, "run.ended", {})
+    store.append(run.run_id, "session.ended", {})
     # 历史无逐事件时刻：最后活动以 transcript 落盘时刻近似（= ended_at）。
     # 上面重建事件流的 ts 都是重启当下的时刻，不是真实活动，恢复后覆盖。
     run.last_event_at = run.ended_at
@@ -137,7 +136,7 @@ def _rebuild_run(manager, store, info, messages):
 
 def replay_messages(run, store, messages):
     """transcript 可见消息链 → 内部事件流（first_prompt / stage 随重放恢复），
-    不含生命周期起止事件——新起点与收尾由调用方决定（历史重建补 run.ended，
+    不含生命周期起止事件——新起点与收尾由调用方决定（历史重建补 session.ended，
     挂起恢复不补）。"""
     tool_names = {}
     last_text = ""     # 当前回合最后一条 agent 文本（回合汇总来源）
@@ -148,6 +147,9 @@ def replay_messages(run, store, messages):
         if prompt is not None:
             if turn_open:
                 store.append(run.run_id, "turn.completed", {"result": redact_text(last_text)})
+            # turn.started 与 user.message 配对（与实时回合一致），SSE 消费端
+            # 不用区分实时流与重放流
+            store.append(run.run_id, "turn.started", {})
             store.append(run.run_id, "user.message", {"text": prompt})
             if run.first_prompt is None:
                 run.first_prompt = prompt

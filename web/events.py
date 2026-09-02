@@ -49,8 +49,9 @@ class EventStore:
 
     def adopt_history(self, dst_run_id, src_run_id, skip_types=()):
         """把源 run 的全部事件转录进目标 run（seq 重新递增、唤醒订阅者）——
-        接续创建的新会话由此自带源会话历史（CLI resume 的浏览体验）。
-        skip_types 排除源流的生命周期起点（run.started，避免与新流的重复）。"""
+        克隆创建的新会话由此自带源会话历史（CLI resume 的浏览体验）。
+        skip_types 排除源流的生命周期事件（session.started / session.ended：
+        起点会与新流重复，终态收尾会被前端当成本流终态关流判死）。"""
         for ev in self._events[src_run_id]:
             if ev["type"] not in skip_types:
                 self.append(dst_run_id, ev["type"], ev["payload"])

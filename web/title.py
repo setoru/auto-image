@@ -15,7 +15,7 @@ import logging
 
 from . import sdk as sdk_mod
 from .redact import redact_text
-from .runs import RUNNING, TERMINAL
+from .runs import ENDED, RUNNING
 
 logger = logging.getLogger("web")
 
@@ -75,22 +75,22 @@ async def generate_title(user_text, session_factory):
 
 async def assign_title(run, user_text, session_factory, store, on_change=None):
     """run 的标题生成入口：新对话首条指令起生成，成功即落三处——
-    run.title（内存权威）、事件流 run.title_changed（前端即时改名）、
+    run.title（内存权威）、事件流 session.title_changed（前端即时改名）、
     transcript custom-title 行（重启 rebuild 找回）。
 
-    幂等：已有 title 或 run 已终态（生成期间被关闭）时不写；只对新对话
+    幂等：已有 title 或 run 已终态（生成期间被结束）时不写；只对新对话
     调用（调用方以 first_prompt 判定），续聊不再生成。session_id 在回合
     Result 才提取，标题可能先到：写回 transcript 前等 session_id 就绪，
-    等不到（首回合即失败/关闭）只落内存。
+    等不到（首回合即失败/结束）只落内存。
     """
-    if run.title is not None or run.status in TERMINAL:
+    if run.title is not None or run.status == ENDED:
         return
     title = await generate_title(user_text, session_factory)
-    # 二次校验：生成期间可能已被命名（接续继承）或已关闭
-    if title is None or run.title is not None or run.status in TERMINAL:
+    # 二次校验：生成期间可能已被命名（克隆继承）或已结束
+    if title is None or run.title is not None or run.status == ENDED:
         return
     run.title = title
-    store.append(run.run_id, "run.title_changed", {"title": title})
+    store.append(run.run_id, "session.title_changed", {"title": title})
     if on_change is not None:
         on_change()
     if run.session_id is None:
@@ -112,3 +112,4 @@ async def _wait_session_id(run, timeout_s=30.0):
     deadline = asyncio.get_running_loop().time() + timeout_s
     while run.session_id is None and run.status == RUNNING and asyncio.get_running_loop().time() < deadline:
         await asyncio.sleep(0.05)
+

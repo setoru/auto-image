@@ -103,7 +103,7 @@ def make_app(script=None):
 
 
 async def test_first_message_assigns_title_and_emits_event():
-    """首条消息 → 事件流出现 run.title_changed，摘要与 transcript 写回到位。
+    """首条消息 → 事件流出现 session.title_changed，摘要与 transcript 写回到位。
     标题会话经独立 title_factory（生产为隔离 cwd 配置，不落项目根 transcript）。"""
     title_script = [{"type": "result", "subtype": "success", "result": "「部署 nginx」"}]
     title_calls = []
@@ -132,15 +132,15 @@ async def test_first_message_assigns_title_and_emits_event():
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
             run_id = (await client.post("/api/runs", json={})).json()["run_id"]
             await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx 1.25 到 server-a"})
-            await wait_status(client, run_id, "WAITING_INPUT")
+            await wait_status(client, run_id, "READY")
             # collect_sse 的 1 秒窗内标题会话（无 delay）应已落流；偶发晚到再等一轮
             events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
-            if not [e for e in events if e["event"] == "run.title_changed"]:
+            if not [e for e in events if e["event"] == "session.title_changed"]:
                 await asyncio.sleep(0.2)
                 events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
             types = [e["event"] for e in events]
             # 标题事件在场（清洗剥掉了引号）
-            title_events = [e for e in events if e["event"] == "run.title_changed"]
+            title_events = [e for e in events if e["event"] == "session.title_changed"]
             assert len(title_events) == 1, types
             assert title_events[0]["data"]["title"] == "部署 nginx"
             # 摘要带 title 字段
@@ -171,7 +171,8 @@ async def test_title_session_isolated_from_discovery():
 
 
 async def test_second_message_does_not_retitle():
-    """标题只生成一次：第二回合不再触发（无第二个标题会话）。"""
+    """标题只生成一次：第二回合不再触发（无第二个标题会话；回合连接按回合开合，
+    部署工厂每条指令各调一次）。"""
     deploy_calls = []
     title_calls = []
 
@@ -196,13 +197,14 @@ async def test_second_message_does_not_retitle():
     async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
         run_id = (await client.post("/api/runs", json={})).json()["run_id"]
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
-        await wait_status(client, run_id, "WAITING_INPUT")
+        await wait_status(client, run_id, "READY")
         await asyncio.sleep(0.2)  # 等标题会话（无 delay）跑完
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
-        await wait_status(client, run_id, "WAITING_INPUT")
+        await wait_status(client, run_id, "READY")
         await asyncio.sleep(0.1)
-    # 部署会话 1 次（两回合同一连接）+ 标题会话 1 次；第二回合不再生成
-    assert len(deploy_calls) == 1 and len(title_calls) == 1, (deploy_calls, title_calls)
+    # 部署会话 2 次（按回合开合：每条指令各起新连接）+ 标题会话 1 次；
+    # 第二回合不再生成
+    assert len(deploy_calls) == 2 and len(title_calls) == 1, (deploy_calls, title_calls)
 
 
 async def test_continued_session_does_not_retitle():
@@ -212,7 +214,7 @@ async def test_continued_session_does_not_retitle():
     state_dir = tempfile.mkdtemp()
     state_path = Path(state_dir) / "state.json"
     state_path.write_text(json.dumps({"runs": [{
-        "run_id": "run_1", "status": "WAITING_INPUT", "stage": None,
+        "run_id": "run_1", "status": "READY", "stage": None,
         "first_prompt": "部署 nginx", "title": None, "created_at": 1000.0,
         "session_id": "sess_x", "resumed_from": None,
     }]}, ensure_ascii=False), encoding="utf-8")
@@ -243,7 +245,7 @@ async def test_continued_session_does_not_retitle():
     async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
         assert (await client.get("/api/runs")).json()["runs"][0]["title"] is None
         await client.post("/api/runs/run_1/messages", json={"text": "继续之前的部署"})
-        await wait_status(client, "run_1", "WAITING_INPUT")
+        await wait_status(client, "run_1", "READY")
         await asyncio.sleep(0.2)
         summary = (await client.get("/api/runs/run_1")).json()
     assert title_calls == [], title_calls  # 续聊指令不起标题会话

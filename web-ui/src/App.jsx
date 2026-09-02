@@ -10,11 +10,11 @@ import * as store from './store.js'
 import { fmtActive, fmtLastActivity, firstPromptPreview, resumeMark, fmtSize, artifactTree, subtreeRels, defaultOpenPaths } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 
-const STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '等待指令', CANCELED: '已关闭', FAILED: '失败', ENDED: '已结束' }
+const STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
 // 下拉三态（执行中/挂起/已结束）：所有终态（含重启找回的 ENDED）归「已结束」
-const TASK_STATUS_LABEL = { RUNNING: '执行中', WAITING_INPUT: '挂起' }
+const TASK_STATUS_LABEL = { RUNNING: '执行中', READY: '挂起' }
 const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
-const STATUS_TONE = { RUNNING: 'running', FAILED: 'bad', CANCELED: 'warn', ENDED: 'warn' }
+const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 
 // 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
 // result 就是最后一条 assistant 文本（CLI Result 语义），重复成框是噪音；
@@ -95,14 +95,14 @@ function IoTodos({ todos }) {
 }
 
 function EventRow({ ev, prev, tools }) {
-  if (ev.type === 'resumed.history') {
-    return <div className="va-stage-line">─ 已接续 {ev.payload.resumed_from} · 以下为带入的历史 ─</div>
-  }
   if (ev.type === 'stage.changed') {
     return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
   if (ev.type === 'user.message') {
     return <div className="va-user">{ev.payload.text}</div>
+  }
+  if (ev.type === 'turn.started') {
+    return null // 回合开卷标记（与 user.message 配对），消息行已表达
   }
   if (ev.type === 'turn.stopped') {
     return (
@@ -111,7 +111,10 @@ function EventRow({ ev, prev, tools }) {
       </div>
     )
   }
-  if (ev.type === 'run.interrupted') {
+  if (ev.type === 'turn.failed') {
+    return <div className="va-failed">回合失败（会话可继续）：{ev.payload.message}</div>
+  }
+  if (ev.type === 'turn.interrupted') {
     return (
       <div className="va-paused">
         — 服务重启，上一回合被中断 · 已提交的云操作不受影响，无法撤销 —
@@ -156,14 +159,14 @@ function EventRow({ ev, prev, tools }) {
   if (ev.type === 'turn.completed') {
     return turnCompletedRow(ev, prev)
   }
-  if (ev.type === 'run.failed') {
-    return <div className="va-failed">会话异常终止：{ev.payload.message}</div>
+  if (ev.type === 'session.started') {
+    return null // 会话流开卷，header 已表达
   }
-  if (ev.type === 'run.canceled') {
-    return <div className="va-canceled">— 会话已关闭 —</div>
+  if (ev.type === 'session.title_changed') {
+    return null // 标题落 header / 下拉，不在消息流渲染
   }
-  if (ev.type === 'run.ended') {
-    return <div className="va-canceled">— 历史会话回放完毕（重启找回，只读）—</div>
+  if (ev.type === 'session.ended') {
+    return <div className="va-canceled">— 会话已结束（可回看，只能克隆）—</div>
   }
   return null
 }
@@ -361,9 +364,6 @@ function TaskSide({ run }) {
       </div>
       <div className="va-side-cards">
         <ArtifactCard />
-        {run?.status === 'CANCELED' && (
-          <div className="va-card"><div className="va-card-title">会话已关闭</div>云上已提交的操作不受影响</div>
-        )}
       </div>
     </aside>
   )
@@ -438,7 +438,7 @@ export default function App() {
               总计时间：{fmtActive(run, s.now)}
             </span>
             <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(run)}</span>
-            <button onClick={() => store.cancel()} disabled={!store.isActive(run.status)}>
+            <button onClick={() => store.endRun()} disabled={!store.isOperable(run.status)}>
               结束会话
             </button>
           </>

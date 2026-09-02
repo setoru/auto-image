@@ -12,7 +12,7 @@ export function hasPrompt(run) {
   return firstPromptText(run) != null
 }
 
-// 任务名 = LLM 标题（服务端 run.title / 事件流 run.title_changed）优先，
+// 任务名 = LLM 标题（服务端 title / 事件流 session.title_changed）优先，
 // 回退首条指令截断（生成中/失败/老会话）
 export function firstPromptPreview(run, max = 18) {
   if (run?.title) return run.title.length > max ? run.title.slice(0, max) + '…' : run.title
@@ -22,17 +22,16 @@ export function firstPromptPreview(run, max = 18) {
   return t.length > max ? t.slice(0, max) + '…' : t
 }
 
-// 接续标记：「↩ 接续『任务名』」；来源会话不在（列表缺它）时不标
+// 克隆标记：「⑂ 克隆自『任务名』」；来源会话不在（列表缺它）时不标
 export function resumeMark(run, runs) {
   if (!run?.resumedFrom || !runs?.[run.resumedFrom]) return ''
-  return ` ↩ 接续『${firstPromptPreview(runs[run.resumedFrom])}』`
+  return ` ⑂ 克隆自『${firstPromptPreview(runs[run.resumedFrom])}』`
 }
 
 // 累计执行时长：各回合（user.message → 回合收尾）求和，扣除等待输入的
-// 空档；执行中的回合以 now 收口。终态会话直接用 endedAt - startedAt 兜底
-// 定格（方案：终态以服务端 endedAt 定格总时长）——跨重载时事件 ts 是
-// 服务端时刻，不会随 Date.now() 无限增长。无 endedAt 的终态（异常边界）
-// 退回事件求和，未闭合的回合不计。
+// 空档；执行中的回合以 now 收口。终态（ENDED）会话直接用 endedAt -
+// startedAt 兜底定格——跨重载时事件 ts 是服务端时刻，不会随 Date.now()
+// 无限增长。无 endedAt 的终态（异常边界）退回事件求和，未闭合的回合不计。
 export function activeSeconds(run, now) {
   if (run.endedAt != null && run.startedAt != null) {
     return Math.max(0, Math.floor((run.endedAt - run.startedAt) / 1000))
@@ -41,12 +40,12 @@ export function activeSeconds(run, now) {
   let turnStart = null
   for (const ev of run.events) {
     if (ev.type === 'user.message') turnStart = (ev.payload.ts ?? run.startedAt / 1000)
-    if ((ev.type === 'turn.completed' || ev.type === 'turn.stopped' || ev.type === 'run.failed') && turnStart != null) {
+    if ((ev.type === 'turn.completed' || ev.type === 'turn.stopped' || ev.type === 'turn.failed') && turnStart != null) {
       total += Math.max(0, (ev.payload.ts ?? turnStart) - turnStart)
       turnStart = null
     }
   }
-  if (turnStart != null && run.status !== 'CANCELED' && run.status !== 'FAILED' && run.status !== 'ENDED') {
+  if (turnStart != null && run.status !== 'ENDED') {
     total += Math.max(0, (now || Date.now()) / 1000 - turnStart)
   }
   return Math.floor(total)

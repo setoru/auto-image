@@ -24,8 +24,8 @@ from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E4
 
 
 def drop_title_events(events):
-    """剔除 run.title_changed（标题生成异步落流、时序自由，断言不关心）。"""
-    return [e for e in events if e["event"] != "run.title_changed"]
+    """剔除 session.title_changed（标题生成异步落流、时序自由，断言不关心）。"""
+    return [e for e in events if e["event"] != "session.title_changed"]
 
 HEARTBEAT = 0.05
 
@@ -108,7 +108,7 @@ async def test_list_endpoint_returns_summaries_without_clearing_old_runs():
         empty = (await client.post("/api/runs", json={})).json()["run_id"]
         busy = (await client.post("/api/runs", json={})).json()["run_id"]
         await client.post(f"/api/runs/{busy}/messages", json={"text": "部署 nginx 1.25 到 server-a"})
-        await wait_status(client, busy, "WAITING_INPUT")
+        await wait_status(client, busy, "READY")
 
         r = await client.get("/api/runs")
         assert r.status_code == 200, r.text
@@ -144,12 +144,13 @@ async def test_rebuild_restores_history_viewable():
         assert run["last_event_at"] == run["ended_at"], run
         run_id = run["run_id"]
 
-        # 事件流从 transcript 消息重新映射：run.started 起步、run.ended 收尾
+        # 事件流从 transcript 消息重新映射：session.started 起步、session.ended 收尾
         resp = await open_stream(client, run_id)
         events, pings = await collect_sse(resp, deadline_s=2.0)
         types = [e["event"] for e in events]
         assert types == [
-            "run.started",
+            "session.started",
+            "turn.started",
             "user.message",
             "agent.thinking",
             "agent.message",
@@ -158,17 +159,18 @@ async def test_rebuild_restores_history_viewable():
             "agent.tool_finished",
             "agent.message",
             "turn.completed",
+            "turn.started",
             "user.message",
             "agent.message",
             "turn.completed",
-            "run.ended",
+            "session.ended",
         ], types
         seqs = [int(e["id"]) for e in events]
         assert seqs == list(range(1, len(events) + 1)), seqs
-        assert events[1]["data"]["text"] == "部署 nginx 1.25 到 server-a"
+        assert events[2]["data"]["text"] == "部署 nginx 1.25 到 server-a"
         # 回合边界由下一条用户输入推导；汇总取该回合最后一条 agent 文本
-        assert "指南阶段完成" in events[7]["data"]["text"]
-        assert events[8]["data"]["result"] == events[7]["data"]["text"]
+        assert "指南阶段完成" in events[8]["data"]["text"]
+        assert events[9]["data"]["result"] == events[8]["data"]["text"]
         # transcript 重放同样过脱敏与映射路径
         assert "HWPFEJ9AB3CDEFGHIJKL" not in str(events)
         # 终态重放完毕流正常关闭（只读回放不靠心跳保活）
@@ -181,35 +183,35 @@ async def test_rebuilt_run_is_readonly_and_not_auto_retried():
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         run_id = (await client.get("/api/runs")).json()["runs"][0]["run_id"]
-        # 历史 run 无干预入口：stop / messages / cancel 一律 run_not_active
-        for path in ("messages", "stop", "cancel"):
+        # 历史 run 无干预入口：stop / messages / end 一律 session_not_active
+        for path in ("messages", "stop", "end"):
             r = await client.post(f"/api/runs/{run_id}/{path}", json={"text": "继续"} if path == "messages" else {})
             assert r.status_code == 409, (path, r.text)
-            assert r.json() == {"detail": "run_not_active"}, (path, r.text)
+            assert r.json() == {"detail": "session_not_active"}, (path, r.text)
         # 重启前在执行的任务不自动重试：不占执行权，新建不受阻
         r = await client.post("/api/runs", json={})
         assert r.status_code == 200, r.text
 
 
-async def test_rebuilt_run_serves_as_resume_source():
+async def test_rebuilt_run_serves_as_clone_source():
     sid = "11111111-2222-3333-4444-555555555555"
     app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)], lambda s: deploy_transcript())
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         run_id = (await client.get("/api/runs")).json()["runs"][0]["run_id"]
-        r = await client.post("/api/runs", json={"resume_from": run_id})
+        r = await client.post(f"/api/runs/{run_id}/clone")
         assert r.status_code == 200, r.text
         assert r.json()["resumed_from"] == run_id
-        # 工厂收到重建 run 找回的 SDK 会话 id（transcript 里的 session_id）
-        assert app.state.session_factory.session_ids == [sid]
 
-        # 续接会话照常执行首条指令
+        # 克隆会话照常执行首条指令（回合连接以源 session resume）
         new_id = r.json()["run_id"]
         await client.post(f"/api/runs/{new_id}/messages", json={"text": "继续之前的部署"})
-        await wait_status(client, new_id, "WAITING_INPUT")
+        await wait_status(client, new_id, "READY")
         resp = await open_stream(client, new_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
         assert [e["event"] for e in drop_title_events(events)][-1] == "turn.completed"
+        # 工厂收到重建 run 找回的 SDK 会话 id（transcript 里的 session_id）
+        assert app.state.session_factory.session_ids[-1] == sid
 
 
 async def test_rebuild_skips_messageless_and_broken_sessions():
