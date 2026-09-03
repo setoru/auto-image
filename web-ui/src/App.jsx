@@ -368,6 +368,12 @@ function TaskSide({ run }) {
   )
 }
 
+// 结束会话：显式且不可逆；执行中结束还会打断在飞回合，需二次确认
+function onEndRun(run) {
+  if (run.status === 'RUNNING' && !window.confirm(`会话 ${run.runId} 回合执行中，结束将打断在飞回合（已提交的云操作不受影响）。确定结束？`)) return
+  store.endRun()
+}
+
 export default function App() {
   const s = store.useRunState()
   const run = store.useViewRun()
@@ -422,7 +428,7 @@ export default function App() {
               总计时间：{fmtActive(run, s.now)}
             </span>
             <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(run)}</span>
-            <button onClick={() => store.endRun()} disabled={!store.isOperable(run.status)}>
+            <button onClick={() => onEndRun(run)} disabled={!store.isOperable(run.status)}>
               结束会话
             </button>
           </>
@@ -451,7 +457,7 @@ export default function App() {
           {!run ? (
             <div className="empty-state">
               <div className="big">未开始</div>
-              <div>点底部「+ 新建」创建会话，输入第一条部署指令</div>
+              <div>点标签栏「+ 新建」创建会话，输入第一条部署指令</div>
             </div>
           ) : (
             <>

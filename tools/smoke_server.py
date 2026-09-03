@@ -1,7 +1,6 @@
 """浏览器手动验收的服务端替身：假 SDK 工厂 + 隔离簿记 + 真实静态 dist。
 
-用法（web-multi-session ticket03 验收）：
-  python3 -m tools.smoke_server [port]
+用法：python3 -m tools.smoke_server [port]
 只用于本机手动验收多标签页前端，不触真 SDK、不碰全局 ~/.auto-image-web。
 """
 import sys

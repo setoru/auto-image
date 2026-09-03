@@ -1,10 +1,9 @@
 // 底部常驻对话输入条：右侧单按钮按状态变形，回车永远等价于点它：
-//   执行中 + 无输入   -> ■ 停止（Esc 等效，只停当前标签页的会话）
-//   执行中 + 有输入   -> 发送（服务端 409 turn_in_progress；想改方向先显式停止）
-//   等待指令          -> 发送
-// 「⑂ 克隆」常驻（替代原「接续此会话」）：READY/ENDED 可点、RUNNING 禁用
-// ——克隆基于 transcript resume，执行中的上下文是过时的（服务端 409 同源）。
-// 新建会话入口在顶部标签栏的「+」。
+//   执行中   -> ■ 停止（Esc 等效，只停当前标签页的会话；输入同步禁用，
+//               想改方向先停止——执行中发送被服务端 409 turn_in_progress 拒）
+//   等待指令 -> 发送
+// 「⑂ 克隆」常驻：READY/ENDED 可点、RUNNING 禁用——克隆基于 transcript
+// 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏「+」。
 import { useState } from 'react'
 import * as store from '../store.js'
 import { firstPromptPreview } from '../derive.js'

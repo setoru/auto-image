@@ -130,9 +130,13 @@ function onStreamEvent(runId, es, e) {
   appendTo(runId, event)
   // 阶段推进与收尾都可能带来新落盘的产物，触发清单刷新
   if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
-  // session.ended 后服务端会正常结束流，主动 close 避免 EventSource 无限重连
-  // （唯一会话终态事件：显式结束与重启找回的历史收尾）
-  if (event.type === 'session.ended') es.close()
+  // session.ended 后服务端会正常结束流，主动 close 避免 EventSource 无限
+  // 重连（唯一会话终态事件：显式结束与重启找回的历史收尾）。es 同步清空：
+  // 重开该标签时按未挂流处理，重新回放
+  if (event.type === 'session.ended') {
+    es.close()
+    setRun(runId, { es: null })
+  }
 }
 
 function attachStream(runId) {
@@ -197,28 +201,32 @@ function makeRun(overrides) {
   }
 }
 
+// 摘要列表拉取与合并（loadRuns 首屏与轮询共用）：新会话补进 runs，order
+// 以服务端为源覆盖。返回列表 order（失败返回 null，调用方各自善后）
+async function fetchSummaries() {
+  const resp = await fetch('/api/runs')
+  if (!resp.ok) return null
+  const { runs } = await resp.json()
+  const map = {}
+  const order = []
+  for (const s of runs ?? []) {
+    map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
+    order.push(s.run_id)
+  }
+  set({ runs: { ...state.runs, ...map }, order })
+  return order
+}
+
 // 启动加载：拉全量 run 摘要恢复会话列表（服务重启后经 transcript 重放，
 // 全部可续聊、ENDED 只读回看）；首屏打开最新一条的标签页。尽力而为，
 // 失败从空开始。ENDED 会话重放完自动关流（session.ended），READY/RUNNING
 // 常驻等待续聊。
 export async function loadRuns() {
   try {
-    const resp = await fetch('/api/runs')
-    if (!resp.ok) return
-    const { runs } = await resp.json()
-    if (!runs?.length) return
-    const map = {}
-    const order = []
-    for (const s of runs) {
-      map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
-      order.push(s.run_id)
-    }
-    set({
-      runs: { ...state.runs, ...map },
-      order,
-      viewRunId: state.viewRunId ?? order[0],
-    })
-    // 首屏：打开最新一条（viewRunId 未定）；后续轮询发现的新会话不自动开
+    const order = await fetchSummaries()
+    if (!order?.length) return
+    set({ viewRunId: state.viewRunId ?? order[0] })
+    // 首屏：打开最新一条（viewRunId 未定）；轮询发现的新会话不自动开
     if (!state.openTabs.includes(state.viewRunId)) openTab(state.viewRunId)
   } catch {
     // 历史加载失败不打断使用：界面从空会话开始
@@ -246,40 +254,37 @@ setInterval(() => pollSummaries(), 5000)
 
 async function pollSummaries() {
   try {
-    const resp = await fetch('/api/runs')
-    if (!resp.ok) return
-    const { runs } = await resp.json()
-    const map = {}
-    const order = []
-    for (const s of runs) {
-      map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
-      order.push(s.run_id)
-    }
-    set({ runs: { ...state.runs, ...map }, order })
+    await fetchSummaries()
   } catch {
     // 轮询失败静默：SSE 在的标签页不受影响，下个周期再试
   }
+}
+
+// 新会话落位（新建/克隆共用）：run 注册、标签页前插并切为查看中
+function adoptNewRun(run) {
+  set({
+    runs: { ...state.runs, [run.runId]: run },
+    order: [run.runId, ...state.order],
+    openTabs: [run.runId, ...state.openTabs],
+    viewRunId: run.runId,
+    submitError: null,
+  })
+  attachStream(run.runId)
 }
 
 // 新建 = 一步创建空会话（READY），无中间表单；新建不受其他会话执行影响
 export async function createRun() {
   try {
     const data = await postJson('/api/runs', {})
-    const run = makeRun({
-      runId: data.run_id,
-      status: data.status,
-      resumedFrom: data.resumed_from ?? null,
-      connection: 'live',
-      startedAt: Date.now(),
-    })
-    set({
-      runs: { ...state.runs, [run.runId]: run },
-      order: [run.runId, ...state.order],
-      openTabs: [run.runId, ...state.openTabs],
-      viewRunId: run.runId,
-      submitError: null,
-    })
-    attachStream(run.runId)
+    adoptNewRun(
+      makeRun({
+        runId: data.run_id,
+        status: data.status,
+        resumedFrom: data.resumed_from ?? null,
+        connection: 'live',
+        startedAt: Date.now(),
+      })
+    )
   } catch (err) {
     fail(`新建会话失败：${conflictMessage(err)}`)
   }
@@ -291,21 +296,15 @@ export async function cloneRun() {
   if (!src) return
   try {
     const data = await postJson(`/api/runs/${src.runId}/clone`, {})
-    const run = makeRun({
-      runId: data.run_id,
-      status: data.status,
-      resumedFrom: data.resumed_from ?? null,
-      connection: 'live',
-      startedAt: Date.now(),
-    })
-    set({
-      runs: { ...state.runs, [run.runId]: run },
-      order: [run.runId, ...state.order],
-      openTabs: [run.runId, ...state.openTabs],
-      viewRunId: run.runId,
-      submitError: null,
-    })
-    attachStream(run.runId)
+    adoptNewRun(
+      makeRun({
+        runId: data.run_id,
+        status: data.status,
+        resumedFrom: data.resumed_from ?? null,
+        connection: 'live',
+        startedAt: Date.now(),
+      })
+    )
   } catch (err) {
     fail(`克隆失败：${conflictMessage(err)}`)
   }
