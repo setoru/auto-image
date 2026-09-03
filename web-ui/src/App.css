@@ -377,3 +377,108 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   background: #fff8c5; border-radius: 0 6px 6px 0; color: var(--ink-2);
 }
 .va-md img { max-width: 100%; }
+
+/* ---------- PROTOTYPE（布局手感验证，验证后整段删除） ---------- */
+
+/* 混合 tab 条：会话 tab（状态点+标题）与文件 tab（图标+文件名）混排 */
+.proto-tabstrip {
+  display: flex; gap: 4px; align-items: center;
+  padding: 4px 10px 0; border-bottom: 1px solid var(--line); font-size: 12.5px;
+  overflow-x: auto; scrollbar-width: thin; flex-shrink: 0;
+}
+.proto-tab {
+  display: inline-flex; gap: 6px; align-items: center;
+  padding: 5px 8px; border: 1px solid transparent; border-bottom: none;
+  border-radius: 6px 6px 0 0; cursor: pointer; white-space: nowrap;
+  color: var(--ink-2); max-width: 200px;
+}
+.proto-tab:hover { background: var(--surface-dim); }
+.proto-tab.on {
+  background: var(--surface); border-color: var(--line); color: var(--ink);
+  position: relative; top: 1px;
+}
+.proto-tab-name { overflow: hidden; text-overflow: ellipsis; }
+.proto-tab-ico { font-size: 11px; }
+
+/* 侧栏（变体 A/C）：头部小 tab 切会话|产物两面板，无卡片框 */
+.proto-side { overflow: hidden; }
+.proto-side-tabs {
+  display: flex; gap: 2px; padding: 6px 8px 0; border-bottom: 1px solid var(--line);
+  flex-shrink: 0;
+}
+.proto-side-tabs button {
+  border: none; background: transparent; border-radius: 6px 6px 0 0;
+  padding: 5px 10px; color: var(--ink-2); font-size: 12.5px;
+  border-bottom: 2px solid transparent;
+}
+.proto-side-tabs button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+.proto-side-body { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px; }
+
+/* 会话列表面板：行 = 状态点 + 标题/二行状态 + 相对时间；已开 tab 弱标 */
+.proto-session-list { display: flex; flex-direction: column; gap: 2px; }
+.proto-session-row {
+  display: flex; gap: 8px; align-items: center;
+  padding: 6px 8px; border-radius: 6px; cursor: pointer;
+}
+.proto-session-row:hover { background: var(--surface-dim); }
+.proto-session-row.opened { background: var(--surface-deep); }
+.proto-session-main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.proto-session-title {
+  font-size: 13px; color: var(--ink); white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
+.proto-session-sub { font-size: 11px; color: var(--ink-3); }
+.proto-session-time { flex-shrink: 0; font-size: 11px; color: var(--ink-3); font-family: var(--mono); }
+
+/* 产物面板：树行已开 tab 弱标记（替换旧 .on 高亮语义） */
+.proto-art-panel { display: flex; flex-direction: column; gap: 6px; }
+.proto-opened-mark { flex-shrink: 0; color: var(--accent); font-size: 8px; line-height: 1; }
+.va-art-item.opened .va-art-name { color: var(--accent); }
+
+/* 消息流贴编辑区（去掉主区 padding，由各变体自理） */
+.proto-stream { padding-bottom: 24px; }
+
+/* 变体 B：活动栏 + 独占面板 */
+.proto-b-body { display: flex; }
+.proto-activity {
+  width: 48px; flex-shrink: 0; display: flex; flex-direction: column; gap: 6px;
+  align-items: center; padding: 10px 0;
+  border-right: 1px solid var(--line); background: var(--surface-dim);
+}
+.proto-activity button {
+  width: 34px; height: 34px; padding: 0; font-size: 16px;
+  border-radius: 8px; border-color: transparent; background: transparent;
+}
+.proto-activity button.on { background: var(--surface); border-color: var(--line); }
+.proto-b-panel {
+  width: 260px; flex-shrink: 0; display: flex; flex-direction: column;
+  border-right: 1px solid var(--line); min-height: 0;
+}
+.proto-b-panel-title {
+  padding: 10px 12px 8px; font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.04em; color: var(--ink-3);
+}
+
+/* 变体 C：tab 栏与 header 同一行（header 压缩 + tab 栏占右侧） */
+.proto-c-toprow { display: flex; border-bottom: 1px solid var(--line); }
+.proto-c-toprow .va-head { border-bottom: none; flex: 0 1 auto; min-width: 0; overflow: hidden; }
+.proto-c-tabs { flex: 1 1 auto; min-width: 0; display: flex; }
+.proto-c-tabs .proto-tabstrip { flex: 1; border-bottom: none; }
+
+/* 底部浮动切换条（明显非产品设计）与原型 toast */
+.proto-switcher {
+  position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+  z-index: 100; display: flex; gap: 10px; align-items: center;
+  padding: 6px 12px; border-radius: 999px;
+  background: #1f2328; color: #fff; font-size: 12.5px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.proto-switcher button {
+  border: none; background: none; color: #fff; padding: 2px 8px; font-size: 12px;
+}
+.proto-switcher button:hover { background: rgba(255, 255, 255, 0.15); }
+.proto-toast {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 101; padding: 6px 14px; border-radius: 8px;
+  background: #1f2328; color: #fff; font-size: 12.5px;
+}
