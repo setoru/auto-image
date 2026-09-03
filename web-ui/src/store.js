@@ -33,6 +33,7 @@ const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 
 
 const RUNNING = 'RUNNING'
 const READY = 'READY'
+const ENDED = 'ENDED'
 // 可继续操作的会话状态集合：判定值与服务端状态机一致，单处维护
 const OPERABLE = [RUNNING, READY]
 export const isOperable = (status) => OPERABLE.includes(status)
@@ -46,13 +47,15 @@ const CONFLICT_HINT = {
 }
 
 const listeners = new Set()
-// 标签页视图随浏览器刷新存活（刷新/误关后标签页与会话一一对应还在），
-// 关闭浏览器窗口即清——重开从最新一条开始。会话已不在（服务端重启丢空
-// 会话等）的标签在 loadRuns 合并列表时自然剪掉。
+// 标签页视图随浏览器刷新与重开存活（刷新/误关/关窗重开后标签页与会话
+// 一一对应还在），服务端已不存在的会话（重启丢了空会话等）在 loadRuns
+// 合并列表时自然剪掉。localStorage（跨窗口、跨浏览器会话）而非
+// sessionStorage：用户故事要求「关闭浏览器后重新打开」标签也还在；共享
+// 服务时各客户端各存各的（存储按本机源隔离），互不沾染。
 const TABS_KEY = 'va-open-tabs'
 function restoreTabs() {
   try {
-    const saved = JSON.parse(sessionStorage.getItem(TABS_KEY) || 'null')
+    const saved = JSON.parse(localStorage.getItem(TABS_KEY) || 'null')
     if (saved && Array.isArray(saved.openTabs)) {
       const openTabs = saved.openTabs.filter((id) => typeof id === 'string')
       const viewRunId = openTabs.includes(saved.viewRunId) ? saved.viewRunId : openTabs[0] ?? null
@@ -66,7 +69,7 @@ function restoreTabs() {
 
 function persistTabs() {
   try {
-    sessionStorage.setItem(TABS_KEY, JSON.stringify({ openTabs: state.openTabs, viewRunId: state.viewRunId }))
+    localStorage.setItem(TABS_KEY, JSON.stringify({ openTabs: state.openTabs, viewRunId: state.viewRunId }))
   } catch {
     // 存储不可用（隐私模式等）：只丢刷新存活，不影响使用
   }
@@ -159,12 +162,15 @@ function onStreamEvent(runId, es, e) {
   // 阶段推进与收尾都可能带来新落盘的产物，触发清单刷新
   if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
   // session.ended 后服务端会正常结束流，主动 close 避免 EventSource 无限
-  // 重连（唯一会话终态事件：显式结束与重启找回的历史收尾）。es 同步清空：
-  // 重开该标签时按未挂流处理，重新回放
-  if (event.type === 'session.ended') {
-    es.close()
-    setRun(runId, { es: null })
-  }
+  // 重连（唯一会话终态事件：显式结束与重启找回的历史收尾）
+  if (event.type === 'session.ended') detachStream(runId, es)
+}
+
+// 关流并清挂载记录：重开该标签时按未挂流处理，重新回放（事件关流与
+// 已知终态的 onerror 关流同一归途）
+function detachStream(runId, es) {
+  es.close()
+  setRun(runId, { es: null, connection: 'idle' })
 }
 
 function attachStream(runId) {
@@ -173,12 +179,10 @@ function attachStream(runId) {
   const es = new EventSource(`/api/runs/${runId}/events`)
   es.onopen = () => setRun(runId, { connection: 'live' })
   es.onerror = () => {
-    // 已知终态（摘要给出 ENDED）而流被服务端正常关闭（重启恢复的墓碑会话
-    // 流里没有 session.ended 事件，回放完毕即关流）：close 止住无限重连，
-    // 与事件关流同一归途
-    if (state.runs[runId]?.status === 'ENDED') {
-      es.close()
-      setRun(runId, { es: null })
+    // 已知终态（摘要给出 ENDED）而流被服务端正常关闭：重启恢复的墓碑
+    // 会话流里没有 session.ended 事件，回放完毕即关流——close 止住无限重连
+    if (state.runs[runId]?.status === ENDED) {
+      detachStream(runId, es)
       return
     }
     if (es.readyState !== EventSource.CLOSED) setRun(runId, { connection: 'reconnecting' })
@@ -207,7 +211,7 @@ function appendTo(runId, event) {
     }
     if (event.type === 'turn.interrupted') patch.status = READY
     if (event.type === 'session.ended') {
-      patch.status = 'ENDED'
+      patch.status = ENDED
       patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
     }
   }

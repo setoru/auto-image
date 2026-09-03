@@ -19,13 +19,12 @@ from .app import create_app
 def main():
     port = int(os.environ.get("WEB_PORT", "8123"))
     host = os.environ.get("WEB_HOST", "127.0.0.1")
-    # 簿记隔离（同一 HOME 下多实例并行时各自落册，避免新旧代码互覆格式）
-    kwargs = {}
-    if state_path := os.environ.get("WEB_STATE_PATH"):
-        kwargs["state_path"] = state_path
     # 工厂形态：应用构造发生在事件循环就绪后——启动段的状态恢复（簿记 +
-    # transcript 重放）在无运行循环环境下会崩
-    uvicorn.run(lambda: create_app(**kwargs), factory=True, host=host, port=port)
+    # transcript 重放）在无运行循环环境下会崩；state_path=None 即默认位置
+    uvicorn.run(
+        lambda: create_app(state_path=os.environ.get("WEB_STATE_PATH")),
+        factory=True, host=host, port=port,
+    )
 
 
 if __name__ == "__main__":
