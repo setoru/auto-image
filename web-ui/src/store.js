@@ -71,11 +71,11 @@ function restoreTabs() {
   return { openTabs: [], viewRunId: null }
 }
 
-// 落盘走 tabState.persistableTabs（文件标签页滤掉、viewRun 落到仍存在的
-// 会话标签页）；形状与旧版本兼容（openTabs 纯 runId 数组 + viewRunId）
+// 落盘走 tabState.persistableTabs（文件标签页滤掉、viewRun 落到记住的
+// 最后激活会话标签页）；形状与旧版本兼容（openTabs 纯 runId 数组 + viewRunId）
 function persistTabs() {
   try {
-    const { openTabs, viewRunId } = tabState.persistableTabs(state.tabs, state.activeKey)
+    const { openTabs, viewRunId } = tabState.persistableTabs(state.tabs, state.activeKey, state.lastSessionKey)
     localStorage.setItem(TABS_KEY, JSON.stringify({ openTabs, viewRunId }))
   } catch {
     // 存储不可用（隐私模式等）：只丢刷新存活，不影响使用
@@ -85,13 +85,15 @@ function persistTabs() {
 // order：全部会话的列表序（含未打开的，服务端列表同源）；tabs：混合标签
 // 栏的标签页数组（{kind:'session',runId} | {kind:'file',relPath,name}），
 // activeKey 复合 key 寻址（session:<runId> / file:<relPath>），决策全走
-// tabState 纯模块，这里只当状态容器
+// tabState 纯模块，这里只当状态容器。lastSessionKey 记住最后激活的会话
+// 标签页——激活文件标签页时控制面（header/输入条）仍绑定它。
 const restored = restoreTabs()
 let state = {
   runs: {},
   order: [],
   tabs: restored.openTabs.map((runId) => ({ kind: 'session', runId })),
   activeKey: restored.viewRunId ? `session:${restored.viewRunId}` : null,
+  lastSessionKey: restored.viewRunId ? `session:${restored.viewRunId}` : null,
   submitError: null,
   now: Date.now(),
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
@@ -107,7 +109,7 @@ setInterval(() => {
 
 function set(patch) {
   state = { ...state, ...patch }
-  if ('tabs' in patch || 'activeKey' in patch) persistTabs()
+  if ('tabs' in patch || 'activeKey' in patch || 'lastSessionKey' in patch) persistTabs()
   listeners.forEach((l) => l())
 }
 
@@ -128,9 +130,9 @@ export function useRunState() {
 }
 
 // 控制面（header/输入条）绑定的会话：激活的是会话标签页 → 它；是文件
-// 或空 → 最后激活的会话标签页。无会话标签页（服务端彻底无会话）为 null。
+// 或空 → 记住的最后激活会话标签页。无会话标签页（服务端彻底无会话）为 null。
 export function controlRunId() {
-  return tabState.controlRunId(state.tabs, state.activeKey)
+  return tabState.controlRunId(state.tabs, state.activeKey, state.lastSessionKey)
 }
 
 // 控制面会话（useControlRun 的数据源钩子；消息流视图在 App 按 tabs 派生）
@@ -287,14 +289,17 @@ export async function loadRuns() {
     // 首屏开最新一条
     const liveTabs = state.tabs.filter((t) => t.kind !== 'session' || !!state.runs[t.runId])
     if (liveTabs.some((t) => t.kind === 'session')) {
-      if (liveTabs.length !== state.tabs.length) set({ tabs: liveTabs })
-      if (!liveTabs.some((t) => tabState.tabKey(t) === state.activeKey)) {
-        set({ activeKey: tabState.tabKey(liveTabs[liveTabs.length - 1]) })
-      }
+      // 剪枝后记忆失效（记住的会话被剪掉）时换记末位会话标签页
+      const remembered = liveTabs.some((t) => tabState.tabKey(t) === state.lastSessionKey)
+      const fallbackKey = tabState.tabKey(liveTabs[liveTabs.length - 1])
+      const patch = { tabs: liveTabs }
+      if (!remembered) patch.lastSessionKey = fallbackKey
+      if (!liveTabs.some((t) => tabState.tabKey(t) === state.activeKey)) patch.activeKey = fallbackKey
+      set(patch)
       for (const t of liveTabs) if (t.kind === 'session') attachStream(t.runId)
     } else {
       // 无存续会话标签页或全被剪空：回到首屏开最新一条
-      set({ tabs: [], activeKey: null })
+      set({ tabs: [], activeKey: null, lastSessionKey: null })
       selectRun(order[0])
     }
   } catch {
@@ -419,14 +424,22 @@ export async function endRun() {
 
 // ---------- 标签页动作（决策归 tabState 纯模块，store 只当状态容器） ----------
 
-// tabState 结果并入状态
+// tabState 结果并入状态；激活的是会话标签页时记住它（控制面记忆——
+// 之后激活文件标签页不换对象）
 function applyTabState({ tabs, activeKey }) {
-  set({ tabs, activeKey })
+  const active = tabs.find((t) => tabState.tabKey(t) === activeKey)
+  const patch = { tabs, activeKey }
+  if (active?.kind === 'session') patch.lastSessionKey = activeKey
+  set(patch)
 }
 
 // 激活标签页（点击标签 / 列表行），不产生服务端动作
 export function activateTab(key) {
-  if (state.tabs.some((t) => tabState.tabKey(t) === key)) set({ activeKey: key })
+  const t = state.tabs.find((x) => tabState.tabKey(x) === key)
+  if (!t) return
+  const patch = { activeKey: key }
+  if (t.kind === 'session') patch.lastSessionKey = key
+  set(patch)
 }
 
 // 打开（或激活既有）会话标签页并挂流：不创建会话、不产生服务端动作
@@ -445,6 +458,11 @@ export function closeTab(key) {
   const prevTabs = state.tabs
   applyTabState(tabState.closeTab(state.tabs, state.activeKey, key))
   if (state.tabs === prevTabs) return // 拦截：没有标签被关
+  // 关掉的是记住的会话标签页且回退目标不是会话（记忆悬空）→ 换记末位
+  if (state.lastSessionKey === key && !state.tabs.some((t) => tabState.tabKey(t) === state.lastSessionKey)) {
+    const last = state.tabs.filter((t) => t.kind === 'session').at(-1)
+    if (last) set({ lastSessionKey: tabState.tabKey(last) })
+  }
   const t = prevTabs.find((x) => tabState.tabKey(x) === key)
   if (t?.kind !== 'session') return
   const run = state.runs[t.runId]

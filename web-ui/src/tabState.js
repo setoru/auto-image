@@ -53,20 +53,21 @@ export function closeTab(tabs, activeKey, key) {
 }
 
 // 控制面（header/输入条）绑定的会话：激活的是会话标签页 → 它；是文件
-// 或空 → 最后激活的会话标签页（会话标签页序列的末位）。无会话标签页
-// （服务端彻底无会话）返回 null。
-export function controlRunId(tabs, activeKey) {
+// 或空 → 最后激活的会话标签页（记住的那枚，不是序列末位——末位只是
+// 「最后被打开」的，开着 A 打字再去看文件时控制面不能静默换绑 B）。
+// 无会话标签页（服务端彻底无会话）返回 null。
+export function controlRunId(tabs, activeKey, lastSessionKey) {
   const active = tabs.find((t) => tabKey(t) === activeKey)
   if (active?.kind === 'session') return active.runId
-  const sessionTabs = tabs.filter((t) => t.kind === 'session')
-  return sessionTabs.length ? sessionTabs[sessionTabs.length - 1].runId : null
+  const last = tabs.find((t) => tabKey(t) === lastSessionKey)
+  return last?.kind === 'session' ? last.runId : null
 }
 
 // 落盘形状：只序列化会话标签页与它的激活态（文件标签页不持久化，刷新
-// 后消失）。激活的是文件标签页时 viewRun 落到仍存在的最后激活会话
-// 标签页。
-export function persistableTabs(tabs, activeKey) {
+// 后消失）。激活的是文件标签页时 viewRun 落到记住的最后激活会话标签页；
+// 记忆失效（防御）回落数组首枚。
+export function persistableTabs(tabs, activeKey, lastSessionKey) {
   const openTabs = tabs.filter((t) => t.kind === 'session').map((t) => t.runId)
-  const viewRunId = controlRunId(tabs, activeKey)
+  const viewRunId = controlRunId(tabs, activeKey, lastSessionKey)
   return { openTabs, viewRunId: openTabs.includes(viewRunId) ? viewRunId : openTabs[0] ?? null }
 }

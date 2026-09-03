@@ -144,42 +144,53 @@ describe('closeTab', () => {
 describe('controlRunId', () => {
   it('激活的是会话标签页 → 它', () => {
     const tabs = [s('run_1'), s('run_2')]
-    expect(controlRunId(tabs, 'session:run_2')).toBe('run_2')
+    expect(controlRunId(tabs, 'session:run_2', 'session:run_1')).toBe('run_2')
   })
 
-  it('激活的是文件标签页 → 最后激活的会话标签页', () => {
+  it('激活的是文件标签页 → 最后激活的会话标签页（记住的那枚，非序列末位）', () => {
     const tabs = [s('run_1'), s('run_2'), f('deploy/a.md', 'a.md')]
-    expect(controlRunId(tabs, 'file:deploy/a.md')).toBe('run_2')
+    // 开着 run_2 时激活过 run_1 再去看文件：控制面仍是 run_1
+    expect(controlRunId(tabs, 'file:deploy/a.md', 'session:run_1')).toBe('run_1')
   })
 
   it('无激活（空）→ 最后激活的会话标签页', () => {
     const tabs = [s('run_1'), s('run_2')]
-    expect(controlRunId(tabs, null)).toBe('run_2')
+    expect(controlRunId(tabs, null, 'session:run_2')).toBe('run_2')
+  })
+
+  it('记忆 key 指向已不存在的标签页（防御）→ null', () => {
+    const tabs = [s('run_1'), f('deploy/a.md', 'a.md')]
+    expect(controlRunId(tabs, 'file:deploy/a.md', 'session:run_x')).toBe(null)
   })
 
   it('无会话标签页 → null', () => {
-    expect(controlRunId([], null)).toBe(null)
+    expect(controlRunId([], null, null)).toBe(null)
   })
 })
 
 describe('persistableTabs', () => {
   it('file: 前缀被滤掉，只剩会话标签页次序', () => {
     const tabs = [s('run_1'), f('deploy/a.md', 'a.md'), s('run_2')]
-    const r = persistableTabs(tabs, 'session:run_2')
+    const r = persistableTabs(tabs, 'session:run_2', 'session:run_2')
     expect(r.openTabs).toEqual(['run_1', 'run_2'])
   })
 
   it('激活的是会话标签页：viewRun 是它', () => {
     const tabs = [s('run_1'), s('run_2')]
-    expect(persistableTabs(tabs, 'session:run_2').viewRunId).toBe('run_2')
+    expect(persistableTabs(tabs, 'session:run_2', 'session:run_2').viewRunId).toBe('run_2')
   })
 
-  it('激活的是文件标签页：viewRun 落到仍存在的最后激活会话标签页', () => {
+  it('激活的是文件标签页：viewRun 落到最后激活的会话标签页', () => {
     const tabs = [s('run_1'), s('run_2'), f('deploy/a.md', 'a.md')]
-    expect(persistableTabs(tabs, 'file:deploy/a.md').viewRunId).toBe('run_2')
+    expect(persistableTabs(tabs, 'file:deploy/a.md', 'session:run_1').viewRunId).toBe('run_1')
+  })
+
+  it('记忆 key 失效（防御）：viewRun 回落数组首枚会话标签页', () => {
+    const tabs = [s('run_1'), s('run_2'), f('deploy/a.md', 'a.md')]
+    expect(persistableTabs(tabs, 'file:deploy/a.md', 'session:run_x').viewRunId).toBe('run_1')
   })
 
   it('无会话标签页：viewRun 为 null', () => {
-    expect(persistableTabs([], null)).toEqual({ openTabs: [], viewRunId: null })
+    expect(persistableTabs([], null, null)).toEqual({ openTabs: [], viewRunId: null })
   })
 })
