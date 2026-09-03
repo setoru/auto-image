@@ -88,11 +88,6 @@ export function lastActivityAt(run) {
   return run?.lastEventAt ?? run?.startedAt ?? 0
 }
 
-// 标签排序：最后活动降序（最近工作的会话总在手边）
-export function byLastActivity(tabIds, runs) {
-  return [...tabIds].sort((a, b) => lastActivityAt(runs[b]) - lastActivityAt(runs[a]))
-}
-
 // 标签状态点：● 执行中 / ○ 等待指令 / ! 最近回合失败 / ■ 已结束。
 // 失败标记由事件流倒序判定：最后一条回合开卷/收尾洗掉它，只有落在流尾的
 // turn.failed 才标 ！；未回放的会话（仅轮询摘要，无事件）只剩状态可用。
@@ -126,9 +121,9 @@ export function fmtAgo(ms, now = Date.now()) {
   return `${Math.floor(h / 24)} 天前`
 }
 
-// RUNNING 标题提示的会话集：排除当前查看中的（正看着的无需提醒）
-export function runningOthers(runs, viewRunId) {
-  return Object.values(runs).filter((r) => r.status === 'RUNNING' && r.runId !== viewRunId)
+// RUNNING 标题提示的会话集：排除控制面会话（正控制着的无需提醒）
+export function runningOthers(runs, controlId) {
+  return Object.values(runs).filter((r) => r.status === 'RUNNING' && r.runId !== controlId)
 }
 
 // ---------- 产物目录树（清单平铺分组 → 嵌套树） ----------

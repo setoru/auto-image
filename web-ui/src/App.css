@@ -102,17 +102,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .dot.tone-bad { background: var(--bad); }
 @keyframes va-pulse { 50% { opacity: 0.35; } }
 
-/* ---- 标签栏（多会话并行视图） ---- */
+/* ---- 混合标签栏（会话与产物文件同栏混排，只压主区） ---- */
 .va-tabsbar {
   display: flex; gap: 4px; align-items: center;
-  padding: 4px 16px 0; border-bottom: 1px solid var(--line); font-size: 12.5px;
-  overflow-x: auto; scrollbar-width: thin;
+  padding: 4px 12px 0; border-bottom: 1px solid var(--line); font-size: 12.5px;
+  overflow-x: auto; scrollbar-width: thin; flex-shrink: 0;
 }
 .va-tab {
   display: inline-flex; gap: 6px; align-items: center;
   padding: 5px 8px; border: 1px solid transparent; border-bottom: none;
   border-radius: 6px 6px 0 0; cursor: pointer; white-space: nowrap;
-  color: var(--ink-2); max-width: 200px;
+  color: var(--ink-2); max-width: 200px; flex-shrink: 0;
 }
 .va-tab:hover { background: var(--surface-dim); }
 .va-tab.on {
@@ -121,6 +121,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 .va-tab-name { overflow: hidden; text-overflow: ellipsis; }
 .va-tab-dot { flex-shrink: 0; width: 8px; height: 8px; border-radius: 50%; }
+/* 文件标签页标识：文件图标（与状态点区分两类标签页），二进制产物换箱形 */
+.va-tab-ico { flex-shrink: 0; font-size: 12px; line-height: 1; }
 /* ● 执行中（呼吸）/ ○ 等待指令 / ! 最近回合失败 / ■ 已结束 */
 .va-tab-dot.running { background: var(--accent); animation: va-pulse 1.2s infinite; }
 .va-tab-dot.ready { background: transparent; border: 1.5px solid var(--ink-3); }
@@ -296,14 +298,7 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 /* 产物面板头（原产物卡标题，去卡片边框后升为面板节标题） */
 .va-art-panel-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); padding: 2px 6px; }
 
-/* ---- 主区 tabs ---- */
-.va-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px; flex-shrink: 0; }
-.va-tabs button {
-  border: none; background: transparent; border-radius: 6px 6px 0 0;
-  padding: 7px 14px; color: var(--ink-2); font-size: 13px; border-bottom: 2px solid transparent;
-}
-.va-tabs button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
-.va-tabs button:disabled { opacity: 0.4; }
+/* ---- 主区编辑体（混合标签栏下方） ---- */
 .va-tab-body { flex: 1; min-height: 0; display: flex; }
 
 /* ---------- 产物：侧栏产物卡（目录树） ---------- */
@@ -337,6 +332,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-art-item:hover { background: var(--surface-dim); }
 .va-art-item.on { background: var(--surface-deep); font-weight: 600; }
 .va-art-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* 已打开为文件标签页的弱标记：文件名右侧一枚小点（复用会话列表弱标记形状） */
+.va-art-opened { flex-shrink: 0; width: 4px; height: 4px; border-radius: 50%; background: var(--ink-3); }
 .va-art-size { flex-shrink: 0; color: var(--ink-3); font-size: 11px; }
 /* 行内 / 组头勾选框与单文件下载按钮 */
 .va-art-check { flex-shrink: 0; margin: 0; accent-color: var(--accent); cursor: pointer; }

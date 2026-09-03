@@ -1,25 +1,29 @@
-// 底部常驻对话输入条：右侧单按钮按状态变形，回车永远等价于点它：
-//   执行中   -> ■ 停止（Esc 等效，只停当前标签页的会话；输入同步禁用，
+// 底部常驻对话输入条（控制面之一）：作用于最后激活的会话标签页——激活
+// 文件标签页时不变不禁用（输入的还是那个会话，不是看到的文件），执行中
+// 回合的「■ 停止」因此在看产物时也在手边。右侧单按钮按状态变形，回车
+// 永远等价于点它：
+//   执行中   -> ■ 停止（Esc 等效，只停控制面会话；输入同步禁用，
 //               想改方向先停止——执行中发送被服务端 409 turn_in_progress 拒）
 //   等待指令 -> 发送
 // 「⑂ 克隆」常驻：READY/ENDED 可点、RUNNING 禁用——克隆基于 transcript
-// 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏「+」。
-import { useState } from 'react'
+// 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏
+// 「+ 新建」。草稿按 runId 独立存 map，切标签页不丢字。
 import * as store from '../store.js'
 import { firstPromptPreview } from '../derive.js'
 
 export default function ChatBar() {
-  const run = store.useViewRun()
-  const [text, setText] = useState('')
+  const run = store.useControlRun()
+  const runId = run?.runId ?? null
+  const text = store.draftOf(runId)
 
-  // 输入只由当前会话状态决定（并行不受其他会话执行影响）；
+  // 输入只由控制面会话状态决定（并行不受其他会话执行影响）；
   // 执行中禁用输入（无排队错觉），停止是显式按钮
   const canInputHere = !!run && store.isOperable(run.status) && run.status !== 'RUNNING'
   const isTerminal = !!run && !store.isOperable(run.status)
 
   const send = async () => {
     if (!text.trim()) return
-    if (await store.send(text)) setText('')
+    if (await store.send(text)) store.clearDraft(runId)
   }
   // 停止只打断后续动作：已提交的云操作不可撤销（与消息流提示一致）
   const act = () => (run?.status === 'RUNNING' ? store.stop() : send())
@@ -60,7 +64,7 @@ export default function ChatBar() {
         value={text}
         disabled={!canInputHere}
         placeholder={placeholder}
-        onChange={(e) => setText(e.target.value)}
+        onChange={(e) => store.setDraft(runId, e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && !btnDisabled && act()}
       />
       <button className="chat-send" onClick={act} disabled={btnDisabled}>

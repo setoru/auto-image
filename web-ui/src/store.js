@@ -1,12 +1,15 @@
 // 共享会话状态：多会话并行（并发上限内的执行中回合可多个），动作经
-// HTTP/SSE 与服务端交互。每个打开的标签页一条常驻 EventSource（attach 后
-// 切走不断，断线浏览器自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；
+// HTTP/SSE 与服务端交互。每个打开的会话标签页一条常驻 EventSource（attach
+// 后切走不断，断线浏览器自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；
 // 已收事件按 seq 去重）。
 //
-// 标签页是纯客户端视图：closeTab 只断 SSE 不断会话，会话仍在列表里，
+// 标签页是纯客户端视图（会话与产物文件同栏混排，开-关-激活-控制面决策
+// 全走 tabState 纯模块）：closeTab 只断 SSE 不断会话，会话仍在列表里，
 // 重新打开（selectRun）恢复原会话；「结束会话」才是服务端动作。
-// 非查看中的标签页状态点/排序由 GET /api/runs 摘要轮询驱动。
+// 非查看中的标签页状态点由 GET /api/runs 摘要轮询驱动。header 与输入条
+// 构成控制面，绑定 controlRunId 解析出的会话——激活文件标签页不换对象。
 import { useSyncExternalStore } from 'react'
+import * as tabState from './tabState.js'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
 // user.message / agent.* / stage.*）
@@ -51,7 +54,8 @@ const listeners = new Set()
 // 一一对应还在），服务端已不存在的会话（重启丢了空会话等）在 loadRuns
 // 合并列表时自然剪掉。localStorage（跨窗口、跨浏览器会话）而非
 // sessionStorage：用户故事要求「关闭浏览器后重新打开」标签也还在；共享
-// 服务时各客户端各存各的（存储按本机源隔离），互不沾染。
+// 服务时各客户端各存各的（存储按本机源隔离），互不沾染。只存会话标签页
+// （含次序与激活态），文件标签页刷新后消失、内容缓存随之丢弃。
 const TABS_KEY = 'va-open-tabs'
 function restoreTabs() {
   try {
@@ -67,38 +71,43 @@ function restoreTabs() {
   return { openTabs: [], viewRunId: null }
 }
 
+// 落盘走 tabState.persistableTabs（文件标签页滤掉、viewRun 落到仍存在的
+// 会话标签页）；形状与旧版本兼容（openTabs 纯 runId 数组 + viewRunId）
 function persistTabs() {
   try {
-    localStorage.setItem(TABS_KEY, JSON.stringify({ openTabs: state.openTabs, viewRunId: state.viewRunId }))
+    const { openTabs, viewRunId } = tabState.persistableTabs(state.tabs, state.activeKey)
+    localStorage.setItem(TABS_KEY, JSON.stringify({ openTabs, viewRunId }))
   } catch {
     // 存储不可用（隐私模式等）：只丢刷新存活，不影响使用
   }
 }
 
-// order：全部会话的列表序（含未打开的，服务端列表同源）；openTabs：当前
-// 打开着的标签页（viewRunId ⊆ openTabs）
-const restoredTabs = restoreTabs()
+// order：全部会话的列表序（含未打开的，服务端列表同源）；tabs：混合标签
+// 栏的标签页数组（{kind:'session',runId} | {kind:'file',relPath,name}），
+// activeKey 复合 key 寻址（session:<runId> / file:<relPath>），决策全走
+// tabState 纯模块，这里只当状态容器
+const restored = restoreTabs()
 let state = {
   runs: {},
   order: [],
-  openTabs: restoredTabs.openTabs,
-  viewRunId: restoredTabs.viewRunId,
+  tabs: restored.openTabs.map((runId) => ({ kind: 'session', runId })),
+  activeKey: restored.viewRunId ? `session:${restored.viewRunId}` : null,
   submitError: null,
   now: Date.now(),
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
-  artifact: null,            // 当前查看中的产物内容（单槽，点击整体替换）
+  artifactCache: {},         // 产物内容多槽缓存（relPath → 条目+content），关标签页不清
   artifactSel: {},           // 批量下载勾选集（relPath → true，随清单刷新剪枝）
   artifactZipping: false,    // zip 打包请求进行中（按钮防重复触发）
 }
 
-// 时长走针仅在查看中的会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
+// 时长走针仅在控制面会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
 setInterval(() => {
-  if (state.runs[state.viewRunId]?.status === RUNNING) set({ now: Date.now() })
+  if (state.runs[controlRunId()]?.status === RUNNING) set({ now: Date.now() })
 }, 1000)
 
 function set(patch) {
   state = { ...state, ...patch }
-  if ('openTabs' in patch || 'viewRunId' in patch) persistTabs()
+  if ('tabs' in patch || 'activeKey' in patch) persistTabs()
   listeners.forEach((l) => l())
 }
 
@@ -118,9 +127,16 @@ export function useRunState() {
   return useSyncExternalStore(subscribe, getState)
 }
 
-// 查看中的会话（header / 输入条 / 消息流都以它为对象）
-export function useViewRun() {
-  return useRunState().runs[state.viewRunId] ?? null
+// 控制面（header/输入条）绑定的会话：激活的是会话标签页 → 它；是文件
+// 或空 → 最后激活的会话标签页。无会话标签页（服务端彻底无会话）为 null。
+export function controlRunId() {
+  return tabState.controlRunId(state.tabs, state.activeKey)
+}
+
+// 控制面会话（useControlRun 的数据源钩子；消息流视图在 App 按 tabs 派生）
+export function useControlRun() {
+  const s = useRunState()
+  return s.runs[controlRunId()] ?? null
 }
 
 async function postJson(url, body) {
@@ -266,17 +282,20 @@ export async function loadRuns() {
   try {
     const order = await fetchSummaries()
     if (!order?.length) return
-    // 存续标签里在列表的保留（服务端重启丢了空会话等则剪掉）；全剪空
-    // （列表换代等）退回首屏开最新一条
-    const live = state.openTabs.filter((id) => state.runs[id])
-    if (live.length) {
-      if (live.length !== state.openTabs.length) set({ openTabs: live })
-      set({ viewRunId: state.runs[state.viewRunId] ? state.viewRunId : live[live.length - 1] })
-      for (const id of live) attachStream(id)
+    // 存续会话标签页里在列表的保留（服务端重启丢了空会话等则剪掉；文件
+    // 标签页防御性保留——启动恢复时本就没有）；全剪空（列表换代等）退回
+    // 首屏开最新一条
+    const liveTabs = state.tabs.filter((t) => t.kind !== 'session' || !!state.runs[t.runId])
+    if (liveTabs.some((t) => t.kind === 'session')) {
+      if (liveTabs.length !== state.tabs.length) set({ tabs: liveTabs })
+      if (!liveTabs.some((t) => tabState.tabKey(t) === state.activeKey)) {
+        set({ activeKey: tabState.tabKey(liveTabs[liveTabs.length - 1]) })
+      }
+      for (const t of liveTabs) if (t.kind === 'session') attachStream(t.runId)
     } else {
-      // 无存续标签或全被剪空：回到首屏开最新一条
-      set({ viewRunId: order[0], openTabs: [] })
-      openTab(order[0])
+      // 无存续会话标签页或全被剪空：回到首屏开最新一条
+      set({ tabs: [], activeKey: null })
+      selectRun(order[0])
     }
   } catch {
     // 历史加载失败不打断使用：界面从空会话开始
@@ -310,15 +329,10 @@ async function pollSummaries() {
   }
 }
 
-// 新会话落位（新建/克隆共用）：run 注册、标签页前插并切为查看中
+// 新会话落位（新建/克隆共用）：run 注册、标签页尾插并切为查看中
 function adoptNewRun(run) {
-  set({
-    runs: { ...state.runs, [run.runId]: run },
-    order: [run.runId, ...state.order],
-    openTabs: [run.runId, ...state.openTabs],
-    viewRunId: run.runId,
-    submitError: null,
-  })
+  set({ runs: { ...state.runs, [run.runId]: run }, order: [run.runId, ...state.order], submitError: null })
+  applyTabState(tabState.openSession(state.tabs, state.activeKey, run.runId))
   attachStream(run.runId)
 }
 
@@ -340,9 +354,9 @@ export async function createRun() {
   }
 }
 
-// 克隆 = 从查看中的会话（READY/ENDED）分叉新会话：事件流转录、标题继承
+// 克隆 = 从控制面会话（READY/ENDED）分叉新会话：事件流转录、标题继承
 export async function cloneRun() {
-  const src = state.runs[state.viewRunId]
+  const src = state.runs[controlRunId()]
   if (!src) return
   try {
     const data = await postJson(`/api/runs/${src.runId}/clone`, {})
@@ -360,9 +374,9 @@ export async function cloneRun() {
   }
 }
 
-// 停止 = CLI 的 Esc：打断查看中会话的当前回合（只作用当前会话，不误停别人）
+// 停止 = CLI 的 Esc：打断控制面会话的当前回合（只作用它，不误停别人）
 export async function stop() {
-  const run = state.runs[state.viewRunId]
+  const run = state.runs[controlRunId()]
   if (!run || run.status !== RUNNING) return
   try {
     await postJson(`/api/runs/${run.runId}/stop`, {})
@@ -371,11 +385,11 @@ export async function stop() {
   }
 }
 
-// 向查看中的会话发指令：执行中发送由服务端 409（turn_in_progress）拒绝，
+// 向控制面会话发指令：执行中发送由服务端 409（turn_in_progress）拒绝，
 // 想改方向先显式停止。返回是否投递成功（失败时输入由调用方保留）。
 export async function send(text) {
   const trimmed = (text ?? '').trim()
-  const run = state.runs[state.viewRunId]
+  const run = state.runs[controlRunId()]
   if (!run || !trimmed) return false
   if (!isOperable(run.status)) {
     // 只读会话（已结束）不静默吞掉输入，给出出路提示
@@ -392,9 +406,9 @@ export async function send(text) {
   }
 }
 
-// 结束查看中的会话（显式、不可逆；执行中或挂起均可）
+// 结束控制面会话（显式、不可逆；执行中或挂起均可）
 export async function endRun() {
-  const run = state.runs[state.viewRunId]
+  const run = state.runs[controlRunId()]
   if (!run || !isOperable(run.status)) return
   try {
     await postJson(`/api/runs/${run.runId}/end`, {})
@@ -403,37 +417,41 @@ export async function endRun() {
   }
 }
 
-// 打开标签页（loadRuns 首屏发现用）：进 openTabs 并挂流
-function openTab(runId) {
-  const run = state.runs[runId]
-  if (!run) return
-  if (!state.openTabs.includes(runId)) set({ openTabs: [...state.openTabs, runId] })
-  attachStream(runId)
+// ---------- 标签页动作（决策归 tabState 纯模块，store 只当状态容器） ----------
+
+// tabState 结果并入状态
+function applyTabState({ tabs, activeKey }) {
+  set({ tabs, activeKey })
 }
 
-// 切换标签页 = 只切查看（挂上 SSE 回放历史），不创建会话、不产生服务端动作
+// 激活标签页（点击标签 / 列表行），不产生服务端动作
+export function activateTab(key) {
+  if (state.tabs.some((t) => tabState.tabKey(t) === key)) set({ activeKey: key })
+}
+
+// 打开（或激活既有）会话标签页并挂流：不创建会话、不产生服务端动作
+// （loadRuns 首屏恢复与列表/标签点击共用）
 export function selectRun(runId) {
   const run = state.runs[runId]
   if (!run) return
-  set({ viewRunId: runId })
-  openTab(runId)
+  applyTabState(tabState.openSession(state.tabs, state.activeKey, runId))
+  attachStream(runId)
 }
 
-// 关闭标签页 = 只关视图：断 SSE、会话仍在列表（摘要轮询继续盯它），
-// 重新打开恢复原会话。关的是查看中的标签页时切到相邻标签
-export function closeTab(runId) {
-  const run = state.runs[runId]
-  if (!run) return
-  if (run.es) {
+// 关闭标签页 = 只关视图：会话标签页断 SSE（会话仍在列表可重开），文件
+// 标签页内容缓存保留（重开瞬开）。断 SSE 在 tabState 判定之后——最后一枚
+// 会话标签页被拦截时原状态返回，不动它的流。
+export function closeTab(key) {
+  const prevTabs = state.tabs
+  applyTabState(tabState.closeTab(state.tabs, state.activeKey, key))
+  if (state.tabs === prevTabs) return // 拦截：没有标签被关
+  const t = prevTabs.find((x) => tabState.tabKey(x) === key)
+  if (t?.kind !== 'session') return
+  const run = state.runs[t.runId]
+  if (run?.es) {
     run.es.close()
-    setRun(runId, { es: null, connection: 'idle' })
+    setRun(t.runId, { es: null, connection: 'idle' })
   }
-  const idx = state.openTabs.indexOf(runId)
-  if (idx === -1) return
-  const openTabs = state.openTabs.filter((id) => id !== runId)
-  let viewRunId = state.viewRunId
-  if (viewRunId === runId) viewRunId = openTabs[Math.min(idx, openTabs.length - 1)] ?? null
-  set({ openTabs, viewRunId })
 }
 
 // ---------- 产物 ----------
@@ -487,36 +505,62 @@ export function clearArtifactSel() {
   set({ artifactSel: {} })
 }
 
-// 查看单个产物：文本内容按需拉取（缓存于全局单槽），产物 tab 渲染；
-// 二进制产物（清单带 binary 标记，如 rpms/ 下的 .rpm 包）不拉内容，
-// 直接以占位视图呈现（元信息来自清单条目）+ 下载按钮。
+// ---------- 输入草稿 ----------
+
+// 每枚会话标签页独立草稿（runId → 文本），切标签页不丢输入中的字；发送
+// 成功后由调用方清空。不入 state 容器（不需要驱动渲染以外的重渲染）
+const drafts = {}
+
+export function draftOf(runId) {
+  return drafts[runId] ?? ''
+}
+
+export function setDraft(runId, text) {
+  drafts[runId] = text
+}
+
+export function clearDraft(runId) {
+  delete drafts[runId]
+}
+
+// ---------- 产物文件标签页 ----------
+
+// 打开产物文件标签页：已有则只激活；新则插当前激活标签页右侧并按需拉取
+// 内容进多槽缓存（relPath → 条目+content）。二进制产物（清单带 binary
+// 标记，如 rpms/ 下的 .rpm 包）不拉内容，占位视图元信息来自清单条目。
 // relPath 形如 "rpm/nginx/1.25.3/nginx-rpm-result.md"；逐段编码（整段
-// encode 会把 / 也编码）
+// encode 会把 / 也编码）。内容缓存与标签页独立——关标签页不清缓存，
+// 重开瞬开。
 export async function openArtifact(relPath, entry) {
   if (entry?.binary) {
     const cut = relPath.lastIndexOf('/')
     set({
-      artifact: {
-        dir: cut > 0 ? relPath.slice(0, cut) : '',
-        name: entry.name,
-        stage: entry.stage ?? null,
-        size: entry.size ?? null,
-        binary: true,
+      artifactCache: {
+        ...state.artifactCache,
+        [relPath]: {
+          dir: cut > 0 ? relPath.slice(0, cut) : '',
+          name: entry.name,
+          stage: entry.stage ?? null,
+          size: entry.size ?? null,
+          binary: true,
+        },
       },
     })
-    return
-  }
-  try {
-    const resp = await fetch(`/api/artifacts/file/${relPath.split('/').map(encodeURIComponent).join('/')}`)
-    const data = await resp.json().catch(() => ({}))
-    if (!resp.ok) {
-      fail(`打开产物失败：${data.detail || `HTTP ${resp.status}`}`)
+  } else if (!state.artifactCache[relPath]) {
+    try {
+      const resp = await fetch(`/api/artifacts/file/${relPath.split('/').map(encodeURIComponent).join('/')}`)
+      const data = await resp.json().catch(() => ({}))
+      if (!resp.ok) {
+        fail(`打开产物失败：${data.detail || `HTTP ${resp.status}`}`)
+        return
+      }
+      set({ artifactCache: { ...state.artifactCache, [relPath]: data } })
+    } catch (err) {
+      fail(`打开产物失败：${err.message}`)
       return
     }
-    set({ artifact: data })
-  } catch (err) {
-    fail(`打开产物失败：${err.message}`)
   }
+  applyTabState(tabState.openFile(state.tabs, state.activeKey, relPath, entry?.name))
 }
 
 // 单文件下载：服务端带附件头，临时 <a> 触发浏览器下载（不离开当前页）

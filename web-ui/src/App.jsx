@@ -1,13 +1,16 @@
 // A 形态 —— Claude Code 会话的 Web 对话界面。
-// 顶部标签栏（多会话并行、独立状态点）+ header（run_id · 会话状态 ·
-// 当前阶段 · 时长 · 结束会话）+ 左侧可收起侧栏（「会话 | 产物」两面板）
-// + 主区双 tab（会话 | 产物）+ 底部常驻对话输入条。
+// header 全宽（run_id · 会话状态 · 当前阶段 · 时长 · 结束会话）+ 左侧可
+// 收起侧栏（「会话 | 产物」两面板）+ 主区混合标签栏（会话与产物文件同栏
+// 混排，只压主区）+ 编辑区（按激活标签页渲染消息流或文件内容）+ 底部
+// 常驻对话输入条。header 与输入条构成控制面，绑定最后激活的会话标签页
+// ——激活文件标签页不换对象。
 import { useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
 import { RUN_STATUS_LABEL, STAGE_LABEL, fmtActive, fmtLastActivity, fmtSize } from './derive.js'
+import { tabKey } from './tabState.js'
 import ChatBar from './components/ChatBar.jsx'
 import Tabs from './components/Tabs.jsx'
 import SidePanel, { StageBadge } from './components/SidePanel.jsx'
@@ -173,11 +176,12 @@ function EventRow({ ev, prev, tools }) {
 // 外部文档/工具输出，同威胁模型，HTML 一律消毒再进 DOM）
 const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false }))
 
-// 产物 tab：markdown 经 marked 渲染（表格/代码块/验证契约 blockquote），json 原文展示
-function ArtifactView() {
-  const artifact = store.useRunState().artifact
+// 产物文件标签页内容：markdown 经 marked 渲染（表格/代码块/验证契约
+// blockquote），json 原文展示。内容来自多槽缓存（relPath → 条目+content），
+// 未就绪（拉取在途）时给加载占位
+function ArtifactView({ artifact }) {
   if (!artifact) {
-    return <div className="artifact-empty">点击左侧产物面板中的文件查看</div>
+    return <div className="artifact-empty">加载中…</div>
   }
   const isJson = artifact.name.endsWith('.json')
   const html = isJson ? '' : mdToHtml(artifact.content)
@@ -222,15 +226,12 @@ function onEndRun(run) {
   store.endRun()
 }
 
-export default function App() {
-  const s = store.useRunState()
-  const run = store.useViewRun()
+// 消息流：激活的会话标签页的事件渲染。ref/scroll 逻辑属主在本层，
+// 组件随标签页切换重挂（key=runId），follow 态自然复位
+function Stream({ run }) {
   const scrollRef = useRef(null)
   const [follow, setFollow] = useState(true)
-  const [sideOpen, setSideOpen] = useState(true)
-  const [tab, setTab] = useState('chat') // chat | artifact
-  const artifactCount = s.artifacts.groups.reduce((n, g) => n + g.files.length, 0)
-  const tools = run ? toolIndex(run.events) : { startedById: new Map(), finishedIds: new Set() }
+  const tools = toolIndex(run.events)
 
   const scrollToBottom = () => {
     const el = scrollRef.current
@@ -238,23 +239,8 @@ export default function App() {
   }
 
   useEffect(() => {
-    setTab('chat')
-    setFollow(true)
-  }, [s.viewRunId])
-
-  useEffect(() => {
     if (follow) scrollToBottom()
-  }, [run?.events.length, follow])
-
-  // 侧栏点开产物后自动切到产物 tab
-  useEffect(() => {
-    if (s.artifact) setTab('artifact')
-  }, [s.artifact?.dir, s.artifact?.name])
-
-  // 切回会话 tab（含从产物查看返回）时滚到最新
-  useEffect(() => {
-    if (tab === 'chat') scrollToBottom()
-  }, [tab, s.viewRunId])
+  }, [run.events.length, follow])
 
   const onScroll = () => {
     const el = scrollRef.current
@@ -262,21 +248,52 @@ export default function App() {
   }
 
   return (
+    <div className="va-stream" ref={scrollRef} onScroll={onScroll}>
+      {run.events.length === 0 && (
+        <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
+      )}
+      {run.events.map((ev, i) => (
+        <EventRow key={ev.seq} ev={ev} prev={run.events[i - 1]} tools={tools} />
+      ))}
+      {!follow && (
+        <button
+          className="va-jump"
+          onClick={() => {
+            setFollow(true)
+            scrollToBottom()
+          }}
+        >
+          ↓ 回到最新
+        </button>
+      )}
+    </div>
+  )
+}
+
+export default function App() {
+  const s = store.useRunState()
+  const control = store.useControlRun()
+  const [sideOpen, setSideOpen] = useState(true)
+  const activeTab = s.tabs.find((t) => tabKey(t) === s.activeKey) ?? null
+  const activeRun = activeTab?.kind === 'session' ? s.runs[activeTab.runId] : null
+  const activeArtifact = activeTab?.kind === 'file' ? s.artifactCache[activeTab.relPath] : null
+
+  return (
     <div className="va-root">
       <header className="va-head">
-        {run ? (
+        {control ? (
           <>
-            <span className="va-runid">{run.runId}</span>
-            <span className={`dot tone-${STATUS_TONE[run.status] ?? 'ok'}`} />
-            <span>{RUN_STATUS_LABEL[run.status]}</span>
-            {run.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
+            <span className="va-runid">{control.runId}</span>
+            <span className={`dot tone-${STATUS_TONE[control.status] ?? 'ok'}`} />
+            <span>{RUN_STATUS_LABEL[control.status]}</span>
+            {control.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
             <span className="va-spacer" />
-            <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : null}</span>
+            <span className="va-stage">{control.stage ? STAGE_LABEL[control.stage] ?? control.stage : null}</span>
             <span className="va-elapsed" title="累计执行：各回合之和，扣除等待输入">
-              总计时间：{fmtActive(run, s.now)}
+              总计时间：{fmtActive(control, s.now)}
             </span>
-            <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(run)}</span>
-            <button onClick={() => onEndRun(run)} disabled={!store.isOperable(run.status)}>
+            <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(control)}</span>
+            <button onClick={() => onEndRun(control)} disabled={!store.isOperable(control.status)}>
               结束会话
             </button>
           </>
@@ -285,67 +302,32 @@ export default function App() {
         )}
       </header>
 
-      <Tabs />
-
       <div className="va-body">
         {sideOpen && <SidePanel />}
-        {run && (
-          <button
-            className={`va-side-pin${sideOpen ? ' open' : ''}`}
-            onClick={() => setSideOpen(!sideOpen)}
-            title={sideOpen ? '收起侧栏' : '展开侧栏'}
-            aria-label={sideOpen ? '收起侧栏' : '展开侧栏'}
-            aria-expanded={sideOpen}
-            aria-controls="task-side"
-          >
-            <span className="va-btn-sym" aria-hidden="true">{sideOpen ? '«' : '»'}</span>
-          </button>
-        )}
+        <button
+          className={`va-side-pin${sideOpen ? ' open' : ''}`}
+          onClick={() => setSideOpen(!sideOpen)}
+          title={sideOpen ? '收起侧栏' : '展开侧栏'}
+          aria-label={sideOpen ? '收起侧栏' : '展开侧栏'}
+          aria-expanded={sideOpen}
+          aria-controls="task-side"
+        >
+          <span className="va-btn-sym" aria-hidden="true">{sideOpen ? '«' : '»'}</span>
+        </button>
         <div className="va-main">
-          {!run ? (
-            <div className="empty-state">
-              <div className="big">未开始</div>
-              <div>点标签栏「+ 新建」创建会话，输入第一条部署指令</div>
-            </div>
-          ) : (
-            <>
-              <div className="va-tabs">
-                <button className={tab === 'chat' ? 'on' : ''} onClick={() => setTab('chat')}>会话</button>
-                <button
-                  className={tab === 'artifact' ? 'on' : ''}
-                  onClick={() => setTab('artifact')}
-                  disabled={artifactCount === 0}
-                >
-                  产物 · {artifactCount}
-                </button>
+          <Tabs />
+          <div className="va-tab-body">
+            {activeTab === null ? (
+              <div className="empty-state">
+                <div className="big">未开始</div>
+                <div>点标签栏「+ 新建」创建会话，输入第一条部署指令</div>
               </div>
-              <div className="va-tab-body">
-                {tab === 'chat' ? (
-                  <div className="va-stream" ref={scrollRef} onScroll={onScroll}>
-                    {run.events.length === 0 && (
-                      <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
-                    )}
-                    {run.events.map((ev, i) => (
-                      <EventRow key={ev.seq} ev={ev} prev={run.events[i - 1]} tools={tools} />
-                    ))}
-                    {!follow && (
-                      <button
-                        className="va-jump"
-                        onClick={() => {
-                          setFollow(true)
-                          scrollToBottom()
-                        }}
-                      >
-                        ↓ 回到最新
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <ArtifactView />
-                )}
-              </div>
-            </>
-          )}
+            ) : activeTab.kind === 'file' ? (
+              <ArtifactView artifact={activeArtifact} />
+            ) : activeRun ? (
+              <Stream key={activeRun.runId} run={activeRun} />
+            ) : null}
+          </div>
         </div>
       </div>
 
