@@ -232,18 +232,50 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   box-shadow: 0 2px 8px rgba(0,0,0,0.15);
 }
 
-/* ---- 任务详情侧栏 ---- */
+/* ---- 侧栏（「会话 | 产物」两面板） ---- */
 .va-side {
   width: 280px; flex-shrink: 0; border-right: 1px solid var(--line);
   display: flex; flex-direction: column; min-height: 0; background: var(--surface);
-  overflow-y: auto;
 }
-.va-side-head {
-  display: flex; justify-content: space-between; align-items: center;
-  padding: 8px 8px 8px 12px; border-bottom: 1px solid var(--line);
-  position: sticky; top: 0; background: var(--surface);
+/* 面板小 tab：切换会话列表与产物树（默认产物，选择持久化 localStorage） */
+.va-side-tabs {
+  display: flex; gap: 4px; flex-shrink: 0;
+  padding: 8px 8px 0; border-bottom: 1px solid var(--line);
 }
-.va-side-title-text { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
+.va-side-tabs button {
+  border: none; background: none; border-radius: 6px 6px 0 0;
+  padding: 5px 10px; font-size: 12px; color: var(--ink-2);
+  border-bottom: 2px solid transparent;
+}
+.va-side-tabs button.on { color: var(--ink); font-weight: 600; border-bottom-color: var(--accent); }
+.va-side-tabs button:hover { background: var(--surface-dim); }
+/* 面板体：可滚动列表容器 */
+.va-side-panel {
+  flex: 1; min-height: 0; overflow-y: auto;
+  padding: 8px; display: flex; flex-direction: column; gap: 6px;
+}
+.va-side-empty { color: var(--ink-3); font-size: 12.5px; padding: 6px 6px; }
+
+/* ---- 会话列表面板 ---- */
+/* 行是 div 而非 button：当前行需要整体高亮且可能含后续交互件 */
+.va-sess-row {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 5px 6px; border-radius: 6px; cursor: pointer;
+}
+.va-sess-row:hover { background: var(--surface-dim); }
+.va-sess-row.on { background: var(--surface-deep); }
+.va-sess-row.on .va-sess-name { font-weight: 600; }
+.va-sess-row .va-tab-dot { margin-top: 5px; }
+.va-sess-main { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 1px; }
+.va-sess-title { display: flex; align-items: center; gap: 5px; min-width: 0; }
+/* 已开为标签页的弱标记：标题前一枚小点 */
+.va-sess-open { flex-shrink: 0; width: 4px; height: 4px; border-radius: 50%; background: var(--ink-3); }
+.va-sess-name {
+  flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  font-size: 13px;
+}
+.va-sess-ago { flex-shrink: 0; color: var(--ink-3); font-size: 11px; font-family: var(--mono); }
+.va-sess-sub { color: var(--ink-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 侧栏开合 pin 钮：竖向把手形（窄宽、加高、pill 圆角），垂直居中、
    随栏缘水平移动——展开时骑缝在 280px 栏界线上，收起时滑回主区左缘
    贴边；图标随态换向（«/»），浮层带影分层 */
@@ -261,11 +293,8 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-side-pin:not(.open) { left: 7px; }
 .va-side-pin:hover { background: var(--surface-dim); color: var(--ink); }
 .va-btn-sym { font-family: var(--mono); line-height: 1; }
-.va-side-cards { padding: 10px; display: flex; flex-direction: column; gap: 10px; }
-.va-card { border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; background: var(--surface); display: flex; flex-direction: column; gap: 4px; }
-.va-card-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); }
-.va-card-big { font-size: 17px; font-weight: 700; }
-.va-card-line { font-size: 12.5px; color: var(--ink-2); }
+/* 产物面板头（原产物卡标题，去卡片边框后升为面板节标题） */
+.va-art-panel-head { font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-3); padding: 2px 6px; }
 
 /* ---- 主区 tabs ---- */
 .va-tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); padding: 0 12px; flex-shrink: 0; }

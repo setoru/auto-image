@@ -1,18 +1,17 @@
 // A 形态 —— Claude Code 会话的 Web 对话界面。
 // 顶部标签栏（多会话并行、独立状态点）+ header（run_id · 会话状态 ·
-// 当前阶段 · 时长 · 结束会话）+ 左侧可收起任务详情栏（产物卡）
+// 当前阶段 · 时长 · 结束会话）+ 左侧可收起侧栏（「会话 | 产物」两面板）
 // + 主区双 tab（会话 | 产物）+ 底部常驻对话输入条。
 import { useEffect, useRef, useState } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { fmtActive, fmtLastActivity, fmtSize, artifactTree, subtreeRels, defaultOpenPaths } from './derive.js'
+import { RUN_STATUS_LABEL, STAGE_LABEL, fmtActive, fmtLastActivity, fmtSize } from './derive.js'
 import ChatBar from './components/ChatBar.jsx'
 import Tabs from './components/Tabs.jsx'
+import SidePanel, { StageBadge } from './components/SidePanel.jsx'
 
-const STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
-const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
 const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 
 // 回合汇总与最后一条 agent 消息同文时降级为轻量状态线：正常完成的回合
@@ -170,142 +169,6 @@ function EventRow({ ev, prev, tools }) {
   return null
 }
 
-// 阶段徽标（产物文件行与产物 tab 头共用）
-function StageBadge({ stage }) {
-  return <span className={`va-art-badge s-${stage.toLowerCase()}`}>{stage}</span>
-}
-
-// 目录树节点：目录行（箭头 + 三态勾选 + 目录名 + 子树文件数）+ 本目录文件
-// 行 + 子目录递归（缩进 + 竖参考线）。目录行勾选作用于子树全部文件（三态：
-// 全选 / 部分半选 / 无）；展开状态由父级 toggles 字典集中管理，未动过的
-// 目录落到 defaultOpen（最新一组所在路径自动展开）。
-function ArtDir({ node, toggles, setToggles, defaultOpen }) {
-  const s = store.useRunState()
-  const open = toggles[node.path] ?? defaultOpen.has(node.path)
-  const rels = subtreeRels(node)
-  const selCount = rels.reduce((n, p) => n + (s.artifactSel[p] ? 1 : 0), 0)
-  const allOn = rels.length > 0 && selCount === rels.length
-  const some = selCount > 0 && !allOn
-  const toggleOpen = () => setToggles({ ...toggles, [node.path]: !open })
-  return (
-    <div className="va-art-group">
-      <div
-        className="va-art-dir-head"
-        role="button"
-        tabIndex={0}
-        onClick={toggleOpen}
-        onKeyDown={(e) => {
-          if (e.key === 'Enter' || e.key === ' ') {
-            e.preventDefault()
-            toggleOpen()
-          }
-        }}
-        title={node.path}
-      >
-        <span className="va-art-dir-arrow">{open ? '▾' : '▸'}</span>
-        <input
-          type="checkbox"
-          className="va-art-check"
-          checked={allOn}
-          ref={(el) => {
-            if (el) el.indeterminate = some
-          }}
-          onChange={() => store.setArtifactSel(rels, !allOn)}
-          onClick={(e) => e.stopPropagation()}
-          title="勾选本目录（含子目录）全部文件"
-        />
-        <span className="va-art-name">{node.name}</span>
-        <span className="va-art-count" title="本目录（含子目录）文件数">{node.count}</span>
-      </div>
-      {open && (
-        <div className="va-art-children">
-          {node.files.map((f) => {
-            const rel = `${node.path}/${f.name}`
-            return (
-              <div
-                key={f.name}
-                role="button"
-                tabIndex={0}
-                className={`va-art-item${s.artifact?.dir === node.path && s.artifact?.name === f.name ? ' on' : ''}`}
-                onClick={() => store.openArtifact(rel, f)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter') store.openArtifact(rel)
-                }}
-                title={f.name}
-              >
-                <input
-                  type="checkbox"
-                  className="va-art-check"
-                  checked={!!s.artifactSel[rel]}
-                  onChange={() => store.toggleArtifactSel(rel)}
-                  onClick={(e) => e.stopPropagation()}
-                />
-                {f.stage ? <StageBadge stage={f.stage} /> : null}
-                <span className="va-art-name">{f.name}</span>
-                <span className="va-art-size">{fmtSize(f.size)}</span>
-                <button
-                  className="va-art-dl"
-                  title="下载此文件"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    store.downloadArtifact(rel)
-                  }}
-                >
-                  ⤓
-                </button>
-              </div>
-            )
-          })}
-          {node.dirs.map((d) => (
-            <ArtDir key={d.path} node={d} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpen} />
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-// 产物卡：deploy/ + rpm/ 全量镜像，目录树形态（服务端平铺分组派生成嵌套
-// 树，子目录按最新落盘在前），点击文件在主区产物 tab 查看。约定命名的带
-// 阶段徽标，非约定的（.v1 备份、杂项）无徽标平铺。每行可勾选（目录行/
-// 卡头可整棵子树全选），单文件 ⤓ 下载、勾选集一键打包 zip 下载。
-// 行与目录头是 div 而非 button：内部还嵌复选框与下载按钮，交互件不嵌套。
-function ArtifactCard() {
-  const s = store.useRunState()
-  const groups = s.artifacts.groups
-  const [toggles, setToggles] = useState({})
-  const roots = artifactTree(groups)
-  const fileCount = roots.reduce((n, r) => n + r.count, 0)
-  const selCount = Object.keys(s.artifactSel).length
-  return (
-    <div className="va-card">
-      <div className="va-card-title">产物 · {fileCount}</div>
-      {fileCount > 0 && (
-        <div className="va-art-tools">
-          <button onClick={() => store.setArtifactSel(roots.flatMap(subtreeRels), true)}>
-            全选
-          </button>
-          <button onClick={() => store.clearArtifactSel()} disabled={selCount === 0}>
-            清空
-          </button>
-          <button
-            className="va-art-zip"
-            onClick={() => store.downloadArtifactZip()}
-            disabled={selCount === 0 || s.artifactZipping}
-            title="勾选的产物打包成一个 zip 下载"
-          >
-            {s.artifactZipping ? '打包中…' : `下载 zip${selCount ? ` (${selCount})` : ''}`}
-          </button>
-        </div>
-      )}
-      {roots.length === 0 && <div className="va-card-line">deploy/ · rpm/ 下暂无产物</div>}
-      {roots.map((r) => (
-        <ArtDir key={r.path} node={r} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpenPaths(groups)} />
-      ))}
-    </div>
-  )
-}
-
 // markdown → 消毒后 HTML 的单点：产物与消息流共用（内容都系 agent 转述
 // 外部文档/工具输出，同威胁模型，HTML 一律消毒再进 DOM）
 const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false }))
@@ -314,7 +177,7 @@ const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false 
 function ArtifactView() {
   const artifact = store.useRunState().artifact
   if (!artifact) {
-    return <div className="artifact-empty">点击左侧产物卡中的文件查看</div>
+    return <div className="artifact-empty">点击左侧产物面板中的文件查看</div>
   }
   const isJson = artifact.name.endsWith('.json')
   const html = isJson ? '' : mdToHtml(artifact.content)
@@ -350,21 +213,6 @@ function ArtifactView() {
         <div className="va-artifact-md va-md" dangerouslySetInnerHTML={{ __html: html }} />
       )}
     </div>
-  )
-}
-
-// 任务详情侧栏：产物卡（阶段与回合汇总常驻 header 与消息流，不重复设卡）。
-// 开合是一枚钮（PinToggle，渲染于 App 内），本组件只承载内容
-function TaskSide({ run }) {
-  return (
-    <aside className="va-side" id="task-side">
-      <div className="va-side-head">
-        <span className="va-side-title-text">任务详情</span>
-      </div>
-      <div className="va-side-cards">
-        <ArtifactCard />
-      </div>
-    </aside>
   )
 }
 
@@ -420,7 +268,7 @@ export default function App() {
           <>
             <span className="va-runid">{run.runId}</span>
             <span className={`dot tone-${STATUS_TONE[run.status] ?? 'ok'}`} />
-            <span>{STATUS_LABEL[run.status]}</span>
+            <span>{RUN_STATUS_LABEL[run.status]}</span>
             {run.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
             <span className="va-spacer" />
             <span className="va-stage">{run.stage ? STAGE_LABEL[run.stage] ?? run.stage : null}</span>
@@ -440,7 +288,7 @@ export default function App() {
       <Tabs />
 
       <div className="va-body">
-        {sideOpen && <TaskSide run={run} />}
+        {sideOpen && <SidePanel />}
         {run && (
           <button
             className={`va-side-pin${sideOpen ? ' open' : ''}`}

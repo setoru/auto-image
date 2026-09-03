@@ -1,5 +1,10 @@
 // 从会话状态派生展示数据（布局自理），与服务端 first_prompt / title 语义对齐
 
+// 会话状态中文（header 状态、会话列表第二行共用；判定值与服务端状态机一致，
+// 单处维护）
+export const RUN_STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
+export const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
+
 // 首条指令原文：服务端摘要的 firstPrompt 优先（重启找回的历史在事件回放前就有名字），
 // 否则取事件流首条 user.message。空会话（含尚未回放的历史）返回 null。
 export function firstPromptText(run) {
@@ -108,6 +113,19 @@ export function runningCount(runs) {
   return Object.values(runs).filter((r) => r.status === 'RUNNING').length
 }
 
+// 相对时间（会话列表右侧）：刚刚 / N 分钟前 / N 小时前 / N 天前；无活动
+// 时刻（异常边界）落空串
+export function fmtAgo(ms, now = Date.now()) {
+  if (!ms) return ''
+  const diff = Math.max(0, now - ms)
+  const min = Math.floor(diff / 60_000)
+  if (min < 1) return '刚刚'
+  if (min < 60) return `${min} 分钟前`
+  const h = Math.floor(min / 60)
+  if (h < 24) return `${h} 小时前`
+  return `${Math.floor(h / 24)} 天前`
+}
+
 // RUNNING 标题提示的会话集：排除当前查看中的（正看着的无需提醒）
 export function runningOthers(runs, viewRunId) {
   return Object.values(runs).filter((r) => r.status === 'RUNNING' && r.runId !== viewRunId)
@@ -141,6 +159,11 @@ export function artifactTree(groups) {
   const tally = (n) => n.files.length + n.dirs.reduce((sum, d) => sum + tally(d), 0)
   for (const r of roots) r.count = tally(r)
   return roots
+}
+
+// 产物文件总数（「产物 · N」的 N，面板头唯一显示位）：清单平铺分组求和
+export function artifactFileCount(groups) {
+  return groups.reduce((n, g) => n + g.files.length, 0)
 }
 
 // 节点子树全部文件的根前缀相对路径（目录行三态勾选 / 卡头全选的勾选集）
