@@ -46,13 +46,40 @@ const CONFLICT_HINT = {
 }
 
 const listeners = new Set()
+// 标签页视图随浏览器刷新存活（刷新/误关后标签页与会话一一对应还在），
+// 关闭浏览器窗口即清——重开从最新一条开始。会话已不在（服务端重启丢空
+// 会话等）的标签在 loadRuns 合并列表时自然剪掉。
+const TABS_KEY = 'va-open-tabs'
+function restoreTabs() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem(TABS_KEY) || 'null')
+    if (saved && Array.isArray(saved.openTabs)) {
+      const openTabs = saved.openTabs.filter((id) => typeof id === 'string')
+      const viewRunId = openTabs.includes(saved.viewRunId) ? saved.viewRunId : openTabs[0] ?? null
+      return { openTabs, viewRunId }
+    }
+  } catch {
+    // 存储不可用/损坏：从空标签集开始，功能照常
+  }
+  return { openTabs: [], viewRunId: null }
+}
+
+function persistTabs() {
+  try {
+    sessionStorage.setItem(TABS_KEY, JSON.stringify({ openTabs: state.openTabs, viewRunId: state.viewRunId }))
+  } catch {
+    // 存储不可用（隐私模式等）：只丢刷新存活，不影响使用
+  }
+}
+
 // order：全部会话的列表序（含未打开的，服务端列表同源）；openTabs：当前
 // 打开着的标签页（viewRunId ⊆ openTabs）
+const restoredTabs = restoreTabs()
 let state = {
   runs: {},
   order: [],
-  openTabs: [],
-  viewRunId: null,
+  openTabs: restoredTabs.openTabs,
+  viewRunId: restoredTabs.viewRunId,
   submitError: null,
   now: Date.now(),
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
@@ -68,6 +95,7 @@ setInterval(() => {
 
 function set(patch) {
   state = { ...state, ...patch }
+  if ('openTabs' in patch || 'viewRunId' in patch) persistTabs()
   listeners.forEach((l) => l())
 }
 
@@ -145,6 +173,14 @@ function attachStream(runId) {
   const es = new EventSource(`/api/runs/${runId}/events`)
   es.onopen = () => setRun(runId, { connection: 'live' })
   es.onerror = () => {
+    // 已知终态（摘要给出 ENDED）而流被服务端正常关闭（重启恢复的墓碑会话
+    // 流里没有 session.ended 事件，回放完毕即关流）：close 止住无限重连，
+    // 与事件关流同一归途
+    if (state.runs[runId]?.status === 'ENDED') {
+      es.close()
+      setRun(runId, { es: null })
+      return
+    }
     if (es.readyState !== EventSource.CLOSED) setRun(runId, { connection: 'reconnecting' })
   }
   for (const type of EVENT_TYPES) es.addEventListener(type, (e) => onStreamEvent(runId, es, e))
@@ -218,16 +254,26 @@ async function fetchSummaries() {
 }
 
 // 启动加载：拉全量 run 摘要恢复会话列表（服务重启后经 transcript 重放，
-// 全部可续聊、ENDED 只读回看）；首屏打开最新一条的标签页。尽力而为，
+// 全部可续聊、ENDED 只读回看）；刷新恢复的标签集里不在列表的会话剪掉，
+// 无存续标签（或全被剪空）时首屏打开最新一条。尽力而为，
 // 失败从空开始。ENDED 会话重放完自动关流（session.ended），READY/RUNNING
 // 常驻等待续聊。
 export async function loadRuns() {
   try {
     const order = await fetchSummaries()
     if (!order?.length) return
-    set({ viewRunId: state.viewRunId ?? order[0] })
-    // 首屏：打开最新一条（viewRunId 未定）；轮询发现的新会话不自动开
-    if (!state.openTabs.includes(state.viewRunId)) openTab(state.viewRunId)
+    // 存续标签里在列表的保留（服务端重启丢了空会话等则剪掉）；全剪空
+    // （列表换代等）退回首屏开最新一条
+    const live = state.openTabs.filter((id) => state.runs[id])
+    if (live.length) {
+      if (live.length !== state.openTabs.length) set({ openTabs: live })
+      set({ viewRunId: state.runs[state.viewRunId] ? state.viewRunId : live[live.length - 1] })
+      for (const id of live) attachStream(id)
+    } else {
+      // 无存续标签或全被剪空：回到首屏开最新一条
+      set({ viewRunId: order[0], openTabs: [] })
+      openTab(order[0])
+    }
   } catch {
     // 历史加载失败不打断使用：界面从空会话开始
   }

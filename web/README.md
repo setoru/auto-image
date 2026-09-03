@@ -19,6 +19,7 @@ python3 -m venv .venv && . .venv/bin/activate \
 python -m web            # 默认 127.0.0.1:8123
 WEB_PORT=8765 python -m web             # 换端口
 WEB_HOST=0.0.0.0 WEB_PORT=8123 python -m web   # 外部可访问（见下）
+WEB_STATE_PATH=/tmp/x.json python -m web       # 簿记隔离（同 HOME 多实例并行）
 ```
 
 默认只监听 127.0.0.1（无认证服务，能访问即能触发真实云操作）。
@@ -139,6 +140,31 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    簿记损坏/缺失一律降级为无墓碑无映射的重放，不阻断启动。kill -9 实测：
    崩溃窗口内丢失的最后一次状态变更由 transcript 存在性校验兜底（读不到
    即丢弃）。
+15. **按回合开合的连接生命周期**（真部署并行实测，两路 nginx/redis 全
+   流水线 + 调研回合）：
+   - **每回合 CLI 启动开销 5-7 秒**（指令发出 → 首条 assistant 响应，
+     transcript 时间戳实测；含 CLI 冷启动 + exa MCP stdio 握手），续聊
+     回合同量级——按回合开合没有摊薄启动的复用红利，也换来回合间零
+     进程；秒级成本对分钟级部署流水线可忽略。
+   - **挂起会话零 CLI 进程**：全实例无 RUNNING 回合时，web 进程名下
+     CLI 子进程为 0（ps 归属实测）；执行中每回合恰一个 CLI 主进程 +
+     一个回合级 exa MCP（npm exec）子进程，标题生成的一次性会话约 8
+     秒即退、不常驻。
+   - **异常回合后新连接续聊完整**：kill -9 服务截断的回合，重启重放呈
+     `turn.interrupted`，随后 resume 同 session 发消息实测可续接（agent
+     记得截断前在做什么）；interrupt 停止后的回合续聊同样完整。回合异
+     常不污染 session 身份——身份在回合 Result 提取，失败回合作废的只
+     是当时的连接。
+   - **并行资源形态**：双部署回合并行 = 两个独立 CLI 进程树（互不共享
+     MCP/连接），内存开销随执行中回合线性增长，并发上限即资源护栏。
+16. **克隆分叉的 transcript 归属**（真部署实测）：克隆回合以源的
+    session_id resume，CLI 把分叉内容**写进同一 transcript 文件**——
+    服务重启按 session 粒度重放时，该文件只映射到克隆会话（身份映射
+    的反向字典只留一个 run_id），源会话从此取不回这个 session 的后续
+    内容（源自身若已无其他回合，重启后整个消失）。与方案「克隆转录段
+    不重建、分叉前历史回源会话可看」的差异：源会话的「可看」只到分叉
+    前的最后自身回合为止，克隆后的内容只在克隆会话里。接受：CLI 会话
+    文件粒度如此，服务端无法把一个 transcript 劈成两个 run 的视图。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。
