@@ -11,6 +11,7 @@
 // 非查看中的标签页状态点由 GET /api/runs 摘要轮询驱动。header 与输入条
 // 构成控制面，绑定 controlRunId 解析出的会话——激活文件标签页不换对象。
 import { useSyncExternalStore } from 'react'
+import { mergeRunEvents } from './eventMerge.js'
 import * as tabState from './tabState.js'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
@@ -178,16 +179,19 @@ function conflictMessage(err) {
 
 // ---------- 事件通道：全局流 + 快照 ----------
 
-// 事件落地（广播帧与快照重放同一归途）：appendTo 的 seq 去重与状态推进，
-// 阶段推进与收尾类事件顺手触发产物清单刷新（幂等无害）
-function ingestEvent(runId, event) {
-  appendTo(runId, event)
-  if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
+// 事件落地（广播帧与快照重放同一归途）：整批交给纯归并入口按 seq
+// 寻址、去重、排序并重算派生状态。阶段推进与收尾类事件顺手触发产物
+// 清单刷新（幂等无害）。
+function ingestEvents(runId, events) {
+  const run = state.runs[runId]
+  if (!run || !events.length) return
+  setRun(runId, mergeRunEvents(run, events))
+  if (events.some((event) => REFRESH_EVENT_TYPES.includes(event.type))) refreshArtifacts()
 }
 
 // 广播帧 → 事件落地：帧带 run_id/seq/ts，先过「该 run 打开着标签页」守卫
 // （未打开的丢弃——侧栏态势由摘要轮询驱动）。ts 在帧顶层（快照路径则是
-// data 里已并入），统一并进 payload——appendTo 读 payload.ts
+// data 里已并入），统一并进 payload——归并入口读 payload.ts
 function onBroadcastFrame(e) {
   let frame
   try {
@@ -196,15 +200,15 @@ function onBroadcastFrame(e) {
     return
   }
   if (!openRunIds().has(frame.run_id)) return
-  ingestEvent(frame.run_id, {
+  ingestEvents(frame.run_id, [{
     seq: frame.seq,
     type: frame.type,
     payload: { ...frame.payload, ts: frame.ts },
-  })
+  }])
 }
 
 // 打开着的会话标签页的 runId 集（分发守卫；loadRuns 剪枝前对恢复标签页
-// 宽进——不存在的 run 的帧会被 appendTo 的存在性守卫拦下）
+// 宽进——不存在的 run 的帧会被 ingestEvents 的存在性守卫拦下）
 function openRunIds() {
   const ids = new Set()
   for (const t of state.tabs) if (t.kind === 'session') ids.add(t.runId)
@@ -236,20 +240,18 @@ function parseSseEvents(text) {
 }
 
 // 拉一次快照补历史：per-run 端点按 Last-Event-ID 重放、重放完即断，重叠
-// 事件由 appendTo 的 seq 去重吸收。run 已不在（服务端重启丢了空会话等）
+// 事件由纯归并入口的 seq 去重吸收。run 已不在（服务端重启丢了空会话等）
 // 静默作罢——摘要轮询会把它从列表剪掉。
 async function loadSnapshot(runId) {
   const run = state.runs[runId]
   if (!run) return
-  const lastSeq = run.events.length ? run.events[run.events.length - 1].seq : 0
+  const lastSeq = run.maxSeq ?? 0
   try {
     const resp = await fetch(`/api/runs/${runId}/events`, { headers: { 'Last-Event-ID': String(lastSeq) } })
     if (!resp.ok) return
     const events = parseSseEvents(await resp.text())
     if (!events.length) return
-    // 快照与全局流两路交错到达，按 seq 排序再走去重吸收
-    events.sort((a, b) => a.seq - b.seq)
-    for (const event of events) ingestEvent(runId, event)
+    ingestEvents(runId, events)
   } catch {
     // 快照失败不打断使用：全局流仍在，断线恢复或下次打开再补
   }
@@ -273,33 +275,6 @@ globalStream.onerror = () => {
   if (globalStream.readyState !== EventSource.CLOSED) set({ connection: 'reconnecting' })
 }
 
-// 状态随事件类型同步推进（快照回放与实时广播同一归途，重复事件按 seq
-// 去重；重放的 stage.changed / 收尾事件会重复触发清单刷新，幂等无害）。
-// 单向推进：历史回放中的回合事件不把 ENDED 会话拉回可操作态。
-function appendTo(runId, event) {
-  const run = state.runs[runId]
-  if (!run || run.events.some((ev) => ev.seq === event.seq)) return
-  const patch = { events: [...run.events, event] }
-  // 最后活动时刻以服务端事件 ts 为准（刷新/快照重放后不漂移）
-  if (event.payload.ts) patch.lastEventAt = event.payload.ts * 1000
-  if (event.type === 'stage.changed') patch.stage = event.payload.stage
-  if (event.type === 'session.title_changed') patch.title = event.payload.title
-  if (event.type === 'turn.completed') patch.result = event.payload.result
-  if (isOperable(run.status) || event.type === 'session.started') {
-    if (event.type === 'turn.started') patch.status = RUNNING
-    // 回合完成/被停止/失败 ≠ 会话结束：一律回 READY
-    if (event.type === 'turn.completed' || event.type === 'turn.stopped' || event.type === 'turn.failed') {
-      patch.status = READY
-    }
-    if (event.type === 'turn.interrupted') patch.status = READY
-    if (event.type === 'session.ended') {
-      patch.status = ENDED
-      patch.endedAt = event.payload.ts ? event.payload.ts * 1000 : Date.now()
-    }
-  }
-  setRun(runId, patch)
-}
-
 // ---------- HTTP ----------
 
 // run 对象的唯一构造点：服务端摘要（loadRuns/轮询）与新建/克隆响应共用
@@ -317,6 +292,7 @@ function makeRun(overrides) {
     startedAt: null,
     endedAt: null,
     lastEventAt: null,
+    maxSeq: 0,
     ...overrides,
   }
 }
@@ -370,9 +346,9 @@ export async function loadRuns() {
 
 // 摘要 → run 的合并（loadRuns 与轮询共用同一形状）
 function mergeSummary(run, s) {
-  return {
+  return mergeRunEvents({
     ...run,
-    status: s.status,
+    status: run.status === ENDED ? ENDED : s.status,
     stage: s.stage,
     firstPrompt: s.first_prompt,
     title: s.title ?? null,
@@ -380,7 +356,7 @@ function mergeSummary(run, s) {
     startedAt: s.started_at * 1000,
     endedAt: s.ended_at ? s.ended_at * 1000 : null,
     lastEventAt: s.last_event_at ? s.last_event_at * 1000 : null,
-  }
+  })
 }
 
 // 摘要轮询：驱动非查看中标签页的状态点与排序（全局流只覆盖打开的标签

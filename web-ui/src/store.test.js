@@ -13,8 +13,12 @@ vi.mock('./store.js', async () => {
 })
 
 const sseListeners = {}
+let globalSource = null
 global.EventSource = class {
-  constructor() { this.readyState = 0 }
+  constructor() {
+    this.readyState = 0
+    globalSource = this
+  }
   addEventListener(type, fn) { (sseListeners[type] ??= []).push(fn) }
   onopen() {}
   onerror() {}
@@ -49,5 +53,74 @@ describe('输入草稿', () => {
     expect(store.draftOf('r1')).toBe('ab')
     store.clearDraft('r1')
     expect(store.draftOf('r1')).toBe('')
+  })
+})
+
+describe('快照与全局流归并', () => {
+  it('tail 先到仍收敛到有序事实，断线补齐游标取最大 seq', async () => {
+    const snapshot = [
+      { seq: 1, type: 'session.started', payload: { ts: 10 } },
+      { seq: 2, type: 'stage.changed', payload: { ts: 20, stage: 'VERIFY' } },
+      { seq: 3, type: 'session.title_changed', payload: { ts: 30, title: '验证 nginx' } },
+      { seq: 4, type: 'turn.completed', payload: { ts: 40, result: '上一回合完成' } },
+      { seq: 5, type: 'turn.started', payload: { ts: 50 } },
+    ]
+    const snapshotText = () => snapshot.map((item) => [
+      `id: ${item.seq}`,
+      `event: ${item.type}`,
+      `data: ${JSON.stringify(item.payload)}`,
+      '',
+    ].join('\n')).join('\n')
+    let replay = ''
+    const snapshotRequests = []
+    fetch.mockImplementation(async (url, options = {}) => {
+      if (url === '/api/runs' && options.method === 'POST') {
+        return {
+          ok: true,
+          json: async () => ({ run_id: 'event-run', status: 'READY', resumed_from: null }),
+        }
+      }
+      if (url === '/api/runs/event-run/events') {
+        snapshotRequests.push(options)
+        const body = replay
+        return { ok: true, text: async () => body }
+      }
+      return { ok: false }
+    })
+
+    await store.createRun()
+    await Promise.resolve()
+    sseListeners['turn.started'][0]({
+      data: JSON.stringify({ run_id: 'event-run', seq: 5, ts: 50, type: 'turn.started', payload: {} }),
+    })
+    replay = snapshotText()
+    globalSource.onopen()
+
+    await vi.waitFor(() => expect(store.getState().runs['event-run'].events).toHaveLength(5))
+    const run = store.getState().runs['event-run']
+    expect({
+      seqs: run.events.map((item) => item.seq),
+      status: run.status,
+      stage: run.stage,
+      title: run.title,
+      result: run.result,
+      lastEventAt: run.lastEventAt,
+    }).toEqual({
+      seqs: [1, 2, 3, 4, 5],
+      status: 'RUNNING',
+      stage: 'VERIFY',
+      title: '验证 nginx',
+      result: '上一回合完成',
+      lastEventAt: 50_000,
+    })
+
+    for (const seq of [7, 6]) {
+      sseListeners['agent.message'][0]({
+        data: JSON.stringify({ run_id: 'event-run', seq, ts: seq * 10, type: 'agent.message', payload: {} }),
+      })
+    }
+    replay = ''
+    globalSource.onopen()
+    expect(snapshotRequests.at(-1).headers['Last-Event-ID']).toBe('7')
   })
 })
