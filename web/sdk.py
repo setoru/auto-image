@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import subprocess
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
@@ -69,7 +70,33 @@ def _exa_env():
 EXA_MCP_SERVER = {"type": "stdio", "command": "npx", "args": ["-y", "exa-mcp-server"], "env": _exa_env()}
 
 
-def default_options(resume_session_id=None):
+@dataclass(frozen=True)
+class SessionStart:
+    """一次部署 SDK 连接的启动意图。
+
+    target_session_id 始终是当前 Web 会话拥有的身份；context_session_id 只说明
+    启动时从哪条 transcript 取上下文。两者相同是普通续接，不同且
+    fork_session=True 是分叉，新建则没有上下文来源。
+    """
+
+    target_session_id: str
+    context_session_id: str | None
+    fork_session: bool
+
+    @classmethod
+    def fresh(cls, target_session_id):
+        return cls(target_session_id, None, False)
+
+    @classmethod
+    def resume(cls, session_id):
+        return cls(session_id, session_id, False)
+
+    @classmethod
+    def fork(cls, target_session_id, source_session_id):
+        return cls(target_session_id, source_session_id, True)
+
+
+def default_options(start=None):
     """SDK options 全配：cwd=项目根，setting_sources 不设（SDK 默认
     user/project/local，project source 从 cwd 发现 .claude/ 与 CLAUDE.md）。
 
@@ -78,10 +105,20 @@ def default_options(resume_session_id=None):
     permission_mode 必须给 bypassPermissions：无值守会话无人批准，SDK 默认
     权限下 Write 与 Bash 写路径一律被拒（真部署实测），产物无法落盘；信任
     边界由运行形态承担（只监听 127.0.0.1 + 系统提示词任务边界）。
-    resume_session_id 给定时从该 SDK 会话的 transcript 续接（resume_from）。"""
+    start 明确给出本会话的目标身份、上下文来源与是否 Fork。普通续接不能
+    同时传 session_id，因此只设置 resume。Fork 意图已由接口表达，但生产
+    映射须与独立 transcript 验证一起交付；在此之前显式拒绝，避免续写源。"""
+    target_session_id = None
+    context_session_id = None
+    if start is not None:
+        if start.fork_session:
+            raise NotImplementedError("Fork SDK 启动尚未实现")
+        target_session_id = start.target_session_id
+        context_session_id = start.context_session_id
     return ClaudeAgentOptions(
         cwd=str(PROJECT_ROOT),
-        resume=resume_session_id,
+        resume=context_session_id,
+        session_id=target_session_id if context_session_id is None else None,
         system_prompt=SYSTEM_PROMPT,
         permission_mode="bypassPermissions",
         tools={"type": "preset", "preset": "claude_code"},
@@ -120,29 +157,43 @@ def title_options():
 
 
 def to_dict(message):
-    """SDK dataclass 消息 → CLI JSON 形状 dict；不认识的消息为零形状
-    （无 type 字段，映射层自然忽略：partial 增量、system、限流等）。"""
+    """SDK dataclass 消息 → CLI JSON 形状 dict；不认识的消息至多保留
+    session_id（无 type 字段，映射层仍自然忽略 partial/system/限流等）。"""
     if isinstance(message, AssistantMessage):
-        return {
+        return _with_session_id(message, {
             "type": "assistant",
             "message": {"content": _blocks(message.content)},
             "parent_tool_use_id": message.parent_tool_use_id,
-        }
+        })
     if isinstance(message, UserMessage):
         content = message.content if isinstance(message.content, list) else []
-        return {
+        return _with_session_id(message, {
             "type": "user",
             "message": {"content": _blocks(content)},
             "parent_tool_use_id": message.parent_tool_use_id,
-        }
+        })
     if isinstance(message, ResultMessage):
-        return {
+        return _with_session_id(message, {
             "type": "result",
             "subtype": message.subtype,
             "result": message.result,
-            "session_id": getattr(message, "session_id", None),
-        }
-    return {}
+        })
+    return _with_session_id(message, {})
+
+
+def _with_session_id(message, payload):
+    """公开 SDK 消息携带的身份统一提升到适配结果顶层。
+
+    Python SDK 的 SystemMessage 把初始化身份放在 data 内，其余已知消息若有
+    session_id 则是直接属性。未知/增量消息仍不产生事件，但身份不会被丢弃。
+    """
+    session_id = getattr(message, "session_id", None)
+    if not session_id:
+        data = getattr(message, "data", None)
+        session_id = data.get("session_id") if isinstance(data, dict) else None
+    if session_id:
+        return {**payload, "session_id": session_id}
+    return payload
 
 
 def _block(block):
@@ -171,8 +222,8 @@ class SDKSession:
     """与会话抽象同形：async with 连接/断开，query/interrupt 透传，
     receive_response 把每回合消息适配成 CLI JSON 形状再产出。"""
 
-    def __init__(self, session_id=None, options=None):
-        self._client = ClaudeSDKClient(options=options or default_options(session_id))
+    def __init__(self, start=None, options=None):
+        self._client = ClaudeSDKClient(options=options or default_options(start))
 
     async def __aenter__(self):
         await self._client.__aenter__()
@@ -193,14 +244,14 @@ class SDKSession:
 
 
 class SDKSessionFactory:
-    def __call__(self, session_id=None):
-        return SDKSession(session_id)
+    def __call__(self, start=None):
+        return SDKSession(start)
 
 
 class TitleSessionFactory:
     """标题生成会话工厂：独立 options（title_options），不经部署会话配置。"""
 
-    def __call__(self, session_id=None):
+    def __call__(self, _start=None):
         return SDKSession(options=title_options())
 
 

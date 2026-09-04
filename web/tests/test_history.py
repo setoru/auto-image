@@ -211,8 +211,11 @@ async def test_replayed_run_serves_as_clone_source():
         resp = await open_stream(client, new_id)
         events, _ = await collect_sse(resp, deadline_s=1.0)
         assert [e["event"] for e in drop_title_events(events)][-1] == "turn.completed"
-        # 工厂收到重放 run 找回的 SDK 会话 id（transcript 里的 session_id）
-        assert app.state.session_factory.session_ids[-1] == sid
+        # Fork 目标使用新身份，并从重放找回的源身份取上下文。
+        start = app.state.session_factory.starts[-1]
+        assert start.target_session_id != sid
+        assert start.context_session_id == sid
+        assert start.fork_session is True
 
 
 async def test_replay_passes_source_times_through():

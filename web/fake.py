@@ -5,8 +5,8 @@
 
 打断行为对齐真 SDK 实测形态（web/README.md 实测记录第 5 条）：回合执行中
 interrupt 后流终止，尾随一条 subtype=error_during_execution、result 为空
-的 Result；新回合 query 时打断状态清零。Result 消息的 session_id 由假会话
-注入（工厂按创建次序分配），供 resume_from 的传参断言使用。
+的 Result；新回合 query 时打断状态清零。部署会话按工厂收到的目标身份回报
+session_id；标题等无启动意图的假会话仍按创建次序分配本地身份。
 """
 import asyncio
 import itertools
@@ -95,13 +95,13 @@ class FakeSession:
 
 
 class FakeSessionFactory:
-    """按创建次序给假会话分配 session_id，并记录工厂与 query 调用。"""
+    """部署会话遵循目标身份，并记录启动意图与 query；无意图会话自分配 id。"""
 
     def __init__(self, script=None, delay=0.0):
         self.script = script
         self.delay = delay
         self._ids = itertools.count(1)
-        self.session_ids = []
+        self.starts = []
         self.sessions = []
 
     @property
@@ -109,12 +109,15 @@ class FakeSessionFactory:
         """全部已创建会话收到的 query，按会话创建与调用顺序展平。"""
         return [query for session in self.sessions for query in session.queries]
 
-    def __call__(self, session_id=None):
-        self.session_ids.append(session_id)
+    def __call__(self, start=None):
+        self.starts.append(start)
         session = FakeSession(
             script=self.script,
             delay=self.delay,
-            session_id=f"sess_fake_{next(self._ids)}",
+            session_id=(
+                start.target_session_id if start is not None
+                else f"sess_fake_{next(self._ids)}"
+            ),
         )
         self.sessions.append(session)
         return session

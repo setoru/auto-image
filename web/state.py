@@ -7,7 +7,7 @@ stage/title/first_prompt/created_at 全部可从 transcript 重放推导（title
 - 墓碑（ended_sessions）：用户显式结束（ENDED）的 session_id 集合——
   transcript 是 CLI 的地盘写不进去，不落册重启后会话就复活成可续聊；
 - 身份映射（sessions）：run_id ↔ session_id——重启后 run_id 稳定，开着的
-  标签页不死。映射只登记有自身 session_id 的会话（首回合落成后）；克隆
+  标签页不死。映射只登记有自身 session_id 的会话（首回合被接受后）；克隆
   未发首条指令的空会话身份天然丢失，按接受处理（无内容可恢复）；
 - 克隆链镜像（clone_sources）：session_id → 来源 run_id——transcript 里
   没有克隆血缘，重放会话凭镜像找回克隆链父指针 resumed_from（前端

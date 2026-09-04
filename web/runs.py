@@ -13,6 +13,7 @@ max_parallel 限制（WEB_MAX_PARALLEL_RUNS，send 时检查——新建、克�
 import asyncio
 import itertools
 import time
+import uuid
 
 READY = "READY"
 RUNNING = "RUNNING"
@@ -42,7 +43,8 @@ class Run:
         self.title = None            # LLM 生成标题（title.py），列表展示优先于截断
         self.turn_task = None        # 当前回合的 asyncio.Task（READY 时为 None）
         self.session = None          # 当前回合的 SDK 连接（回合内非空）
-        self.session_id = None       # SDK 会话 id（回合 Result 提取，resume 用）
+        self.session_id = None       # 本会话拥有的 SDK id（首回合接受时预分配）
+        self.session_confirmed = False  # SDK 消息已回报并确认上述目标身份
         self.resume_session_id = None  # 回合起连接时的续接源（克隆/恢复带入）
         self.resumed_from = None     # 克隆来源 run_id（对外呈现）
         self.clone_source = None     # 克隆血缘（落克隆链镜像用，见 app.persist）
@@ -114,6 +116,10 @@ class RunManager:
             raise Conflict(TURN_IN_PROGRESS)
         if self.running_count() >= self.max_parallel:
             raise Conflict(PARALLEL_LIMIT_REACHED)
+        if run.session_id is None:
+            # SDK 的 --session-id 只接受 UUID。必须在异步回合任务启动及本次
+            # 状态落盘前分配，Result 尚未返回时结束也能留下身份映射与墓碑。
+            run.session_id = str(uuid.uuid4())
         run.status = RUNNING
         # 上回合异常收尾未消费的停止标记作废：停止只作用于当时的回合
         run.stop_requested = False

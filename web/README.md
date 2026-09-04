@@ -8,7 +8,8 @@ Last-Event-ID 重放历史、重放完即断）。
 新建、克隆、标题生成不占名额）；SDK 连接按回合开合，挂起会话零 CLI 进程。
 会话三态 READY / RUNNING / ENDED：回合完成、停止、失败都回 READY 可续聊；
 ENDED 只来自用户显式结束（不可续聊只能克隆，墓碑入册）。执行中发送 409
-`turn_in_progress`（想改方向先显式停止）；克隆 READY/ENDED 源分叉新身份。
+`turn_in_progress`（想改方向先显式停止）；克隆 READY/ENDED 源先建立独立
+Web/目标身份，生产 SDK 的 transcript 分叉映射尚未接入（见实测记录第 16 条）。
 会话为 `ClaudeSDKClient` 真实现（`web/sdk.py` 经工厂注入）；测试注入脚本化
 假实现（`web/fake.py`），不触网、不启动真 SDK。
 
@@ -84,8 +85,9 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 
 1. **消息形状**：`receive_response` 产出 dataclass（`AssistantMessage` 等），
    `sdk.to_dict` 适配成 CLI JSON 形状 dict 后进 `normalize_message`，
-   与假剧本同一条映射路径。每回合终止于 `ResultMessage`，下一轮 `query`
-   在同一连接续聊。
+   与假剧本同一条映射路径。Assistant / Result / partial 直接携带的
+   `session_id` 及 System init 内的同名字段都会保留，供回合尽早确认身份；
+   每回合终止于 `ResultMessage`，下一轮 `query` 在同一连接续聊。
 2. **子 agent thinking 转发**（方案风险点一）：`forward_subagent_text=True`
    下子 agent 的 thinking 块**会**随文本一并转发（parent_tool_use_id 非空的
    assistant 消息里实测出现 ThinkingBlock），子 agent 思维链在前端可见。
@@ -148,8 +150,10 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    run 状态 READY（可续聊可克隆），流无终态收尾事件、快照重放完即断
    等待续聊。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
 14. **服务重启的恢复**（state 簿记 + 真 SDK 实测）：簿记只存墓碑（用户
-   ENDED 的 session_id）、身份映射（run_id ↔ session_id，无 session_id 的
-   首回合未完成 run 天然不入册）与克隆链镜像（session_id → 来源 run_id），每次状态变更即全量原子写。重启后全量
+   ENDED 的 session_id）、身份映射（run_id ↔ session_id）与克隆链镜像
+   （session_id → 来源 run_id），每次状态变更即全量原子写。首回合一经接受
+   便在异步任务启动和首次落盘前预分配 UUID；从未接受回合、没有 transcript
+   的空会话仍不恢复。重启后全量
    transcript 重放：映射命中的以原 run_id 恢复可聊——send 起的回合以
    自身 session resume 新连接（实测恢复后发消息，agent 记得重启前的
    约定）；墓碑会话保持 ENDED 不复活。未收尾回合（末回合无下一条输入
@@ -170,20 +174,22 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    - **异常回合后新连接续聊完整**：kill -9 服务截断的回合，重启重放呈
      `turn.interrupted`，随后 resume 同 session 发消息实测可续接（agent
      记得截断前在做什么）；interrupt 停止后的回合续聊同样完整。回合异
-     常不污染 session 身份——身份在回合 Result 提取，失败回合作废的只
-     是当时的连接。
+     常不污染 session 身份——身份在首回合接受时预分配，并由最早携带
+     session_id 的 SDK 消息确认；不一致会让回合失败而不会改写目标身份。
    - **并行资源形态**：双部署回合并行 = 两个独立 CLI 进程树（互不共享
      MCP/连接），内存开销随执行中回合线性增长，并发上限即资源护栏。
-16. **克隆分叉的 transcript 归属**（真部署实测）：克隆回合以源的
+16. **克隆分叉的 transcript 归属**（分支起点真部署实测、已确认缺陷）：克隆回合以源的
     session_id resume，CLI 把分叉内容**写进同一 transcript 文件**——
     服务重启按 session 粒度重放时，该文件只映射到克隆会话（身份映射
     的反向字典只留一个 run_id），源会话从此取不回这个 session 的后续
     内容（源自身若已无其他回合，重启后整个消失）。与方案「克隆转录段
     不重建、分叉前历史回源会话可看」的差异：源会话的「可看」只到分叉
-    前的最后自身回合为止，克隆后的内容只在克隆会话里。接受：CLI 会话
-    文件粒度如此，服务端无法把一个 transcript 劈成两个 run 的视图。
+    前的最后自身回合为止，克隆后的内容只在克隆会话里。该行为不再接受：
+    工厂接口现已保留独立目标、源上下文和 Fork 意图；真正的 SDK 分叉映射
+    交付前，生产 adapter 显式拒绝该意图，避免继续改写源 transcript。
 
 - CLI stderr 对本环境网关模型名报 `[claude-code:unrecognized_model]`
   警告，不影响会话执行，服务日志如实记录。
 - `include_partial_messages=True` 带来大量 partial/system 消息
-  （`thinking_tokens` 估算等），`to_dict` 将其适配为零形状、不进事件流。
+  （`thinking_tokens` 估算等），`to_dict` 只保留其中可用的 session_id；无
+  `type` 的结果仍不进事件流。

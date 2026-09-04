@@ -2,8 +2,8 @@
 
 无输入队列、无常驻 worker：回合结束连接即还（挂起会话零 CLI 进程），
 回合失败后下一条指令天然是新连接，无需重连机制。会话对象来自可注入工厂
-（生产包装 ClaudeSDKClient，测试注入脚本化假实现），工厂以续接源
-session_id 调用、返回支持 async with 的对象。
+（生产包装 ClaudeSDKClient，测试注入脚本化假实现），工厂收到明确的目标
+身份、上下文来源和 Fork 意图，返回支持 async with 的对象。
 
 停止的服务端语义：request_stop 置 stop_requested 后由 HTTP 层调
 interrupt；run_turn 在回合收尾按该标记区分 turn.stopped 与
@@ -26,6 +26,7 @@ import asyncio
 from .normalize import is_final_result, normalize_message
 from .redact import redact_text
 from .runs import READY
+from .sdk import SessionStart
 
 
 class TurnFailure(Exception):
@@ -46,12 +47,10 @@ async def run_turn(run, text, session_factory, store, on_change=None):
     try:
         store.append(run.run_id, "turn.started", {})
         store.append(run.run_id, "user.message", {"text": text})
-        # resume 源：本会话已建立的 SDK 身份（上回合 Result 提取）优先，
-        # 首回合（克隆/恢复带入的源 session）用 resume_session_id
-        async with session_factory(run.session_id or run.resume_session_id) as session:
+        async with session_factory(_session_start(run)) as session:
             run.session = session
             await session.query(text)
-            await _drain(run, session, store)
+            await _drain(run, session, store, changed)
         run.status = READY
         changed()
     except asyncio.CancelledError:
@@ -63,21 +62,44 @@ async def run_turn(run, text, session_factory, store, on_change=None):
         changed()
 
 
-async def _drain(run, session, store):
+async def _drain(run, session, store, changed):
     """消费一个回合的消息流至 Result（或流结束），收尾交 _finish。"""
     tool_names = {}
     final = None
     async for message in session.receive_response():
+        _confirm_session_id(run, message, changed)
         for etype, payload in normalize_message(message, tool_names):
             store.append(run.run_id, etype, payload)
             if etype == "stage.changed":
                 run.stage = payload["stage"]
         if is_final_result(message):
-            sid = message.get("session_id")
-            if sid:
-                run.session_id = sid
             final = message
     _finish(run, store, final)
+
+
+def _confirm_session_id(run, message, changed):
+    """尽早核对 SDK 回报身份；目标身份是权威，外部值绝不反向改写它。"""
+    session_id = message.get("session_id")
+    if not session_id:
+        return
+    if session_id != run.session_id:
+        raise TurnFailure("SDK 回报的会话身份与预分配目标不一致")
+    if run.session_confirmed:
+        return
+    run.session_confirmed = True
+    # 首回合身份确认后，后续回合只续接本会话自身；Fork 的来源是一次性
+    # 启动上下文，不得延续到第二回合。
+    run.resume_session_id = session_id
+    changed()
+
+
+def _session_start(run):
+    """Run 的身份状态 → 工厂公开启动意图。"""
+    if run.resume_session_id is None:
+        return SessionStart.fresh(run.session_id)
+    if run.resume_session_id == run.session_id:
+        return SessionStart.resume(run.session_id)
+    return SessionStart.fork(run.session_id, run.resume_session_id)
 
 
 def _finish(run, store, message):

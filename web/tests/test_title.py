@@ -108,10 +108,13 @@ async def test_first_message_assigns_title_and_emits_event():
         title_factory=TitleFactory(),
     )
     renames = []
+    rename_confirmations = []
     orig_rename = sdk_mod.rename_session
 
     def fake_rename(session_id, t, directory=None):
         renames.append((session_id, t))
+        run = next(iter(app.state.run_manager.runs.values()))
+        rename_confirmations.append(run.session_confirmed)
 
     sdk_mod.rename_session = fake_rename
     try:
@@ -132,13 +135,15 @@ async def test_first_message_assigns_title_and_emits_event():
             # 摘要带 title 字段
             summary = (await client.get(f"/api/runs/{run_id}")).json()
             assert summary["title"] == "部署 nginx"
-        # transcript 写回：写回等 session_id 就绪（50ms 轮询）后才发生，
+        # transcript 写回：写回等 SDK 确认预分配身份（50ms 轮询）后才发生，
         # 与快照读取是两条独立异步路径——小等收尾
         for _ in range(50):
             if renames:
                 break
             await asyncio.sleep(0.02)
-        assert renames == [("sess_fake_1", "部署 nginx")], renames
+        target = app.state.session_factory.starts[0].target_session_id
+        assert renames == [(target, "部署 nginx")], renames
+        assert rename_confirmations == [True], rename_confirmations
         assert title_calls == [None]  # 标题会话全新起、无续接
     finally:
         sdk_mod.rename_session = orig_rename

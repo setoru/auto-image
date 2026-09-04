@@ -96,7 +96,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
     # 克隆链镜像（session_id → 来源 run_id）：transcript 里没有克隆血缘，
     # 簿记撤销后克隆链父指针无从找回——克隆挂 run.clone_source，persist 时
-    # （首回合建立 session_id 后）随身份映射一并入册；启动时从簿记播种
+    # （首回合接受并预分配 session_id 后）随身份映射一并入册；启动时播种
     clone_sources = {}
 
     def persist():

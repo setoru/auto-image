@@ -106,6 +106,7 @@ def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, r
     run = Run(run_id)
     run.status = ENDED if info.session_id in ended_sessions else READY
     run.session_id = info.session_id
+    run.session_confirmed = True
     run.resume_session_id = info.session_id  # 回合以自身 session 续接
     run.resumed_from = resumed_from.get(info.session_id)
     run.first_prompt = getattr(info, "first_prompt", None)

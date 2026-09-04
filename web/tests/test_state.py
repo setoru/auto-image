@@ -76,7 +76,7 @@ async def test_save_load_roundtrip_tombstones_and_id_map():
         ended = manager.create()          # 显式结束：入墓碑 + 映射
         ended.session_id = "sess_ended"
         ended.status = "ENDED"
-        empty = manager.create()          # 首回合未完成：无 session_id，不入册
+        empty = manager.create()          # 从未接受回合：无 session_id，不入册
         save_state(manager.runs.values(), path)
         state = load_state(path)
         assert state["ended_sessions"] == {"sess_ended"}, state
@@ -160,6 +160,101 @@ async def test_tombstone_sessions_stay_ended_after_restart():
             assert r.status_code == 409 and r.json() == {"detail": "session_not_active"}, r.text
             r = await client.post("/api/runs/run_7/clone")
             assert r.status_code == 200, r.text
+
+
+async def test_first_turn_ended_before_result_keeps_identity_after_restart():
+    """transcript 已形成、Result 未返回时结束，重启仍是原 run 的 ENDED。"""
+    class PendingResultFactory:
+        def __init__(self):
+            self.transcripts = {}
+            self.transcript_ready = asyncio.Event()
+            self.release_result = asyncio.Event()
+            self.starts = []
+
+        def __call__(self, start):
+            self.starts.append(start)
+            factory = self
+
+            class PendingResultSession:
+                async def __aenter__(self):
+                    return self
+
+                async def __aexit__(self, *_exc_info):
+                    return False
+
+                async def query(self, text):
+                    factory.transcripts[start.target_session_id] = [tmsg("user", text)]
+
+                async def receive_response(self):
+                    factory.transcripts[start.target_session_id].append(
+                        tmsg("assistant", [{"type": "text", "text": "已开始部署。"}])
+                    )
+                    yield {
+                        "type": "assistant",
+                        "session_id": start.target_session_id,
+                        "message": {"content": [{"type": "text", "text": "已开始部署。"}]},
+                    }
+                    # yield 返回后回合执行已确认身份；停在 Result 之前。
+                    factory.transcript_ready.set()
+                    await factory.release_result.wait()
+                    yield {
+                        "type": "result",
+                        "subtype": "success",
+                        "result": "完成",
+                        "session_id": start.target_session_id,
+                    }
+
+                async def interrupt(self):
+                    pass
+
+            return PendingResultSession()
+
+    with tempfile.TemporaryDirectory() as d:
+        state_path = str(Path(d) / "state.json")
+        factory = PendingResultFactory()
+        app_a = make_test_app(session_factory=factory, state_path=state_path)
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app=app_a), base_url="http://testserver"
+        ) as client:
+            run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+            response = await client.post(
+                f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"}
+            )
+            assert response.status_code == 200, response.text
+            await asyncio.wait_for(factory.transcript_ready.wait(), timeout=1)
+            target = factory.starts[0].target_session_id
+
+            before_end = load_state(state_path)
+            assert before_end["sessions"] == {run_id: target}, before_end
+            response = await client.post(f"/api/runs/{run_id}/end")
+            assert response.status_code == 200, response.text
+
+        ended_state = load_state(state_path)
+        assert ended_state["sessions"] == {run_id: target}, ended_state
+        assert ended_state["ended_sessions"] == {target}, ended_state
+
+        app_b = restore_app(
+            state_path,
+            [session_info(target, "部署 nginx", 1_700_000_000_000)],
+            factory.transcripts,
+        )
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app=app_b), base_url="http://testserver"
+        ) as client:
+            runs = (await client.get("/api/runs")).json()["runs"]
+            assert [(run["run_id"], run["status"]) for run in runs] == [(run_id, "ENDED")], runs
+            assert all(not run["run_id"].startswith("run_hist_") for run in runs), runs
+
+            events, _ = await collect_sse(await open_stream(client, run_id))
+            assert "user.message" in [event["event"] for event in events], events
+            assert "agent.message" in [event["event"] for event in events], events
+            response = await client.post(
+                f"/api/runs/{run_id}/messages", json={"text": "继续"}
+            )
+            assert response.status_code == 409
+            assert response.json() == {"detail": "session_not_active"}
+            response = await client.post(f"/api/runs/{run_id}/clone")
+            assert response.status_code == 200, response.text
 
 
 async def test_open_turn_interrupted_and_back_to_ready():
@@ -294,7 +389,10 @@ async def test_end_to_end_restart_with_real_state_file():
             r = await client.post(f"/api/runs/{clone}/messages", json={"text": "继续"})
             assert r.status_code == 200, r.text
             await wait_status(client, clone, "READY")
-        assert factory_b.session_ids[-1] == clone_sid
+        resumed = factory_b.starts[-1]
+        assert resumed.target_session_id == clone_sid
+        assert resumed.context_session_id == clone_sid
+        assert resumed.fork_session is False
 
 
 async def test_empty_clone_identity_lost_accepted():

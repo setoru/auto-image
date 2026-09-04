@@ -11,11 +11,13 @@ import json
 import os
 import sys
 import time
+from uuid import UUID
 
 import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
+from web.state import load_state  # noqa: E402
 from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
 
 DELAY = 0.02
@@ -127,6 +129,8 @@ async def test_create_run_returns_ready_immediately():
         assert body["resumed_from"] is None
         r = await client.get(f"/api/runs/{body['run_id']}")
         assert r.json()["status"] == "READY"
+        assert app.state.session_factory.starts == []
+        assert load_state(app.state.test_root / "state.json")["sessions"] == {}
 
 
 async def test_first_message_drives_scripted_turn():
@@ -501,9 +505,13 @@ async def test_clone_from_ready_source():
         await wait_status(client, run_b, "READY")
         events_b2, _ = await collect_sse(await open_stream(client, run_b))
         assert [e["event"] for e in drop_title_events(events_b2)][-1] == "turn.completed"
-        # 工厂收到源的 SDK 会话 id（resume 来源）
-        ids = app.state.session_factory.session_ids
-        assert "sess_fake_1" in ids, ids
+        # 工厂收到 Fork 的目标身份、源上下文身份与显式 Fork 意图。
+        starts = app.state.session_factory.starts
+        source = starts[0].target_session_id
+        forked = starts[-1]
+        assert forked.context_session_id == source, starts
+        assert forked.target_session_id != source, starts
+        assert forked.fork_session is True, starts
 
 
 async def test_clone_from_ended_source():
@@ -541,23 +549,56 @@ async def test_clone_running_source_409():
 
 
 async def test_second_turn_resumes_own_session_id():
-    """续聊续的是本会话自己的 SDK 身份：第二回合工厂收到第一回合 Result
-    提取的 session_id（而非 None 开新对话、也非克隆源重复）。"""
+    """首回合接受时预分配合法身份并落盘；第二回合续接同一身份。"""
     app = make_app()
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         run_id = (await client.post("/api/runs", json={})).json()["run_id"]
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
         await wait_status(client, run_id, "READY")
-        ids_after_first = list(app.state.session_factory.session_ids)
-        assert ids_after_first == [None], ids_after_first  # 首回合全新会话
+        starts = app.state.session_factory.starts
+        assert len(starts) == 1, starts
+        target = starts[0].target_session_id
+        UUID(target)
+        assert starts[0].context_session_id is None
+        assert starts[0].fork_session is False
+        state = load_state(app.state.test_root / "state.json")
+        assert state["sessions"] == {run_id: target}, state
 
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
         await wait_status(client, run_id, "READY")
-        ids = app.state.session_factory.session_ids
-        # 第二回合以第一回合的 session_id resume（fake 工厂按创建次序分配
-        # sess_fake_N，N=1 即首回合建立的身份）
-        assert ids[-1] == "sess_fake_1", ids
+        resumed = app.state.session_factory.starts[-1]
+        assert resumed.target_session_id == target
+        assert resumed.context_session_id == target
+        assert resumed.fork_session is False
+
+
+async def test_sdk_cannot_replace_preallocated_session_identity():
+    """SDK 任一公开消息回报其他身份时，回合失败且既有映射不被改写。"""
+    wrong = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+    script = [
+        {
+            "type": "assistant",
+            "session_id": wrong,
+            "message": {"content": [{"type": "text", "text": "不应进入事件流"}]},
+        },
+        {"type": "result", "subtype": "success", "result": "不应完成"},
+    ]
+    app = make_app(script=script)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "READY")
+
+        target = app.state.session_factory.starts[0].target_session_id
+        assert target != wrong
+        state = load_state(app.state.test_root / "state.json")
+        assert state["sessions"] == {run_id: target}, state
+        events, _ = await collect_sse(await open_stream(client, run_id))
+        assert [e["event"] for e in events][-1] == "turn.failed", events
+        assert "身份" in events[-1]["data"]["message"]
+        assert all(e["event"] != "agent.message" for e in events), events
 
 
 async def test_clone_second_turn_resumes_clone_own_session_id():
@@ -570,14 +611,17 @@ async def test_clone_second_turn_resumes_clone_own_session_id():
         await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
         await wait_status(client, run_a, "READY")
         run_b = (await client.post(f"/api/runs/{run_a}/clone")).json()["run_id"]
-        # 克隆首回合：resume 源 session（sess_fake_1），建立自己的身份
+        # 克隆首回合从源身份取上下文，同时使用自己的预分配目标身份。
         await client.post(f"/api/runs/{run_b}/messages", json={"text": "换个变体"})
         await wait_status(client, run_b, "READY")
-        # 克隆第二回合：续自己的 sess_fake_2
+        clone_target = app.state.session_factory.starts[-1].target_session_id
+        # 克隆第二回合只续自己的身份。
         await client.post(f"/api/runs/{run_b}/messages", json={"text": "继续"})
         await wait_status(client, run_b, "READY")
-        ids = app.state.session_factory.session_ids
-        assert ids[-1] == "sess_fake_2", ids
+        resumed = app.state.session_factory.starts[-1]
+        assert resumed.target_session_id == clone_target
+        assert resumed.context_session_id == clone_target
+        assert resumed.fork_session is False
 
 
 async def test_second_turn_after_completed_turn_replays_new_events_only():
