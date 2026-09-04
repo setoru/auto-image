@@ -105,7 +105,7 @@ let state = {
   artifactZipping: false,    // zip 打包请求进行中（按钮防重复触发）
 }
 
-// 时长走针仅在控制面会话执行期间（挂起与终态冻结，终态另有 endedAt 兜底）
+// 时长走针仅在控制面会话执行期间（挂起与终态冻结，终态由事件求和定格）
 setInterval(() => {
   if (state.runs[controlRunId()]?.status === RUNNING) set({ now: Date.now() })
 }, 1000)

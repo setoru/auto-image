@@ -36,18 +36,15 @@ export function resumeMark(run, runs) {
 }
 
 // 累计执行时长：各回合（user.message → 回合收尾）求和，扣除等待输入的
-// 空档；执行中的回合以 now 收口。终态（ENDED）会话直接用 endedAt -
-// startedAt 兜底定格——跨重载时事件 ts 是服务端时刻，不会随 Date.now()
-// 无限增长。无 endedAt 的终态（异常边界）退回事件求和，未闭合的回合不计。
+// 空档；执行中的回合以 now 收口。终态（ENDED）与挂起同口径——事件 ts
+// 是真实发生时刻（重放/克隆透传源时刻），求和即定格，无需 wall-clock
+// 兜底；终态未闭合的回合（异常边界）不计。
 export function activeSeconds(run, now) {
-  if (run.endedAt != null && run.startedAt != null) {
-    return Math.max(0, Math.floor((run.endedAt - run.startedAt) / 1000))
-  }
   let total = 0
   let turnStart = null
   for (const ev of run.events) {
     if (ev.type === 'user.message') turnStart = (ev.payload.ts ?? run.startedAt / 1000)
-    if ((ev.type === 'turn.completed' || ev.type === 'turn.stopped' || ev.type === 'turn.failed') && turnStart != null) {
+    if ((ev.type === 'turn.completed' || ev.type === 'turn.stopped' || ev.type === 'turn.failed' || ev.type === 'turn.interrupted') && turnStart != null) {
       total += Math.max(0, (ev.payload.ts ?? turnStart) - turnStart)
       turnStart = null
     }
