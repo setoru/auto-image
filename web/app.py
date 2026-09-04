@@ -6,8 +6,9 @@
 发 `: ping` 注释行保活。
 
 停止的执行动作（session.interrupt）在 request_stop 置标记之后由 HTTP 层
-调用——标记与 run_turn 的回合收尾在单线程事件循环上互斥，interrupt
-晚于回合结束时停止目标已达成，无需把失败放大成错误。
+调用；连接仍在建立时只保留停止意图，run_turn 会在 query 前消费。标记与
+回合收尾在单线程事件循环上互斥，interrupt 晚于回合结束时停止目标已达成，
+无需把失败放大成错误。
 
 end 的收尾序列（RUNNING 中）：end 校验 → 取消在飞回合任务（回合不补
 收尾事件）→ session.ended 作为流的最后一条事件 → 墓碑入册。快照端点
@@ -173,6 +174,10 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             manager.begin_turn(run, text)
         except runs_mod.Conflict as exc:
             raise HTTPException(status_code=409, detail=exc.detail) from exc
+        # 接受指令与开卷事件是同一个同步段：成功响应一旦返回，随后到达的
+        # stop 必然排在这两条事实之后，不依赖异步回合任务是否已获调度。
+        store.append(run.run_id, "turn.started", {})
+        store.append(run.run_id, "user.message", {"text": text})
         persist()
         maybe_assign_title(run, text, is_first)
         start_turn(run, text)
@@ -337,8 +342,8 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
 async def _interrupt_if_requested(run):
     """执行 request_stop 排队的打断。回合可能刚好已自然结束（停止目标视为
-    达成）、会话可能尚未建立（回合任务刚起的窗口），两种情形均跳过；
-    打断本身失败不改变服务端权威状态（回合如何收尾以事件流为准）。"""
+    达成）、会话可能尚未建立（此时由回合在 query 前消费），两种情形均
+    无需报错；打断失败不改变服务端权威状态（回合如何收尾以事件流为准）。"""
     if not run.stop_requested or run.session is None:
         return
     try:

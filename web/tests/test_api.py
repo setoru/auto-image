@@ -30,6 +30,81 @@ def make_app(script=None, delay=DELAY, max_parallel_runs=None):
     )
 
 
+class ProbeSession:
+    """可控的 SDK 边界探针：只记录公开生命周期与调用，不窥探回合内部。"""
+
+    def __init__(self, start, behavior):
+        self.start = start
+        self.behavior = behavior
+        self.enter_started = asyncio.Event()
+        self.release_enter = asyncio.Event()
+        self.query_started = asyncio.Event()
+        self.release_response = asyncio.Event()
+        self.query_text = None
+        self.query_calls = 0
+        self.cloud_actions = 0
+        self.interrupt_calls = 0
+        self.stale_interrupt_calls = 0
+        self.active = False
+        self.exited = False
+        self.interrupted = False
+
+    async def __aenter__(self):
+        self.enter_started.set()
+        if self.behavior == "slow_enter":
+            await self.release_enter.wait()
+        self.active = True
+        return self
+
+    async def __aexit__(self, *exc_info):
+        self.active = False
+        self.exited = True
+        return False
+
+    async def query(self, text):
+        self.query_calls += 1
+        self.cloud_actions += 1
+        self.query_text = text
+        self.query_started.set()
+
+    async def interrupt(self):
+        self.interrupt_calls += 1
+        if not self.active:
+            self.stale_interrupt_calls += 1
+            raise RuntimeError("旧 adapter 已退出")
+        self.interrupted = True
+        self.release_response.set()
+
+    async def receive_response(self):
+        if self.behavior == "block":
+            await self.release_response.wait()
+        if self.behavior == "exception":
+            raise RuntimeError("SDK 流异常")
+        subtype = (
+            "error_during_execution"
+            if self.behavior == "failure" or self.interrupted
+            else "success"
+        )
+        yield {
+            "type": "result",
+            "subtype": subtype,
+            "is_error": subtype != "success",
+            "result": "" if subtype != "success" else "完成",
+            "session_id": self.start.target_session_id,
+        }
+
+
+class ProbeSessionFactory:
+    def __init__(self, behaviors):
+        self.behaviors = iter(behaviors)
+        self.sessions = []
+
+    def __call__(self, start):
+        session = ProbeSession(start, next(self.behaviors))
+        self.sessions.append(session)
+        return session
+
+
 def parse_sse_block(block_lines):
     """一个 SSE 事件块（若干属性行）→ {id, event, data}。"""
     ev = {}
@@ -86,6 +161,15 @@ async def wait_status(client, run_id, want, timeout_s=5.0):
             return last
         await asyncio.sleep(0.01)
     raise AssertionError(f"run {run_id} 未进入 {want}，最后状态 {last}")
+
+
+async def wait_until(predicate, timeout_s=1.0):
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("等待条件超时")
 
 
 async def wait_replay(client, run_id, ok, timeout_s=8.0):
@@ -276,16 +360,25 @@ async def test_parallel_runs_execute_independently():
 
 
 async def test_stop_a_does_not_affect_b():
-    app = make_app(delay=0.2)
+    factory = ProbeSessionFactory(["block", "block"])
+    app = make_test_app(session_factory=factory)
     transport = StreamingASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         run_a = (await client.post("/api/runs", json={})).json()["run_id"]
         run_b = (await client.post("/api/runs", json={})).json()["run_id"]
         await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
         await client.post(f"/api/runs/{run_b}/messages", json={"text": "部署 redis"})
+        await wait_until(
+            lambda: len(factory.sessions) == 2
+            and all(session.query_started.is_set() for session in factory.sessions)
+        )
+        by_query = {session.query_text: session for session in factory.sessions}
 
         r = await client.post(f"/api/runs/{run_a}/stop", json={})
         assert r.status_code == 200, r.text
+        assert by_query["部署 nginx"].interrupt_calls == 1
+        assert by_query["部署 redis"].interrupt_calls == 0
+        by_query["部署 redis"].release_response.set()
         await wait_status(client, run_a, "READY", timeout_s=8.0)
         # B 不受 A 停止影响：照常执行到完成
         await wait_status(client, run_b, "READY", timeout_s=8.0)
@@ -415,6 +508,97 @@ async def test_stop_returns_to_ready_and_session_continues():
         assert types.count("turn.completed") == 1, types  # 仅第二回合正常收尾
         ums = [i for i, t in enumerate(types) if t == "user.message"]
         assert ums[0] < types.index("turn.stopped") < ums[1], types
+
+
+async def test_stop_during_sdk_startup_skips_query_and_cloud_actions():
+    factory = ProbeSessionFactory(["slow_enter"])
+    app = make_test_app(session_factory=factory)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        sent = await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署生产环境"})
+        assert sent.status_code == 200, sent.text
+
+        await wait_until(lambda: len(factory.sessions) == 1)
+        session = factory.sessions[0]
+        await asyncio.wait_for(session.enter_started.wait(), timeout=1.0)
+        stopped = await client.post(f"/api/runs/{run_id}/stop", json={})
+        assert stopped.status_code == 200, stopped.text
+        assert session.interrupt_calls == 0
+
+        session.release_enter.set()
+        summary = await wait_status(client, run_id, "READY")
+        assert summary["status"] == "READY"
+        assert session.query_calls == 0
+        assert session.cloud_actions == 0
+
+        events, _ = await collect_sse(await open_stream(client, run_id))
+        types = [event["event"] for event in drop_title_events(events)]
+        assert types == [
+            "session.started",
+            "turn.started",
+            "user.message",
+            "turn.stopped",
+        ], types
+
+
+async def test_closed_adapters_are_not_interrupted_by_later_turns():
+    """所有普通收尾都关闭旧 adapter；下一回合启动期 stop 不会打到旧实例。"""
+    for behavior in ("success", "failure", "exception", "block"):
+        factory = ProbeSessionFactory([behavior, "slow_enter"])
+        app = make_test_app(session_factory=factory)
+        transport = StreamingASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+            await client.post(f"/api/runs/{run_id}/messages", json={"text": f"首回合 {behavior}"})
+            await wait_until(lambda: len(factory.sessions) == 1)
+            first = factory.sessions[0]
+            if behavior == "block":
+                await asyncio.wait_for(first.query_started.wait(), timeout=1.0)
+                stopped = await client.post(f"/api/runs/{run_id}/stop", json={})
+                assert stopped.status_code == 200, stopped.text
+
+            await wait_status(client, run_id, "READY")
+            assert first.exited and not first.active
+            prior_interrupts = first.interrupt_calls
+
+            # READY 上 stop 是无操作，即使旧 adapter 对陈旧调用会主动报错。
+            noop = await client.post(f"/api/runs/{run_id}/stop", json={})
+            assert noop.status_code == 200, noop.text
+            assert first.interrupt_calls == prior_interrupts
+
+            await client.post(f"/api/runs/{run_id}/messages", json={"text": "第二回合"})
+            await wait_until(lambda: len(factory.sessions) == 2)
+            second = factory.sessions[1]
+            await asyncio.wait_for(second.enter_started.wait(), timeout=1.0)
+            stopped = await client.post(f"/api/runs/{run_id}/stop", json={})
+            assert stopped.status_code == 200, stopped.text
+            assert first.interrupt_calls == prior_interrupts
+            assert first.stale_interrupt_calls == 0
+            assert second.interrupt_calls == 0
+
+            second.release_enter.set()
+            await wait_status(client, run_id, "READY")
+            assert second.query_calls == 0
+            assert second.exited and not second.active
+
+
+async def test_end_cancellation_closes_live_adapter():
+    factory = ProbeSessionFactory(["block"])
+    app = make_test_app(session_factory=factory)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "长回合"})
+        await wait_until(lambda: len(factory.sessions) == 1)
+        session = factory.sessions[0]
+        await asyncio.wait_for(session.query_started.wait(), timeout=1.0)
+
+        ended = await client.post(f"/api/runs/{run_id}/end")
+        assert ended.status_code == 200, ended.text
+        assert ended.json()["status"] == "ENDED"
+        assert session.exited and not session.active
+        assert session.interrupt_calls == 0
 
 
 async def test_stop_on_ready_run_is_noop():

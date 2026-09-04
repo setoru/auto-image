@@ -5,10 +5,10 @@
 （生产包装 ClaudeSDKClient，测试注入脚本化假实现），工厂收到明确的目标
 身份、上下文来源和 Fork 意图，返回支持 async with 的对象。
 
-停止的服务端语义：request_stop 置 stop_requested 后由 HTTP 层调
-interrupt；run_turn 在回合收尾按该标记区分 turn.stopped 与
-turn.completed（真 SDK 被打断的回合以 result=None 的 error Result 收尾，
-但判定以本端标记为权威）。
+停止的服务端语义：request_stop 置 stop_requested 后，已有 live adapter
+由 HTTP 层调 interrupt；尚在连接窗口的意图由 run_turn 在 query 前消费。
+回合收尾按该标记区分 turn.stopped 与 turn.completed（真 SDK 被打断的
+回合以 result=None 的 error Result 收尾，但判定以本端标记为权威）。
 
 回合四收尾：turn.started（与 user.message 配对）→ turn.completed（成功
 Result）/ turn.stopped（用户 interrupt）/ turn.failed（错误 Result、连接
@@ -44,26 +44,49 @@ async def run_turn(run, text, session_factory, store, on_change=None):
         if on_change is not None:
             on_change()
 
+    session = None
     try:
-        store.append(run.run_id, "turn.started", {})
-        store.append(run.run_id, "user.message", {"text": text})
+        # stop 可能紧跟发送成功响应到达，早于本任务首次获得调度。此时不必
+        # 创建 SDK adapter，更不能让已接受的指令越过停止意图进入 query。
+        if run.stop_requested:
+            _finish(run, store, None)
+            run.status = READY
+            changed()
+            return
+
+        final = None
         async with session_factory(_session_start(run)) as session:
             run.session = session
-            await session.query(text)
-            await _drain(run, session, store, changed)
+            # __aenter__ 可能包含数秒 CLI/MCP 启动；期间到达的 stop 没有
+            # live adapter 可 interrupt，必须在 query 前由本回合接管。
+            if not run.stop_requested:
+                await session.query(text)
+                final = await _drain(run, session, store, changed)
+        _finish(run, store, final)
         run.status = READY
         changed()
     except asyncio.CancelledError:
         # end 打断在飞回合：回合不补收尾事件，状态由调用方置 ENDED
+        run.stop_requested = False
         raise
     except Exception as exc:  # noqa: BLE001 —— 回合内任何异常都落到 turn.failed，错误摘要过脱敏
         run.status = READY
-        store.append(run.run_id, "turn.failed", {"message": redact_text(str(exc))})
+        if run.stop_requested:
+            # 停止与连接/流异常竞速时，已接受的停止意图仍是本回合的权威
+            # 收尾；_finish 同时消费标记，保证只产生一条 turn.stopped。
+            _finish(run, store, None)
+        else:
+            store.append(run.run_id, "turn.failed", {"message": redact_text(str(exc))})
         changed()
+    finally:
+        # 引用只在本 async context 内有效。身份判断避免未来代码在旧任务
+        # finally 中误清除另一个回合已安装的新 adapter。
+        if session is not None and run.session is session:
+            run.session = None
 
 
 async def _drain(run, session, store, changed):
-    """消费一个回合的消息流至 Result（或流结束），收尾交 _finish。"""
+    """消费一个回合的消息流至 Result（或流结束），返回最终 Result。"""
     tool_names = {}
     final = None
     async for message in session.receive_response():
@@ -74,7 +97,7 @@ async def _drain(run, session, store, changed):
                 run.stage = payload["stage"]
         if is_final_result(message):
             final = message
-    _finish(run, store, final)
+    return final
 
 
 def _confirm_session_id(run, message, changed):
