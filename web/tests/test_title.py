@@ -12,6 +12,7 @@ import json
 import sys
 import tempfile
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 
@@ -19,10 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from web import sdk as sdk_mod  # noqa: E402
 from web import title as title_mod  # noqa: E402
-from web.app import create_app  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSession, FakeSessionFactory  # noqa: E402
 from web.runs import RunManager  # noqa: E402
-from web.tests.support import StreamingASGITransport  # noqa: E402
+from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 
 
@@ -92,16 +92,6 @@ async def test_generate_title_failure_returns_none():
     assert await title_mod.generate_title("x", lambda sid=None: empty) is None
 
 
-def make_app(script=None):
-    return create_app(
-        session_factory=FakeSessionFactory(script=script if script is not None else DEFAULT_SCRIPT, delay=0.02),
-        heartbeat_interval=0.05,
-        list_sessions_fn=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
-        state_path=tempfile.mkdtemp() + "/state.json",
-    )
-
-
 async def test_first_message_assigns_title_and_emits_event():
     """首条消息 → 事件流出现 session.title_changed，摘要与 transcript 写回到位。
     标题会话经独立 title_factory（生产为隔离 cwd 配置，不落项目根 transcript）。"""
@@ -113,13 +103,9 @@ async def test_first_message_assigns_title_and_emits_event():
             title_calls.append(session_id)
             return FakeSession(script=title_script, session_id="sess_title")
 
-    app = create_app(
+    app = make_test_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02),
         title_factory=TitleFactory(),
-        heartbeat_interval=0.05,
-        list_sessions_fn=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
-        state_path=tempfile.mkdtemp() + "/state.json",
     )
     renames = []
     orig_rename = sdk_mod.rename_session
@@ -191,22 +177,19 @@ async def test_second_message_does_not_retitle():
             title_calls.append(session_id)
             return FakeSession(script=[{"type": "result", "subtype": "success", "result": "部署 nginx"}])
 
-    app = create_app(
+    app = make_test_app(
         session_factory=CountingFactory(script=DEFAULT_SCRIPT, delay=0.02),
         title_factory=TitleFactory(),
-        heartbeat_interval=0.05,
-        list_sessions_fn=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
-        state_path=tempfile.mkdtemp() + "/state.json",
     )
-    async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
-        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
-        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
-        await wait_status(client, run_id, "READY")
-        await asyncio.sleep(0.2)  # 等标题会话（无 delay）跑完
-        await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
-        await wait_status(client, run_id, "READY")
-        await asyncio.sleep(0.1)
+    with patch.object(sdk_mod, "rename_session", lambda *_args, **_kwargs: None):
+        async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
+            run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+            await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+            await wait_status(client, run_id, "READY")
+            await asyncio.sleep(0.2)  # 等标题会话（无 delay）跑完
+            await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
+            await wait_status(client, run_id, "READY")
+            await asyncio.sleep(0.1)
     # 部署会话 2 次（按回合开合：每条指令各起新连接）+ 标题会话 1 次；
     # 第二回合不再生成
     assert len(deploy_calls) == 2 and len(title_calls) == 1, (deploy_calls, title_calls)
@@ -236,14 +219,11 @@ async def test_continued_session_does_not_retitle():
     infos = [SimpleNamespace(session_id="sess_x", summary="部署 nginx", last_modified=9_950_000,
                              file_size=1, custom_title=None, first_prompt="部署 nginx",
                              git_branch=None, cwd=None, tag=None, created_at=1_000_000)]
-    app = create_app(
+    app = make_test_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02),
         title_factory=TitleFactory(),
-        heartbeat_interval=0.05,
         list_sessions_fn=lambda: infos,
         get_session_messages_fn=lambda sid: two_turn_transcript(),
-        residual_cli_scan=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
         state_path=str(state_path),
     )
     async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:

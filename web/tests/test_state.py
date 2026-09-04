@@ -12,16 +12,12 @@ import httpx
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from web.app import create_app  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
 from web.runs import READY, RunManager  # noqa: E402
 from web.state import load_state, save_state  # noqa: E402
-from web.tests.support import StreamingASGITransport  # noqa: E402
+from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 from web.tests.test_history import session_info  # noqa: E402
-
-HEARTBEAT = 0.05
-
 
 def tmsg(mtype, content):
     """与 SessionMessage 同形的 transcript 桩条目。"""
@@ -63,13 +59,10 @@ def restore_app(state_path, infos, transcripts, factory=None):
             raise FileNotFoundError(sid)
         return transcripts[sid]
 
-    return create_app(
+    return make_test_app(
         session_factory=factory or FakeSessionFactory(script=DEFAULT_SCRIPT),
-        heartbeat_interval=HEARTBEAT,
         list_sessions_fn=lambda: list(infos),
         get_session_messages_fn=get_messages,
-        residual_cli_scan=lambda: [],
-        scope_config="/nonexistent-scope.yaml",
         state_path=state_path,
     )
 
@@ -267,13 +260,8 @@ async def test_end_to_end_restart_with_real_state_file():
     with tempfile.TemporaryDirectory() as d:
         state_path = str(Path(d) / "state.json")
         # 第一个进程：源会话跑完一回合、克隆再跑一回合、结束源会话
-        app_a = create_app(
+        app_a = make_test_app(
             session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02),
-            heartbeat_interval=HEARTBEAT,
-            list_sessions_fn=lambda: [],
-            get_session_messages_fn=lambda sid: [],
-            residual_cli_scan=lambda: [],
-            scope_config="/nonexistent-scope.yaml",
             state_path=state_path,
         )
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app_a), base_url="http://testserver") as client:
@@ -314,13 +302,8 @@ async def test_empty_clone_identity_lost_accepted():
     重启后身份丢失（接受并锁定）。"""
     with tempfile.TemporaryDirectory() as d:
         state_path = str(Path(d) / "state.json")
-        app_a = create_app(
+        app_a = make_test_app(
             session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02),
-            heartbeat_interval=HEARTBEAT,
-            list_sessions_fn=lambda: [],
-            get_session_messages_fn=lambda sid: [],
-            residual_cli_scan=lambda: [],
-            scope_config="/nonexistent-scope.yaml",
             state_path=state_path,
         )
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app_a), base_url="http://testserver") as client:

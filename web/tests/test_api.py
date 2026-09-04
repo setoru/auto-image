@@ -7,7 +7,6 @@
 运行：python web/tests/test_api.py
 """
 import asyncio
-import tempfile
 import json
 import os
 import sys
@@ -16,21 +15,15 @@ import time
 import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from web.app import create_app  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
-from web.tests.support import StreamingASGITransport  # noqa: E402
+from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
 
-HEARTBEAT = 0.05
 DELAY = 0.02
 
 
 def make_app(script=None, delay=DELAY, max_parallel_runs=None):
-    return create_app(
+    return make_test_app(
         session_factory=FakeSessionFactory(script=script if script is not None else DEFAULT_SCRIPT, delay=delay),
-        heartbeat_interval=HEARTBEAT,
-        list_sessions_fn=lambda: [],  # 不读本机真实 transcript（重启重建见 test_history）
-        scope_config="/nonexistent-scope.yaml",  # 不载真实凭据（脱敏已知值清单隔离）
-        state_path=tempfile.mkdtemp() + "/state.json",  # 簿记隔离（恢复见 test_state）
         max_parallel_runs=max_parallel_runs,
     )
 

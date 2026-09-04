@@ -95,18 +95,26 @@ class FakeSession:
 
 
 class FakeSessionFactory:
-    """按创建次序给假会话分配 session_id，并记录每次调用收到的续接参数。"""
+    """按创建次序给假会话分配 session_id，并记录工厂与 query 调用。"""
 
     def __init__(self, script=None, delay=0.0):
         self.script = script
         self.delay = delay
         self._ids = itertools.count(1)
         self.session_ids = []
+        self.sessions = []
+
+    @property
+    def queries(self):
+        """全部已创建会话收到的 query，按会话创建与调用顺序展平。"""
+        return [query for session in self.sessions for query in session.queries]
 
     def __call__(self, session_id=None):
         self.session_ids.append(session_id)
-        return FakeSession(
+        session = FakeSession(
             script=self.script,
             delay=self.delay,
             session_id=f"sess_fake_{next(self._ids)}",
         )
+        self.sessions.append(session)
+        return session

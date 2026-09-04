@@ -8,7 +8,6 @@
 运行：python web/tests/test_history.py
 """
 import asyncio
-import tempfile
 import logging
 import os
 import sys
@@ -18,17 +17,14 @@ from types import SimpleNamespace
 import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from web.app import create_app  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
-from web.tests.support import StreamingASGITransport  # noqa: E402
+from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 
 
 def drop_title_events(events):
     """剔除 session.title_changed（标题生成异步落流、时序自由，断言不关心）。"""
     return [e for e in events if e["event"] != "session.title_changed"]
-
-HEARTBEAT = 0.05
 
 # 与 SDKSessionInfo 同形：重启重建只读这些字段（first_prompt / custom_title /
 # created_at / last_modified / session_id）
@@ -86,12 +82,8 @@ def deploy_transcript():
 def history_app(infos, messages_fn, times_fn=None, **kwargs):
     """以假 list_sessions / get_session_messages 装配的应用（重启后形态）；
     times_fn 为假时刻表读取器（时刻透传对拍缝），缺省不透传。"""
-    kwargs.setdefault("residual_cli_scan", lambda: [])  # pgrep 路径由专门测试覆盖
-    kwargs.setdefault("scope_config", "/nonexistent-scope.yaml")  # 不载真实凭据（脱敏已知值清单隔离）
-    kwargs.setdefault("state_path", tempfile.mkdtemp() + "/state.json")  # 簿记隔离（恢复见 test_state）
-    return create_app(
+    return make_test_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT),
-        heartbeat_interval=HEARTBEAT,
         list_sessions_fn=lambda: list(infos),
         get_session_messages_fn=messages_fn,
         transcript_times_fn=times_fn or (lambda sid: {}),
@@ -101,13 +93,8 @@ def history_app(infos, messages_fn, times_fn=None, **kwargs):
 
 def plain_app(**kwargs):
     """无历史的常规应用（列表摘要等行为测试用）。"""
-    kwargs.setdefault("residual_cli_scan", lambda: [])
-    kwargs.setdefault("scope_config", "/nonexistent-scope.yaml")
-    kwargs.setdefault("state_path", tempfile.mkdtemp() + "/state.json")
-    return create_app(
+    return make_test_app(
         session_factory=FakeSessionFactory(script=DEFAULT_SCRIPT),
-        heartbeat_interval=HEARTBEAT,
-        list_sessions_fn=lambda: [],
         **kwargs,
     )
 
