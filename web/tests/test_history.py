@@ -18,7 +18,7 @@ import httpx
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
-from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
+from web.tests.support import StreamingASGITransport, async_client, make_test_app  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 
 
@@ -122,6 +122,89 @@ async def test_list_endpoint_returns_summaries_without_clearing_old_runs():
         third = (await client.post("/api/runs", json={})).json()["run_id"]
         runs = (await client.get("/api/runs")).json()["runs"]
         assert {x["run_id"] for x in runs} == {empty, busy, third}
+
+
+async def test_list_endpoint_sorts_by_latest_event_not_creation_time():
+    """较早会话产生新事件后升到较新但不活跃的会话前。"""
+    app = plain_app()
+    async with async_client(app) as client:
+        older = (await client.post("/api/runs", json={})).json()["run_id"]
+        newer = (await client.post("/api/runs", json={})).json()["run_id"]
+
+        await client.post(
+            f"/api/runs/{older}/messages",
+            json={"text": "继续较早会话的部署"},
+        )
+        await wait_status(client, older, "READY")
+
+        runs = (await client.get("/api/runs")).json()["runs"]
+        assert [run["run_id"] for run in runs] == [older, newer], runs
+
+
+async def test_list_endpoint_falls_back_to_end_then_creation_time():
+    """旧摘要缺活动时刻时，ENDED 取结束时刻，空会话取创建时刻。"""
+    app = plain_app()
+    async with async_client(app) as client:
+        ended = (await client.post("/api/runs", json={})).json()["run_id"]
+        empty = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{ended}/end")
+
+        # 模拟 last_event_at 尚未进入摘要的旧进程内数据；观测仍只走 HTTP。
+        manager = app.state.run_manager
+        for run_id in (ended, empty):
+            manager.get(run_id).last_event_at = None
+
+        runs = (await client.get("/api/runs")).json()["runs"]
+        assert [run["run_id"] for run in runs] == [ended, empty], runs
+        by_id = {run["run_id"]: run for run in runs}
+        assert by_id[ended]["ended_at"] is not None
+        assert by_id[empty]["ended_at"] is None
+        assert all(run["last_event_at"] is None for run in runs)
+        assert set(runs[0]) == {
+            "run_id", "status", "stage", "first_prompt", "title",
+            "started_at", "ended_at", "last_event_at", "resumed_from",
+        }
+
+
+async def test_list_endpoint_breaks_activity_ties_by_creation_time():
+    """活动时刻相同时，较晚创建的会话稳定在前。"""
+    infos = [
+        session_info(
+            "aaaaaaaa-0000-0000-0000-000000000000", "较早会话", 1_000, last_ms=5_000,
+        ),
+        session_info(
+            "bbbbbbbb-0000-0000-0000-000000000000", "较晚会话", 2_000, last_ms=5_000,
+        ),
+    ]
+    app = history_app(infos, lambda _sid: [msg("user", "部署 nginx")])
+    async with async_client(app) as client:
+        runs = (await client.get("/api/runs")).json()["runs"]
+        assert [run["run_id"] for run in runs] == [
+            "run_hist_bbbbbbbb",
+            "run_hist_aaaaaaaa",
+        ], runs
+
+
+async def test_list_endpoint_breaks_exact_ties_by_run_id():
+    """活动与创建时刻全相同时，发现顺序和重复轮询都不改变列表。"""
+    info_a = session_info(
+        "aaaaaaaa-0000-0000-0000-000000000000", "相同会话", 1_000, last_ms=5_000,
+    )
+    info_b = session_info(
+        "bbbbbbbb-0000-0000-0000-000000000000", "相同会话", 1_000, last_ms=5_000,
+    )
+    expected = ["run_hist_bbbbbbbb", "run_hist_aaaaaaaa"]
+
+    async def poll_orders(infos):
+        app = history_app(infos, lambda _sid: [msg("user", "部署 nginx")])
+        async with async_client(app) as client:
+            return [
+                [run["run_id"] for run in (await client.get("/api/runs")).json()["runs"]]
+                for _ in range(3)
+            ]
+
+    assert await poll_orders([info_a, info_b]) == [expected] * 3
+    assert await poll_orders([info_b, info_a]) == [expected] * 3
 
 
 async def test_replay_restores_history_chattable():

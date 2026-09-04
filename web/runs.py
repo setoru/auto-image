@@ -91,10 +91,19 @@ class RunManager:
             self._ids = itertools.count(top + 1)
 
     def summaries(self):
-        """全部 run 摘要，最后活跃在前：终态按结束时刻（重建 run 即
-        transcript 的 last_modified，续接过一次的会话浮到最新），活跃按
-        创建时刻（无结束时刻）。"""
-        return [r.summary() for r in sorted(self.runs.values(), key=lambda r: r.ended_at or r.created_at, reverse=True)]
+        """全部 run 摘要，按最后活动及稳定次键降序排列。"""
+        def sort_key(run):
+            activity_at = run.last_event_at
+            if activity_at is None:
+                activity_at = run.ended_at
+            if activity_at is None:
+                activity_at = run.created_at
+            return activity_at, run.created_at, run.run_id
+
+        return [
+            run.summary()
+            for run in sorted(self.runs.values(), key=sort_key, reverse=True)
+        ]
 
     def running_count(self):
         """执行中回合数（并发上限的计数口径）。"""
