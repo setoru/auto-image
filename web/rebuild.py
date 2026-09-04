@@ -15,8 +15,8 @@
 
 transcript 里没有 Result 消息：回合边界由「下一条真实用户输入」推导，回合
 汇总取该回合最后一条 agent 文本（CLI 的 result 同源于此）。重放流不补
-终态收尾事件——session.ended 只在用户显式结束时发出，SSE 保持连接等待
-续聊（ENDED 墓碑会话由状态关闭流，不靠事件）。
+终态收尾事件——session.ended 只在用户显式结束时发出，重放完毕快照
+正常断开、续聊由用户指令驱动（终态语义只由事件与摘要承载）。
 """
 import logging
 import time

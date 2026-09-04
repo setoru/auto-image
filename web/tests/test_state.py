@@ -139,12 +139,12 @@ async def test_restart_all_sessions_chattable():
                 r = await client.post(f"/api/runs/{run['run_id']}/messages", json={"text": "继续"})
                 assert r.status_code == 200, r.text
                 await wait_status(client, run["run_id"], "READY")
-            # 重放流无终态收尾事件：SSE 重放完毕保持连接（心跳保活）
+            # 重放流无终态收尾事件：快照重放完即结束（无心跳常驻）
             resp = await open_stream(client, "run_hist_sess_z")
-            events, pings = await collect_sse(resp, deadline_s=0.5)
+            events, pings = await collect_sse(resp)
             types = [e["event"] for e in events]
             assert "session.ended" not in types, types
-            assert pings >= 1, pings
+            assert pings == 0, pings
 
 
 async def test_tombstone_sessions_stay_ended_after_restart():
@@ -157,9 +157,9 @@ async def test_tombstone_sessions_stay_ended_after_restart():
             runs = (await client.get("/api/runs")).json()["runs"]
             assert runs[0]["run_id"] == "run_7"  # 身份映射命中沿用原 id
             assert runs[0]["status"] == "ENDED", runs
-            # 可回看（SSE 重放完即关流）、发送 409 session_not_active、可克隆
+            # 可回看（快照重放完即结束）、发送 409 session_not_active、可克隆
             resp = await open_stream(client, "run_7")
-            events, pings = await collect_sse(resp, deadline_s=1.0)
+            events, pings = await collect_sse(resp)
             types = [e["event"] for e in events]
             assert "user.message" in types, types
             assert pings == 0, pings
@@ -179,7 +179,7 @@ async def test_open_turn_interrupted_and_back_to_ready():
         async with httpx.AsyncClient(transport=StreamingASGITransport(app=app), base_url="http://testserver") as client:
             runs = (await client.get("/api/runs")).json()["runs"]
             assert runs[0]["status"] == "READY", runs  # 不自动重跑
-            events, _ = await collect_sse(await open_stream(client, "run_hist_sess_x"), deadline_s=1.0)
+            events, _ = await collect_sse(await open_stream(client, "run_hist_sess_x"))
             types = [e["event"] for e in events]
             assert types[-1] == "turn.interrupted", types
             assert "turn.completed" not in types, types

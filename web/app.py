@@ -1,14 +1,17 @@
 """FastAPI 应用：创建会话 / 发送·停止·克隆·结束 / SSE 事件流。
 
-错误统一走 HTTPException 默认响应体；SSE 的 id 即内部事件 seq，
-空闲时按 heartbeat_interval 发 `: ping` 注释行保活。
+错误统一走 HTTPException 默认响应体。事件通道两条：per-run 端点是纯
+快照——SSE 的 id 即内部事件 seq，按 Last-Event-ID 重放历史、重放完毕正常
+结束响应；全局流常驻广播全部会话的实时事件，空闲按 heartbeat_interval
+发 `: ping` 注释行保活。
 
 停止的执行动作（session.interrupt）在 request_stop 置标记之后由 HTTP 层
 调用——标记与 run_turn 的回合收尾在单线程事件循环上互斥，interrupt
 晚于回合结束时停止目标已达成，无需把失败放大成错误。
 
 end 的收尾序列（RUNNING 中）：end 校验 → 取消在飞回合任务（回合不补
-收尾事件）→ session.ended 作为流的最后一条事件 → 墓碑入册。
+收尾事件）→ session.ended 作为流的最后一条事件 → 墓碑入册。快照端点
+不替前端判终态：session.ended 本身在历史里，重放完毕自然断开。
 """
 import asyncio
 import json
@@ -272,26 +275,17 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             headers={"Content-Disposition": f'attachment; filename="{name}"'},
         )
 
+    # per-run 事件端点收窄为纯快照：按 Last-Event-ID 重放历史（断点续传），
+    # 重放完毕正常结束响应——不常驻、无心跳、无 ENDED 关流判定（终态事件
+    # session.ended 本身在历史里，快照一次给完；实时事件由全局流续接）
     @app.get("/api/runs/{run_id}/events")
     async def event_stream(run_id: str, request: Request):
-        run = _get_run_or_404(manager, run_id)
+        _get_run_or_404(manager, run_id)  # 未知 run 404
         seen = _parse_last_event_id(request.headers.get("Last-Event-ID"))
 
         async def generate():
-            nonlocal seen
-            with store.subscribe(run_id) as flag:
-                while True:
-                    flag.clear()
-                    for event in store.replay_from(run_id, seen):
-                        seen = event["seq"]
-                        yield _sse_chunk(event)
-                    # ENDED 且历史重放完毕：正常结束流（唯一会话终态）
-                    if run.status == ENDED and store.is_complete(run_id, seen):
-                        return
-                    try:
-                        await asyncio.wait_for(flag.wait(), timeout=heartbeat_interval)
-                    except asyncio.TimeoutError:
-                        yield ": ping\n\n"
+            for event in store.replay_from(run_id, seen):
+                yield _sse_chunk(event)
 
         return StreamingResponse(
             generate(),

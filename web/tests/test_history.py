@@ -172,8 +172,9 @@ async def test_replay_restores_history_chattable():
         assert events[9]["data"]["result"] == events[8]["data"]["text"]
         # transcript 重放同样过脱敏与映射路径
         assert "HWPFEJ9AB3CDEFGHIJKL" not in str(events)
-        # 无终态收尾事件：重放完毕流保持连接（心跳保活等待续聊）
-        assert pings >= 1, pings
+        # 无终态收尾事件：重放会话可续聊，快照重放完即结束（无心跳常驻）
+        assert "session.ended" not in types, types
+        assert pings == 0, pings
 
         # 直接续聊：同会话发指令照常执行
         r = await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续之前的部署"})

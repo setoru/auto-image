@@ -133,11 +133,11 @@ async def test_first_message_assigns_title_and_emits_event():
             run_id = (await client.post("/api/runs", json={})).json()["run_id"]
             await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx 1.25 到 server-a"})
             await wait_status(client, run_id, "READY")
-            # collect_sse 的 1 秒窗内标题会话（无 delay）应已落流；偶发晚到再等一轮
-            events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
+            # 快照即完（不再有整秒读窗）：标题事件通常回合中已落流，晚到小等一轮
+            events, _ = await collect_sse(await open_stream(client, run_id))
             if not [e for e in events if e["event"] == "session.title_changed"]:
                 await asyncio.sleep(0.2)
-                events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=1.0)
+                events, _ = await collect_sse(await open_stream(client, run_id))
             types = [e["event"] for e in events]
             # 标题事件在场（清洗剥掉了引号）
             title_events = [e for e in events if e["event"] == "session.title_changed"]
@@ -146,7 +146,12 @@ async def test_first_message_assigns_title_and_emits_event():
             # 摘要带 title 字段
             summary = (await client.get(f"/api/runs/{run_id}")).json()
             assert summary["title"] == "部署 nginx"
-        # transcript 写回：以部署会话的 session_id、清洗后的标题
+        # transcript 写回：写回等 session_id 就绪（50ms 轮询）后才发生，
+        # 与快照读取是两条独立异步路径——小等收尾
+        for _ in range(50):
+            if renames:
+                break
+            await asyncio.sleep(0.02)
         assert renames == [("sess_fake_1", "部署 nginx")], renames
         assert title_calls == [None]  # 标题会话全新起、无续接
     finally:

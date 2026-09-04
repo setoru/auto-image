@@ -1,6 +1,9 @@
 # web — 部署会话 Web 服务端
 
 浏览器会话式入口：新建空会话 → 输入部署指令 → SSE 实时看 agent 事件流。
+事件通道两条：全局流（`GET /api/stream`，一条连接广播全部会话实时事件、
+常驻心跳保活）+ per-run 快照（`GET /api/runs/{run_id}/events`，按
+Last-Event-ID 重放历史、重放完即断）。
 多会话并行（并发上限 `WEB_MAX_PARALLEL_RUNS`，默认 10，数执行中回合——
 新建、克隆、标题生成不占名额）；SDK 连接按回合开合，挂起会话零 CLI 进程。
 会话三态 READY / RUNNING / ENDED：回合完成、停止、失败都回 READY 可续聊；
@@ -62,9 +65,9 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
 
 | 文件 | 职责 |
 | --- | --- |
-| `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 流（id=seq、Last-Event-ID 重放、心跳保活）、启动接线（重放恢复 + 残留 CLI 告警） |
+| `app.py` | FastAPI 应用工厂、API 路由（含 `GET /api/runs` 列表）、SSE 通道两条（全局流常驻广播 + per-run 快照：id=seq、Last-Event-ID 重放、重放完即断）、启动接线（重放恢复 + 残留 CLI 告警） |
 | `runs.py` | 会话状态机（READY/RUNNING/ENDED 三态、无全局门禁）、回合计数（`WEB_MAX_PARALLEL_RUNS`）、clone/end 校验与 409 判定收敛（turn_in_progress / session_running / parallel_limit_reached / session_not_active） |
-| `events.py` | 进程内事件存储：seq 递增、断点重放、订阅唤醒 |
+| `events.py` | 进程内事件存储：seq 递增、快照重放、全局订阅唤醒 |
 | `session.py` | 回合执行（send 起回合级 asyncio.Task，SDK 连接只包住一个回合） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
 | `artifacts.py` | deploy/ + rpm/ 多根全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
@@ -142,7 +145,7 @@ python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会�
    （isMeta / isSidechain 已滤），user 行 content 可为字符串（含 CLI 命令
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
    条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重放的
-   run 状态 READY（可续聊可克隆），流无终态收尾事件、重放完毕保持连接
+   run 状态 READY（可续聊可克隆），流无终态收尾事件、快照重放完即断
    等待续聊。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
 14. **服务重启的恢复**（state 簿记 + 真 SDK 实测）：簿记只存墓碑（用户
    ENDED 的 session_id）、身份映射（run_id ↔ session_id，无 session_id 的
