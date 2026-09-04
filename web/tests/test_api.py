@@ -123,6 +123,15 @@ def drop_title_events(events):
     return [e for e in events if e["event"] != "session.title_changed"]
 
 
+def transcript_prompts(factory, session_id):
+    """测试 transcript adapter 中真实用户指令的有序文本。"""
+    return [
+        message.message["content"]
+        for message in factory.get_session_messages(session_id)
+        if message.type == "user" and isinstance(message.message.get("content"), str)
+    ]
+
+
 async def collect_sse(resp, stop=None, deadline_s=5.0, max_pings=None):
     """聚合 SSE 流为 (事件列表, 心跳行数)；stop(ev) 为 True 时停止读取，
     max_pings 收满即停（常驻的流不会自己结束）。"""
@@ -806,6 +815,98 @@ async def test_clone_second_turn_resumes_clone_own_session_id():
         assert resumed.target_session_id == clone_target
         assert resumed.context_session_id == clone_target
         assert resumed.fork_session is False
+
+
+async def test_fork_transcripts_share_prefix_then_diverge_during_parallel_turns():
+    """Fork 建立后源与分支可并行演进，SDK transcript 与 Web 事件均不串线。"""
+    script = [
+        {
+            "type": "assistant",
+            "message": {"content": [{"type": "text", "text": "已处理当前指令"}]},
+        },
+        {"type": "result", "subtype": "success", "result": "已处理当前指令"},
+    ]
+    factory = FakeSessionFactory(script=script, delay=0.05)
+    app = make_test_app(session_factory=factory)
+    async with httpx.AsyncClient(
+        transport=StreamingASGITransport(app=app), base_url="http://testserver"
+    ) as client:
+        source = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(
+            f"/api/runs/{source}/messages", json={"text": "共享的分叉前指令"}
+        )
+        await wait_status(client, source, "READY")
+        source_state_before = (await client.get(f"/api/runs/{source}")).json()
+        source_events_before, _ = await collect_sse(await open_stream(client, source))
+        source_sid = load_state(app.state.test_root / "state.json")["sessions"][source]
+
+        fork = (await client.post(f"/api/runs/{source}/clone")).json()["run_id"]
+        assert (await client.get(f"/api/runs/{source}")).json() == source_state_before
+        source_events_after, _ = await collect_sse(await open_stream(client, source))
+        assert source_events_after == source_events_before
+        assert load_state(app.state.test_root / "state.json")["sessions"] == {
+            source: source_sid,
+        }
+
+        # 首回合建立独立 Fork transcript；其后两侧同时运行不同回合。
+        response = await client.post(
+            f"/api/runs/{fork}/messages", json={"text": "建立 Fork 分支"}
+        )
+        assert response.status_code == 200, response.text
+        await wait_status(client, fork, "READY")
+        fork_sid = load_state(app.state.test_root / "state.json")["sessions"][fork]
+        assert fork_sid != source_sid
+
+        source_response, fork_response = await asyncio.gather(
+            client.post(
+                f"/api/runs/{source}/messages", json={"text": "只写入源会话"}
+            ),
+            client.post(
+                f"/api/runs/{fork}/messages", json={"text": "只写入 Fork"}
+            ),
+        )
+        assert source_response.status_code == fork_response.status_code == 200
+        assert (await client.get(f"/api/runs/{source}")).json()["status"] == "RUNNING"
+        assert (await client.get(f"/api/runs/{fork}")).json()["status"] == "RUNNING"
+        await asyncio.gather(
+            wait_status(client, source, "READY"),
+            wait_status(client, fork, "READY"),
+        )
+
+        assert transcript_prompts(factory, source_sid) == [
+            "共享的分叉前指令",
+            "只写入源会话",
+        ]
+        assert transcript_prompts(factory, fork_sid) == [
+            "共享的分叉前指令",
+            "建立 Fork 分支",
+            "只写入 Fork",
+        ]
+
+        source_events, _ = await collect_sse(await open_stream(client, source))
+        fork_events, _ = await collect_sse(await open_stream(client, fork))
+        assert [
+            event["data"]["text"]
+            for event in source_events
+            if event["event"] == "user.message"
+        ] == ["共享的分叉前指令", "只写入源会话"]
+        assert [
+            event["data"]["text"]
+            for event in fork_events
+            if event["event"] == "user.message"
+        ] == ["共享的分叉前指令", "建立 Fork 分支", "只写入 Fork"]
+
+        fork_starts = [
+            start for start in factory.starts if start.target_session_id == fork_sid
+        ]
+        assert (
+            fork_starts[0].context_session_id,
+            fork_starts[0].fork_session,
+        ) == (source_sid, True)
+        assert (
+            fork_starts[-1].context_session_id,
+            fork_starts[-1].fork_session,
+        ) == (fork_sid, False)
 
 
 async def test_second_turn_after_completed_turn_replays_new_events_only():

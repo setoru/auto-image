@@ -45,9 +45,9 @@ export const isOperable = (status) => OPERABLE.includes(status)
 // 409 detail 判定值 → 人话提示（判定值与服务端 runs.Conflict.detail 一致，单处维护）
 const CONFLICT_HINT = {
   turn_in_progress: '本会话回合执行中，想改方向先点「停止」',
-  session_running: '源会话正在执行，回合结束后才能克隆',
+  session_running: '源会话正在执行，回合结束后才能 Fork',
   parallel_limit_reached: '执行中回合已达并发上限，稍后再发',
-  session_not_active: '会话已结束，不可再操作（可克隆后继续）',
+  session_not_active: '会话已结束，不可再操作（可 Fork 后继续）',
 }
 
 const listeners = new Set()
@@ -275,7 +275,7 @@ globalStream.onerror = () => {
 
 // ---------- HTTP ----------
 
-// run 对象的唯一构造点：服务端摘要（loadRuns/轮询）与新建/克隆响应共用
+// run 对象的唯一构造点：服务端摘要（loadRuns/轮询）与新建/Fork 响应共用
 // 同一形状，字段差异由 overrides 给出
 function makeRun(overrides) {
   return {
@@ -369,7 +369,7 @@ async function pollSummaries() {
   }
 }
 
-// 新会话落位（新建/克隆共用）：run 注册、标签页尾插并切为查看中，再拉一次
+// 新会话落位（新建/Fork 共用）：run 注册、标签页尾插并切为查看中，再拉一次
 // 快照补齐开卷事件与转录历史（广播帧可能先于 run 落位到达被守卫丢弃，
 // 快照才是历史的确定入口；Last-Event-ID= 已有最大 seq，去重吸收重叠）
 function adoptNewRun(run) {
@@ -395,7 +395,7 @@ export async function createRun() {
   }
 }
 
-// 克隆 = 从控制面会话（READY/ENDED）分叉新会话：事件流转录、标题继承
+// Fork = 从控制面会话（READY/ENDED）分叉新会话：事件流转录、标题继承
 // （转录历史经 adoptNewRun 的快照补齐——转录不带 session.started）
 export async function cloneRun() {
   const src = state.runs[controlRunId()]
@@ -411,7 +411,7 @@ export async function cloneRun() {
       })
     )
   } catch (err) {
-    fail(`克隆失败：${conflictMessage(err)}`)
+    fail(`Fork 失败：${conflictMessage(err)}`)
   }
 }
 
@@ -434,7 +434,7 @@ export async function send(text) {
   if (!run || !trimmed) return false
   if (!isOperable(run.status)) {
     // 只读会话（已结束）不静默吞掉输入，给出出路提示
-    fail('该会话只读（已结束）——「+ 新建」或克隆该会话后继续')
+    fail('该会话只读（已结束）——「+ 新建」或 Fork 此会话后继续')
     return false
   }
   try {

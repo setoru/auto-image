@@ -29,15 +29,15 @@ export function firstPromptPreview(run, max = 18) {
   return t.length > max ? t.slice(0, max) + '…' : t
 }
 
-// 克隆标记：「⑂ 克隆自『任务名』」；来源会话不在（列表缺它）时不标
+// Fork 标记：「⑂ Fork 自『任务名』」；来源会话不在（列表缺它）时不标
 export function resumeMark(run, runs) {
   if (!run?.resumedFrom || !runs?.[run.resumedFrom]) return ''
-  return ` ⑂ 克隆自『${firstPromptPreview(runs[run.resumedFrom])}』`
+  return ` ⑂ Fork 自『${firstPromptPreview(runs[run.resumedFrom])}』`
 }
 
 // 累计执行时长：各回合（user.message → 回合收尾）求和，扣除等待输入的
 // 空档；执行中的回合以 now 收口。终态（ENDED）与挂起同口径——事件 ts
-// 是真实发生时刻（重放/克隆透传源时刻），求和即定格，无需 wall-clock
+// 是真实发生时刻（重放/Fork 透传源时刻），求和即定格，无需 wall-clock
 // 兜底；终态未闭合的回合（异常边界）不计。
 export function activeSeconds(run, now) {
   let total = 0

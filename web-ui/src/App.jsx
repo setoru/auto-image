@@ -167,18 +167,18 @@ function EventRow({ ev, prev, tools }) {
     return null // 标题落 header / 下拉，不在消息流渲染
   }
   if (ev.type === 'session.ended') {
-    return <div className="va-canceled">— 会话已结束（可回看，只能克隆）—</div>
+    return <div className="va-canceled">— 会话已结束（可回看，只能 Fork）—</div>
   }
   return null
 }
 
 // 结束会话：显式且不可逆，一律二次确认——READY 可能挂着一整天工作上下文，
-// 结束后只能克隆；执行中结束还会打断在飞回合
+// 结束后只能 Fork；执行中结束还会打断在飞回合
 function onEndRun(run) {
   const msg =
     run.status === 'RUNNING'
       ? `会话 ${run.runId} 回合执行中，结束将打断在飞回合（已提交的云操作不受影响）。确定结束？`
-      : `确定结束会话 ${run.runId}？结束后不可恢复（只读回看，只能克隆继续）。`
+      : `确定结束会话 ${run.runId}？结束后不可恢复（只读回看，只能 Fork 后继续）。`
   if (!window.confirm(msg)) return
   store.endRun()
 }

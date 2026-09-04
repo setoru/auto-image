@@ -7,7 +7,7 @@
 //               禁用，想改方向先停止——执行中发送被服务端 409
 //               turn_in_progress 拒）
 //   等待指令 -> 发送
-// 「⑂ 克隆」常驻：READY/ENDED 可点、RUNNING 禁用——克隆基于 transcript
+// 「⑂ Fork」常驻：READY/ENDED 可点、RUNNING 禁用——Fork 基于 transcript
 // 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏
 // 「+ 新建」。草稿按 runId 独立存 map，切标签页不丢字。
 import * as store from '../store.js'
@@ -50,7 +50,7 @@ export default function ChatBar() {
 
   const placeholder = run
     ? isTerminal
-      ? '会话已结束——点「⑂ 克隆」分叉后继续对话'
+      ? '会话已结束——点「⑂ Fork」基于此上下文创建新分支'
       : run.status === 'RUNNING'
         ? '回合执行中——想改方向点「■ 停止」打断后再输入'
         : '输入部署指令：软件 + 文档链接 + 目标机器…'
@@ -71,18 +71,18 @@ export default function ChatBar() {
     </button>
   )
 
-  const cloneBtn = (
+  const forkBtn = (
     <button
       className="chat-continue"
       onClick={() => store.cloneRun()}
       disabled={!run || run.status === 'RUNNING'}
       title={
         run?.status === 'RUNNING'
-          ? '回合执行中不能克隆（上下文在变）——回合结束后可点'
-          : `从『${firstPromptPreview(run)}』的上下文分叉（新建一条克隆会话）`
+          ? '回合执行中不能 Fork（上下文仍在变化）——回合结束后可用'
+          : `从『${firstPromptPreview(run)}』的上下文创建独立 Fork`
       }
     >
-      ⑂ 克隆
+      ⑂ Fork
     </button>
   )
 
@@ -92,7 +92,7 @@ export default function ChatBar() {
     return (
       <div className="chat-bar">
         {target(true)}
-        {cloneBtn}
+        {forkBtn}
         {run.status === 'RUNNING' && (
           <button className="chat-send" onClick={act}>
             {btnLabel}
@@ -105,7 +105,7 @@ export default function ChatBar() {
   return (
     <div className="chat-bar">
       {run && target()}
-      {cloneBtn}
+      {forkBtn}
       <input
         value={text}
         disabled={!canInputHere}

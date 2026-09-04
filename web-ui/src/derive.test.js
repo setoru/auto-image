@@ -2,7 +2,7 @@
 // 扣等待输入空档、终态与挂起同口径。UI 的「总计时间」押在这块地基上。
 // 只断言外部可见行为（秒数、展示串），不断言内部实现。
 import { describe, expect, it } from 'vitest'
-import { activeSeconds, fmtActive } from './derive'
+import { activeSeconds, fmtActive, resumeMark } from './derive'
 
 // 事件构造：ts 并入 payload（快照与全局流两路落地后的统一形状）
 const ev = (type, ts) => ({ seq: ts, type, payload: { ts } })
@@ -63,5 +63,16 @@ describe('activeSeconds', () => {
 describe('fmtActive', () => {
   it('无 startedAt 显示占位 --:--', () => {
     expect(fmtActive(run([], { startedAt: null }), 999_000)).toBe('--:--')
+  })
+})
+
+describe('resumeMark', () => {
+  it('Fork 来源标记使用统一术语并说明源会话', () => {
+    const source = { firstPrompt: '部署 nginx', events: [] }
+    const fork = { resumedFrom: 'run_source' }
+
+    expect(resumeMark(fork, { run_source: source })).toBe(
+      " ⑂ Fork 自『部署 nginx』",
+    )
   })
 })

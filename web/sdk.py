@@ -106,19 +106,20 @@ def default_options(start=None):
     权限下 Write 与 Bash 写路径一律被拒（真部署实测），产物无法落盘；信任
     边界由运行形态承担（只监听 127.0.0.1 + 系统提示词任务边界）。
     start 明确给出本会话的目标身份、上下文来源与是否 Fork。普通续接不能
-    同时传 session_id，因此只设置 resume。Fork 意图已由接口表达，但生产
-    映射须与独立 transcript 验证一起交付；在此之前显式拒绝，避免续写源。"""
+    同时传 session_id，因此只设置 resume；Fork 同时传目标 session_id、
+    源 resume 与 fork_session，让 SDK 建立独立 transcript。"""
     target_session_id = None
     context_session_id = None
+    fork_session = False
     if start is not None:
-        if start.fork_session:
-            raise NotImplementedError("Fork SDK 启动尚未实现")
         target_session_id = start.target_session_id
         context_session_id = start.context_session_id
+        fork_session = start.fork_session
     return ClaudeAgentOptions(
         cwd=str(PROJECT_ROOT),
         resume=context_session_id,
-        session_id=target_session_id if context_session_id is None else None,
+        session_id=target_session_id if context_session_id is None or fork_session else None,
+        fork_session=fork_session,
         system_prompt=SYSTEM_PROMPT,
         permission_mode="bypassPermissions",
         tools={"type": "preset", "preset": "claude_code"},

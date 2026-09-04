@@ -16,7 +16,12 @@ from web.fake import DEFAULT_SCRIPT, FakeSessionFactory  # noqa: E402
 from web.runs import READY, RunManager  # noqa: E402
 from web.state import load_state, save_state  # noqa: E402
 from web.tests.support import StreamingASGITransport, make_test_app  # noqa: E402
-from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
+from web.tests.test_api import (  # noqa: E402
+    collect_sse,
+    open_stream,
+    transcript_prompts,
+    wait_status,
+)
 from web.tests.test_history import session_info  # noqa: E402
 
 def tmsg(mtype, content):
@@ -393,6 +398,102 @@ async def test_end_to_end_restart_with_real_state_file():
         assert resumed.target_session_id == clone_sid
         assert resumed.context_session_id == clone_sid
         assert resumed.fork_session is False
+
+
+async def test_fork_transcripts_restore_stable_runs_and_scoped_tombstone():
+    """真实簿记叠加两份独立 transcript：重启保身份、可续聊、墓碑不串线。"""
+    with tempfile.TemporaryDirectory() as d:
+        state_path = str(Path(d) / "state.json")
+        factory = FakeSessionFactory(script=DEFAULT_SCRIPT, delay=0.02)
+        app_a = make_test_app(session_factory=factory, state_path=state_path)
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app=app_a), base_url="http://testserver"
+        ) as client:
+            source = (await client.post("/api/runs", json={})).json()["run_id"]
+            await client.post(
+                f"/api/runs/{source}/messages", json={"text": "共享的部署起点"}
+            )
+            await wait_status(client, source, "READY")
+            fork = (await client.post(f"/api/runs/{source}/clone")).json()["run_id"]
+            await client.post(
+                f"/api/runs/{fork}/messages", json={"text": "建立 Fork transcript"}
+            )
+            await wait_status(client, fork, "READY")
+
+        saved = load_state(state_path)
+        source_sid = saved["sessions"][source]
+        fork_sid = saved["sessions"][fork]
+        assert source_sid != fork_sid
+        assert transcript_prompts(factory, source_sid) == ["共享的部署起点"]
+        assert transcript_prompts(factory, fork_sid) == [
+            "共享的部署起点",
+            "建立 Fork transcript",
+        ]
+
+        app_b = make_test_app(
+            session_factory=factory,
+            state_path=state_path,
+            list_sessions_fn=factory.list_sessions,
+            get_session_messages_fn=factory.get_session_messages,
+        )
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app=app_b), base_url="http://testserver"
+        ) as client:
+            runs = {
+                run["run_id"]: run
+                for run in (await client.get("/api/runs")).json()["runs"]
+            }
+            assert set(runs) == {source, fork}, runs
+            assert runs[source]["status"] == runs[fork]["status"] == "READY"
+            assert runs[fork]["resumed_from"] == source
+
+            source_response, fork_response = await asyncio.gather(
+                client.post(
+                    f"/api/runs/{source}/messages", json={"text": "重启后续写源"}
+                ),
+                client.post(
+                    f"/api/runs/{fork}/messages", json={"text": "重启后续写 Fork"}
+                ),
+            )
+            assert source_response.status_code == fork_response.status_code == 200
+            await asyncio.gather(
+                wait_status(client, source, "READY"),
+                wait_status(client, fork, "READY"),
+            )
+
+            response = await client.post(f"/api/runs/{source}/end")
+            assert response.status_code == 200, response.text
+            assert (await client.get(f"/api/runs/{fork}")).json()["status"] == "READY"
+
+        assert transcript_prompts(factory, source_sid) == [
+            "共享的部署起点",
+            "重启后续写源",
+        ]
+        assert transcript_prompts(factory, fork_sid) == [
+            "共享的部署起点",
+            "建立 Fork transcript",
+            "重启后续写 Fork",
+        ]
+        saved = load_state(state_path)
+        assert saved["sessions"] == {source: source_sid, fork: fork_sid}
+        assert saved["ended_sessions"] == {source_sid}
+
+        app_c = make_test_app(
+            session_factory=factory,
+            state_path=state_path,
+            list_sessions_fn=factory.list_sessions,
+            get_session_messages_fn=factory.get_session_messages,
+        )
+        async with httpx.AsyncClient(
+            transport=StreamingASGITransport(app=app_c), base_url="http://testserver"
+        ) as client:
+            runs = {
+                run["run_id"]: run
+                for run in (await client.get("/api/runs")).json()["runs"]
+            }
+            assert set(runs) == {source, fork}, runs
+            assert runs[source]["status"] == "ENDED"
+            assert runs[fork]["status"] == "READY"
 
 
 async def test_empty_clone_identity_lost_accepted():

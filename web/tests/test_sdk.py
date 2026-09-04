@@ -64,12 +64,10 @@ def test_session_start_distinguishes_new_resume_and_fork():
     assert (resumed_options.session_id, resumed_options.resume, resumed_options.fork_session) == (
         None, target, False,
     )
-    try:
-        default_options(forked)
-    except NotImplementedError:
-        pass
-    else:
-        raise AssertionError("生产 adapter 不应抢先消费预留的 Fork 启动意图")
+    forked_options = default_options(forked)
+    assert (forked_options.session_id, forked_options.resume, forked_options.fork_session) == (
+        target, source, True,
+    )
 
 
 def test_options_grant_unattended_write_permission():
