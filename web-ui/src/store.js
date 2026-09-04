@@ -99,6 +99,7 @@ let state = {
   connection: 'connecting', // 全局事件流连接态：connecting → live / reconnecting
   submitError: null,
   now: Date.now(),
+  drafts: {},                // 会话草稿镜像（runId → 文本；真身在 setDraft 侧的 map）
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
   artifactCache: {},         // 产物内容多槽缓存（relPath → 条目+content），关标签页不清
   artifactSel: {},           // 批量下载勾选集（relPath → true，随清单刷新剪枝）
@@ -580,7 +581,8 @@ export function clearArtifactSel() {
 // ---------- 输入草稿 ----------
 
 // 每枚会话标签页独立草稿（runId → 文本），切标签页不丢输入中的字；发送
-// 成功后由调用方清空。不入 state 容器（不需要驱动渲染以外的重渲染）
+// 成功后由调用方清空。入 state 容器：受控输入的字必须驱动重渲染，否则
+// 下一次外来渲染（轮询/SSE/时长针）会用旧 value 把 DOM 里的字冲掉
 const drafts = {}
 
 export function draftOf(runId) {
@@ -589,10 +591,12 @@ export function draftOf(runId) {
 
 export function setDraft(runId, text) {
   drafts[runId] = text
+  set({ drafts: { ...drafts } })
 }
 
 export function clearDraft(runId) {
   delete drafts[runId]
+  set({ drafts: { ...drafts } })
 }
 
 // ---------- 产物文件标签页 ----------
