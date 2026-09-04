@@ -5,15 +5,15 @@
 // 常驻对话输入条。header 与输入条构成控制面，绑定最后激活的会话标签页
 // ——激活文件标签页不换对象。
 import { useEffect, useRef, useState } from 'react'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import './App.css'
 import * as store from './store.js'
-import { RUN_STATUS_LABEL, STAGE_LABEL, fmtActive, fmtLastActivity, fmtSize } from './derive.js'
+import { RUN_STATUS_LABEL, STAGE_LABEL, fmtActive, fmtLastActivity } from './derive.js'
+import { mdToHtml } from './markdown.js'
 import { tabKey } from './tabState.js'
+import ArtifactView from './components/ArtifactView.jsx'
 import ChatBar from './components/ChatBar.jsx'
 import Tabs from './components/Tabs.jsx'
-import SidePanel, { StageBadge } from './components/SidePanel.jsx'
+import SidePanel from './components/SidePanel.jsx'
 
 const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 
@@ -170,54 +170,6 @@ function EventRow({ ev, prev, tools }) {
     return <div className="va-canceled">— 会话已结束（可回看，只能克隆）—</div>
   }
   return null
-}
-
-// markdown → 消毒后 HTML 的单点：产物与消息流共用（内容都系 agent 转述
-// 外部文档/工具输出，同威胁模型，HTML 一律消毒再进 DOM）
-const mdToHtml = (text) => DOMPurify.sanitize(marked.parse(text, { async: false }))
-
-// 产物文件标签页内容：markdown 经 marked 渲染（表格/代码块/验证契约
-// blockquote），json 原文展示。内容来自多槽缓存（relPath → 条目+content），
-// 未就绪（拉取在途）时给加载占位
-function ArtifactView({ artifact }) {
-  if (!artifact) {
-    return <div className="artifact-empty">加载中…</div>
-  }
-  const isJson = artifact.name.endsWith('.json')
-  const html = isJson ? '' : mdToHtml(artifact.content)
-  const rel = artifact.dir ? `${artifact.dir}/${artifact.name}` : artifact.name
-  return (
-    <div className="va-artifact">
-      <div className="va-artifact-head">
-        {artifact.stage && <StageBadge stage={artifact.stage} />}
-        <span className="va-artifact-name">{artifact.name}</span>
-        <span className="va-artifact-dir">{artifact.dir}</span>
-        <button
-          className="va-artifact-dl"
-          onClick={() => store.downloadArtifact(rel)}
-          title="下载此文件"
-        >
-          ⤓ 下载
-        </button>
-      </div>
-      {isJson ? (
-        <pre className="va-artifact-raw">{artifact.content}</pre>
-      ) : artifact.binary ? (
-        <div className="va-artifact-binary">
-          <div className="va-artifact-binary-icon">📦</div>
-          <div className="va-artifact-binary-name">{artifact.name}</div>
-          <div className="va-artifact-binary-size">
-            二进制产物{artifact.size ? ` · ${fmtSize(artifact.size)}` : ''}，不支持在线预览
-          </div>
-          <button className="va-artifact-binary-dl" onClick={() => store.downloadArtifact(rel)}>
-            ⤓ 下载此文件
-          </button>
-        </div>
-      ) : (
-        <div className="va-artifact-md va-md" dangerouslySetInnerHTML={{ __html: html }} />
-      )}
-    </div>
-  )
 }
 
 // 结束会话：显式且不可逆，一律二次确认——READY 可能挂着一整天工作上下文，
@@ -405,7 +357,7 @@ export default function App() {
                 <div>点标签栏「+ 新建」创建会话，输入第一条部署指令</div>
               </div>
             ) : activeTab.kind === 'file' ? (
-              <ArtifactView artifact={activeArtifact} />
+              <ArtifactView artifact={activeArtifact} onDownload={store.downloadArtifact} />
             ) : activeRun ? (
               <Stream key={activeRun.runId} run={activeRun} />
             ) : null}

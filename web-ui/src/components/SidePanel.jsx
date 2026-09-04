@@ -8,6 +8,7 @@
 import { useState } from 'react'
 import * as store from '../store.js'
 import { tabKey } from '../tabState.js'
+import StageBadge from './StageBadge.jsx'
 import {
   RUN_STATUS_LABEL, STAGE_LABEL, firstPromptPreview, lastActivityAt, tabDot, fmtAgo,
   fmtSize, artifactTree, subtreeRels, defaultOpenPaths, artifactFileCount,
@@ -72,11 +73,6 @@ function SessionPanel({ order, runs, controlId, openIds }) {
       {order.length === 0 && <div className="va-side-empty">暂无会话——点标签栏「+ 新建」</div>}
     </div>
   )
-}
-
-// 阶段徽标（产物文件行与产物 tab 头共用，导出给 ArtifactView）
-export function StageBadge({ stage }) {
-  return <span className={`va-art-badge s-${stage.toLowerCase()}`}>{stage}</span>
 }
 
 // 目录树节点：目录行（箭头 + 三态勾选 + 目录名 + 子树文件数）+ 本目录文件
