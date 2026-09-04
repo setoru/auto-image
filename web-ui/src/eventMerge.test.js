@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { mergeRunEvents } from './eventMerge.js'
+import { mergeSessionEvents } from './eventMerge.js'
 
 const event = (seq, type, payload = {}) => ({
   seq,
@@ -7,7 +7,7 @@ const event = (seq, type, payload = {}) => ({
   payload: { ts: seq * 10, ...payload },
 })
 
-const initialRun = () => ({
+const initialSession = () => ({
   status: 'READY',
   stage: null,
   title: null,
@@ -18,15 +18,15 @@ const initialRun = () => ({
   maxSeq: 0,
 })
 
-const observable = (run) => ({
-  seqs: run.events.map((item) => item.seq),
-  status: run.status,
-  stage: run.stage,
-  title: run.title,
-  result: run.result,
-  endedAt: run.endedAt,
-  lastEventAt: run.lastEventAt,
-  maxSeq: run.maxSeq,
+const observable = (session) => ({
+  seqs: session.events.map((item) => item.seq),
+  status: session.status,
+  stage: session.stage,
+  title: session.title,
+  result: session.result,
+  endedAt: session.endedAt,
+  lastEventAt: session.lastEventAt,
+  maxSeq: session.maxSeq,
 })
 
 const completeSnapshot = () => [
@@ -37,14 +37,14 @@ const completeSnapshot = () => [
   event(5, 'turn.started'),
 ]
 
-describe('mergeRunEvents', () => {
+describe('mergeSessionEvents', () => {
   it('tail 先于快照到达时仍按 seq 去重、排序并重算会话状态', () => {
     const snapshot = completeSnapshot()
 
-    let run = mergeRunEvents(initialRun(), [snapshot[4]])
-    run = mergeRunEvents(run, snapshot)
+    let session = mergeSessionEvents(initialSession(), [snapshot[4]])
+    session = mergeSessionEvents(session, snapshot)
 
-    expect(observable(run)).toEqual({
+    expect(observable(session)).toEqual({
       seqs: [1, 2, 3, 4, 5],
       status: 'RUNNING',
       stage: 'VERIFY',
@@ -59,10 +59,10 @@ describe('mergeRunEvents', () => {
   it('快照先于 tail 且 tail 重复时得到完全相同的事件事实与派生字段', () => {
     const snapshot = completeSnapshot()
 
-    let tailFirst = mergeRunEvents(initialRun(), [snapshot[4]])
-    tailFirst = mergeRunEvents(tailFirst, snapshot)
-    let snapshotFirst = mergeRunEvents(initialRun(), snapshot)
-    snapshotFirst = mergeRunEvents(snapshotFirst, [snapshot[4]])
+    let tailFirst = mergeSessionEvents(initialSession(), [snapshot[4]])
+    tailFirst = mergeSessionEvents(tailFirst, snapshot)
+    let snapshotFirst = mergeSessionEvents(initialSession(), snapshot)
+    snapshotFirst = mergeSessionEvents(snapshotFirst, [snapshot[4]])
 
     expect(observable(snapshotFirst)).toEqual(observable(tailFirst))
   })
@@ -71,24 +71,24 @@ describe('mergeRunEvents', () => {
     const snapshot = completeSnapshot()
     const later = event(6, 'agent.message', { text: '继续处理中' })
 
-    let run = mergeRunEvents(initialRun(), [later, snapshot[2], snapshot[4]])
-    expect(run.maxSeq).toBe(6)
+    let session = mergeSessionEvents(initialSession(), [later, snapshot[2], snapshot[4]])
+    expect(session.maxSeq).toBe(6)
 
-    run = mergeRunEvents(run, [...snapshot, later])
-    expect({ seqs: run.events.map((item) => item.seq), maxSeq: run.maxSeq }).toEqual({
+    session = mergeSessionEvents(session, [...snapshot, later])
+    expect({ seqs: session.events.map((item) => item.seq), maxSeq: session.maxSeq }).toEqual({
       seqs: [1, 2, 3, 4, 5, 6],
       maxSeq: 6,
     })
   })
 
   it('摘要给出的 ENDED 在历史事件不含终态收尾时保持不可操作', () => {
-    const ended = initialRun()
+    const ended = initialSession()
     ended.status = 'ENDED'
     ended.endedAt = 75_000
 
-    const run = mergeRunEvents(ended, [event(5, 'turn.started')])
+    const session = mergeSessionEvents(ended, [event(5, 'turn.started')])
 
-    expect({ status: run.status, endedAt: run.endedAt }).toEqual({
+    expect({ status: session.status, endedAt: session.endedAt }).toEqual({
       status: 'ENDED',
       endedAt: 75_000,
     })

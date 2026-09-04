@@ -11,7 +11,7 @@
 // 非查看中的标签页状态点由 GET /api/runs 摘要轮询驱动。header 与输入条
 // 构成控制面，绑定 controlRunId 解析出的会话——激活文件标签页不换对象。
 import { useSyncExternalStore } from 'react'
-import { mergeRunEvents } from './eventMerge.js'
+import { mergeSessionEvents, SESSION_STATUS } from './eventMerge.js'
 import * as tabState from './tabState.js'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
@@ -37,9 +37,7 @@ export const EVENT_TYPES = [
 // 清单是 deploy/ + rpm/ 全量镜像（与查看中的会话无关），任一 run 触发都全局刷新
 const REFRESH_EVENT_TYPES = ['stage.changed', 'turn.completed', 'turn.stopped', 'turn.failed', 'session.ended']
 
-const RUNNING = 'RUNNING'
-const READY = 'READY'
-const ENDED = 'ENDED'
+const { RUNNING, READY, ENDED } = SESSION_STATUS
 // 可继续操作的会话状态集合：判定值与服务端状态机一致，单处维护
 const OPERABLE = [RUNNING, READY]
 export const isOperable = (status) => OPERABLE.includes(status)
@@ -183,9 +181,9 @@ function conflictMessage(err) {
 // 寻址、去重、排序并重算派生状态。阶段推进与收尾类事件顺手触发产物
 // 清单刷新（幂等无害）。
 function ingestEvents(runId, events) {
-  const run = state.runs[runId]
-  if (!run || !events.length) return
-  setRun(runId, mergeRunEvents(run, events))
+  const session = state.runs[runId]
+  if (!session || !events.length) return
+  setRun(runId, mergeSessionEvents(session, events))
   if (events.some((event) => REFRESH_EVENT_TYPES.includes(event.type))) refreshArtifacts()
 }
 
@@ -346,7 +344,7 @@ export async function loadRuns() {
 
 // 摘要 → run 的合并（loadRuns 与轮询共用同一形状）
 function mergeSummary(run, s) {
-  return mergeRunEvents({
+  return mergeSessionEvents({
     ...run,
     status: run.status === ENDED ? ENDED : s.status,
     stage: s.stage,

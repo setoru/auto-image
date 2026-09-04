@@ -1,6 +1,10 @@
-const RUNNING = 'RUNNING'
-const READY = 'READY'
-const ENDED = 'ENDED'
+export const SESSION_STATUS = Object.freeze({
+  RUNNING: 'RUNNING',
+  READY: 'READY',
+  ENDED: 'ENDED',
+})
+
+const { RUNNING, READY, ENDED } = SESSION_STATUS
 
 const READY_EVENTS = new Set([
   'turn.completed',
@@ -25,14 +29,14 @@ function orderedUniqueEvents(existing, incoming) {
  * 合并单个会话的事件事实，并从完整有序事件统一派生展示状态。
  * 摘要字段只在尚未见到对应事件时作为初值。
  */
-export function mergeRunEvents(run, incoming = []) {
-  const events = orderedUniqueEvents(run.events ?? [], incoming)
-  let status = run.status
-  let stage = run.stage
-  let title = run.title
-  let result = run.result
-  let endedAt = run.endedAt
-  let lastEventAt = run.lastEventAt
+export function mergeSessionEvents(session, incoming = []) {
+  const events = orderedUniqueEvents(session.events ?? [], incoming)
+  let status = session.status
+  let stage = session.stage
+  let title = session.title
+  let result = session.result
+  let endedAt = session.endedAt
+  let lastEventAt = session.lastEventAt
 
   for (const event of events) {
     const { type, payload = {} } = event
@@ -49,10 +53,10 @@ export function mergeRunEvents(run, incoming = []) {
   }
 
   // 墓碑会话的历史可能没有 session.ended；摘要的 ENDED 必须保持单向。
-  if (run.status === ENDED) status = ENDED
+  if (session.status === ENDED) status = ENDED
 
   return {
-    ...run,
+    ...session,
     events,
     status,
     stage,

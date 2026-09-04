@@ -58,20 +58,24 @@ describe('输入草稿', () => {
 
 describe('快照与全局流归并', () => {
   it('tail 先到仍收敛到有序事实，断线补齐游标取最大 seq', async () => {
-    const snapshot = [
-      { seq: 1, type: 'session.started', payload: { ts: 10 } },
-      { seq: 2, type: 'stage.changed', payload: { ts: 20, stage: 'VERIFY' } },
-      { seq: 3, type: 'session.title_changed', payload: { ts: 30, title: '验证 nginx' } },
-      { seq: 4, type: 'turn.completed', payload: { ts: 40, result: '上一回合完成' } },
-      { seq: 5, type: 'turn.started', payload: { ts: 50 } },
-    ]
-    const snapshotText = () => snapshot.map((item) => [
-      `id: ${item.seq}`,
-      `event: ${item.type}`,
-      `data: ${JSON.stringify(item.payload)}`,
-      '',
-    ].join('\n')).join('\n')
-    let replay = ''
+    const sse = (...frames) => frames.map(([seq, type, payload]) => [
+      `id: ${seq}`,
+      `event: ${type}`,
+      `data: ${JSON.stringify(payload)}`,
+    ].join('\n')).join('\n\n')
+    const response = (body) => ({ ok: true, text: async () => body })
+    const deferredResponse = () => {
+      let resolve
+      const promise = new Promise((done) => { resolve = (body) => done(response(body)) })
+      return { promise, resolve }
+    }
+    const broadcast = (seq, type, payload = {}) => {
+      sseListeners[type][0]({
+        data: JSON.stringify({ run_id: 'event-run', seq, ts: seq * 10, type, payload }),
+      })
+    }
+    const initialReplay = deferredResponse()
+    const queuedReplays = [initialReplay.promise]
     const snapshotRequests = []
     fetch.mockImplementation(async (url, options = {}) => {
       if (url === '/api/runs' && options.method === 'POST') {
@@ -82,29 +86,31 @@ describe('快照与全局流归并', () => {
       }
       if (url === '/api/runs/event-run/events') {
         snapshotRequests.push(options)
-        const body = replay
-        return { ok: true, text: async () => body }
+        return queuedReplays.shift() ?? response('')
       }
       return { ok: false }
     })
 
     await store.createRun()
-    await Promise.resolve()
-    sseListeners['turn.started'][0]({
-      data: JSON.stringify({ run_id: 'event-run', seq: 5, ts: 50, type: 'turn.started', payload: {} }),
-    })
-    replay = snapshotText()
-    globalSource.onopen()
+    expect(snapshotRequests.at(-1).headers['Last-Event-ID']).toBe('0')
+    broadcast(5, 'turn.started')
+    initialReplay.resolve(sse(
+      [1, 'session.started', { ts: 10 }],
+      [2, 'stage.changed', { ts: 20, stage: 'VERIFY' }],
+      [3, 'session.title_changed', { ts: 30, title: '验证 nginx' }],
+      [4, 'turn.completed', { ts: 40, result: '上一回合完成' }],
+      [5, 'turn.started', { ts: 50 }],
+    ))
 
     await vi.waitFor(() => expect(store.getState().runs['event-run'].events).toHaveLength(5))
-    const run = store.getState().runs['event-run']
+    const session = store.getState().runs['event-run']
     expect({
-      seqs: run.events.map((item) => item.seq),
-      status: run.status,
-      stage: run.stage,
-      title: run.title,
-      result: run.result,
-      lastEventAt: run.lastEventAt,
+      seqs: session.events.map((item) => item.seq),
+      status: session.status,
+      stage: session.stage,
+      title: session.title,
+      result: session.result,
+      lastEventAt: session.lastEventAt,
     }).toEqual({
       seqs: [1, 2, 3, 4, 5],
       status: 'RUNNING',
@@ -114,13 +120,25 @@ describe('快照与全局流归并', () => {
       lastEventAt: 50_000,
     })
 
-    for (const seq of [7, 6]) {
-      sseListeners['agent.message'][0]({
-        data: JSON.stringify({ run_id: 'event-run', seq, ts: seq * 10, type: 'agent.message', payload: {} }),
-      })
-    }
-    replay = ''
+    const gapReplay = deferredResponse()
+    queuedReplays.push(gapReplay.promise)
     globalSource.onopen()
-    expect(snapshotRequests.at(-1).headers['Last-Event-ID']).toBe('7')
+    expect(snapshotRequests.at(-1).headers['Last-Event-ID']).toBe('5')
+    broadcast(10, 'turn.started')
+    broadcast(8, 'agent.message', { text: '实时先到' })
+    gapReplay.resolve(sse(
+      [6, 'user.message', { ts: 60, text: '继续' }],
+      [7, 'stage.changed', { ts: 70, stage: 'ARCHIVE' }],
+      [8, 'agent.message', { ts: 80, text: '实时先到' }],
+      [9, 'turn.completed', { ts: 90, result: '补齐完成' }],
+      [10, 'turn.started', { ts: 100 }],
+    ))
+
+    await vi.waitFor(() => expect(store.getState().runs['event-run'].events).toHaveLength(10))
+    expect(store.getState().runs['event-run'].events.map((item) => item.seq)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
+
+    queuedReplays.push(Promise.resolve(response('')))
+    globalSource.onopen()
+    expect(snapshotRequests.at(-1).headers['Last-Event-ID']).toBe('10')
   })
 })
