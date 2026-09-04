@@ -220,9 +220,14 @@ function ArtifactView({ artifact }) {
   )
 }
 
-// 结束会话：显式且不可逆；执行中结束还会打断在飞回合，需二次确认
+// 结束会话：显式且不可逆，一律二次确认——READY 可能挂着一整天工作上下文，
+// 结束后只能克隆；执行中结束还会打断在飞回合
 function onEndRun(run) {
-  if (run.status === 'RUNNING' && !window.confirm(`会话 ${run.runId} 回合执行中，结束将打断在飞回合（已提交的云操作不受影响）。确定结束？`)) return
+  const msg =
+    run.status === 'RUNNING'
+      ? `会话 ${run.runId} 回合执行中，结束将打断在飞回合（已提交的云操作不受影响）。确定结束？`
+      : `确定结束会话 ${run.runId}？结束后不可恢复（只读回看，只能克隆继续）。`
+  if (!window.confirm(msg)) return
   store.endRun()
 }
 
@@ -283,17 +288,17 @@ export default function App() {
       <header className="va-head">
         {control ? (
           <>
-            <span className="va-runid">{control.runId}</span>
+            <span className="va-runid" title={control.title ?? undefined}>{control.runId}</span>
             <span className={`dot tone-${STATUS_TONE[control.status] ?? 'ok'}`} />
             <span>{RUN_STATUS_LABEL[control.status]}</span>
-            {control.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（Last-Event-ID 续传）…</span>}
+            {control.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（已收事件不丢，恢复后自动补发）…</span>}
             <span className="va-spacer" />
             <span className="va-stage">{control.stage ? STAGE_LABEL[control.stage] ?? control.stage : null}</span>
             <span className="va-elapsed" title="累计执行：各回合之和，扣除等待输入">
               总计时间：{fmtActive(control, s.now)}
             </span>
-            <span className="va-elapsed" title="最后一次用户发送消息的时刻">更新时间 {fmtLastActivity(control)}</span>
-            <button onClick={() => onEndRun(control)} disabled={!store.isOperable(control.status)}>
+            <span className="va-elapsed" title="最后一次用户发送指令的时刻">最近指令 {fmtLastActivity(control)}</span>
+            <button className="va-end" onClick={() => onEndRun(control)} disabled={!store.isOperable(control.status)}>
               结束会话
             </button>
           </>
@@ -316,7 +321,7 @@ export default function App() {
         </button>
         <div className="va-main">
           <Tabs />
-          <div className="va-tab-body">
+          <div className="va-tab-body" id="va-tab-body">
             {activeTab === null ? (
               <div className="empty-state">
                 <div className="big">未开始</div>

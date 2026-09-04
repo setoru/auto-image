@@ -135,7 +135,10 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel }
                 className={`va-art-item${activeRel === rel ? ' on' : ''}`}
                 onClick={() => store.openArtifact(rel, f)}
                 onKeyDown={(e) => {
-                  if (e.key === 'Enter') store.openArtifact(rel, f)
+                  if (e.key === 'Enter' || e.key === ' ') {
+                    e.preventDefault()
+                    store.openArtifact(rel, f)
+                  }
                 }}
                 title={rel}
               >
@@ -242,10 +245,11 @@ export default function SidePanel() {
   }
   return (
     <aside className="va-side" id="task-side">
-      <div className="va-side-tabs" role="tablist">
+      <div className="va-side-tabs" role="tablist" aria-label="侧栏面板">
         <button
           role="tab"
           aria-selected={panel === 'sessions'}
+          aria-controls="va-side-panel"
           className={panel === 'sessions' ? 'on' : ''}
           onClick={() => switchPanel('sessions')}
         >
@@ -254,17 +258,20 @@ export default function SidePanel() {
         <button
           role="tab"
           aria-selected={panel === 'artifacts'}
+          aria-controls="va-side-panel"
           className={panel === 'artifacts' ? 'on' : ''}
           onClick={() => switchPanel('artifacts')}
         >
           产物
         </button>
       </div>
-      {panel === 'sessions' ? (
-        <SessionPanel order={s.order} runs={s.runs} controlId={store.controlRunId()} openIds={openIds} />
-      ) : (
-        <ArtifactPanel openFiles={openFiles} activeRel={activeTab?.kind === 'file' ? activeTab.relPath : null} />
-      )}
+      <div className="va-side-panel-wrap" id="va-side-panel" role="tabpanel">
+        {panel === 'sessions' ? (
+          <SessionPanel order={s.order} runs={s.runs} controlId={store.controlRunId()} openIds={openIds} />
+        ) : (
+          <ArtifactPanel openFiles={openFiles} activeRel={activeTab?.kind === 'file' ? activeTab.relPath : null} />
+        )}
+      </div>
     </aside>
   )
 }

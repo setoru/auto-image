@@ -5,6 +5,13 @@
 export const RUN_STATUS_LABEL = { RUNNING: '执行中', READY: '等待指令', ENDED: '已结束' }
 export const STAGE_LABEL = { GUIDE: '生成指南', INSTALL: '远程安装', VERIFY: '只读验证', ARCHIVE: '打包归档', BUILD: 'RPM 构建' }
 
+// 标签页状态词（tab 的 title 与控制面胶囊共用）：状态点形状之外再给文字，
+// 状态不只靠形状/颜色传达。判定值与 tabDot 同源。
+export const TAB_DOT_LABEL = { running: '执行中', ready: '等待指令', failed: '最近回合失败', ended: '已结束' }
+export function tabStatusLabel(run) {
+  return TAB_DOT_LABEL[tabDot(run)] ?? ''
+}
+
 // 首条指令原文：服务端摘要的 firstPrompt 优先（重启找回的历史在事件回放前就有名字），
 // 否则取事件流首条 user.message。空会话（含尚未回放的历史）返回 null。
 export function firstPromptText(run) {
@@ -54,7 +61,13 @@ export function activeSeconds(run, now) {
 export function fmtActive(run, now) {
   if (!run.startedAt) return '--:--'
   const s = activeSeconds(run, now)
-  return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`
+  const h = Math.floor(s / 3600)
+  const m = Math.floor((s % 3600) / 60)
+  const sec = s % 60
+  const pad = (n) => String(n).padStart(2, '0')
+  // 小时档：几十分钟级的长部署（dist-upgrade + 安装 + 验证 + 制镜像）
+  // 是常态，mm:ss 顶到 452:10 已不可读
+  return h > 0 ? `${h}:${pad(m)}:${pad(sec)}` : `${pad(m)}:${pad(sec)}`
 }
 
 // 更新时间（具体日期+时间）：最后一条 user.message 的 ts——会话随用户
@@ -74,10 +87,18 @@ export function fmtLastActivity(run) {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`
 }
 
-// 产物大小：B / KB（清单 size 字段的展示形态）
+// 产物大小：B / KB / MB / GB（清单 size 字段的展示形态；rpm 包几十 MB 是
+// 常态，KB 一级顶到五位数不可读）
 export function fmtSize(bytes) {
   if (bytes == null) return ''
-  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`
+  const units = ['B', 'KB', 'MB', 'GB']
+  let v = bytes
+  let u = 0
+  while (v >= 1024 && u < units.length - 1) {
+    v /= 1024
+    u++
+  }
+  return u === 0 ? `${v} ${units[u]}` : `${v.toFixed(1)} ${units[u]}`
 }
 
 // ---------- 标签栏（多会话视图） ----------
@@ -88,9 +109,9 @@ export function lastActivityAt(run) {
   return run?.lastEventAt ?? run?.startedAt ?? 0
 }
 
-// 标签状态点：● 执行中 / ○ 等待指令 / ! 最近回合失败 / ■ 已结束。
+// 标签状态点：● 执行中 / ○ 等待指令 / ◆ 最近回合失败 / ■ 已结束。
 // 失败标记由事件流倒序判定：最后一条回合开卷/收尾洗掉它，只有落在流尾的
-// turn.failed 才标 ！；未回放的会话（仅轮询摘要，无事件）只剩状态可用。
+// turn.failed 才标 ◆；未回放的会话（仅轮询摘要，无事件）只剩状态可用。
 export function tabDot(run) {
   if (!run) return 'ready'
   if (run.status === 'RUNNING') return 'running'
