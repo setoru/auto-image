@@ -354,7 +354,6 @@ export default function App() {
             <span className="va-runid" title={control.title ?? undefined}>{control.runId}</span>
             <span className={`dot tone-${STATUS_TONE[control.status] ?? 'ok'}`} />
             <span>{RUN_STATUS_LABEL[control.status]}</span>
-            {control.connection === 'reconnecting' && <span className="va-conn">连接断开，重连中（已收事件不丢，恢复后自动补发）…</span>}
             <span className="va-spacer" />
             <span className="va-stage">{control.stage ? STAGE_LABEL[control.stage] ?? control.stage : null}</span>
             <span className="va-elapsed" title="累计执行：各回合之和，扣除等待输入">
@@ -367,6 +366,9 @@ export default function App() {
           </>
         ) : (
           <span className="va-runid">auto-image 部署会话</span>
+        )}
+        {s.connection === 'reconnecting' && (
+          <span className="va-conn">事件流连接断开，重连中（恢复后自动追平）…</span>
         )}
       </header>
 

@@ -1,11 +1,13 @@
 // 共享会话状态：多会话并行（并发上限内的执行中回合可多个），动作经
-// HTTP/SSE 与服务端交互。每个打开的会话标签页一条常驻 EventSource（attach
-// 后切走不断，断线浏览器自动重连并携带 Last-Event-ID，服务端从 seq+1 补发；
-// 已收事件按 seq 去重）。
+// HTTP/SSE 与服务端交互。事件通道是一条全局 SSE：启动即连 /api/stream、
+// 永不主动关闭，广播帧按 runId 分发给打开的标签页（未打开的丢弃）；
+// 打开会话标签页 = 拉一次快照补历史（按 Last-Event-ID 重放，与流重叠的
+// 事件由 per-run seq 去重吸收）；断线由浏览器自动重连，恢复后对打开的
+// 标签页逐个重拉快照追平。
 //
 // 标签页是纯客户端视图（会话与产物文件同栏混排，开-关-激活-控制面决策
-// 全走 tabState 纯模块）：closeTab 只断 SSE 不断会话，会话仍在列表里，
-// 重新打开（selectRun）恢复原会话；「结束会话」才是服务端动作。
+// 全走 tabState 纯模块）：closeTab 只关视图，会话仍在列表里，重新打开
+// （selectRun）重拉快照恢复历史；「结束会话」才是服务端动作。
 // 非查看中的标签页状态点由 GET /api/runs 摘要轮询驱动。header 与输入条
 // 构成控制面，绑定 controlRunId 解析出的会话——激活文件标签页不换对象。
 import { useSyncExternalStore } from 'react'
@@ -94,6 +96,7 @@ let state = {
   tabs: restored.openTabs.map((runId) => ({ kind: 'session', runId })),
   activeKey: restored.viewRunId ? `session:${restored.viewRunId}` : null,
   lastSessionKey: restored.viewRunId ? `session:${restored.viewRunId}` : null,
+  connection: 'connecting', // 全局事件流连接态：connecting → live / reconnecting
   submitError: null,
   now: Date.now(),
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
@@ -172,51 +175,111 @@ function conflictMessage(err) {
     : err.detail || err.message
 }
 
-// ---------- SSE ----------
+// ---------- 事件通道：全局流 + 快照 ----------
 
-function onStreamEvent(runId, es, e) {
-  const event = { seq: Number(e.lastEventId), type: e.type, payload: JSON.parse(e.data) }
+// 事件落地（广播帧与快照重放同一归途）：appendTo 的 seq 去重与状态推进，
+// 阶段推进与收尾类事件顺手触发产物清单刷新（幂等无害）
+function ingestEvent(runId, event) {
   appendTo(runId, event)
-  // 阶段推进与收尾都可能带来新落盘的产物，触发清单刷新
   if (REFRESH_EVENT_TYPES.includes(event.type)) refreshArtifacts()
-  // session.ended 后服务端会正常结束流，主动 close 避免 EventSource 无限
-  // 重连（唯一会话终态事件：显式结束与重启找回的历史收尾）
-  if (event.type === 'session.ended') detachStream(runId, es)
 }
 
-// 关流并清挂载记录：重开该标签时按未挂流处理，重新回放（事件关流与
-// 已知终态的 onerror 关流同一归途）
-function detachStream(runId, es) {
-  es.close()
-  setRun(runId, { es: null, connection: 'idle' })
-}
-
-function attachStream(runId) {
-  const run = state.runs[runId]
-  if (!run || run.es) return // 常驻一条：已挂不重挂
-  const es = new EventSource(`/api/runs/${runId}/events`)
-  es.onopen = () => setRun(runId, { connection: 'live' })
-  es.onerror = () => {
-    // 已知终态（摘要给出 ENDED）而流被服务端正常关闭：重启恢复的墓碑
-    // 会话流里没有 session.ended 事件，回放完毕即关流——close 止住无限重连
-    if (state.runs[runId]?.status === ENDED) {
-      detachStream(runId, es)
-      return
-    }
-    if (es.readyState !== EventSource.CLOSED) setRun(runId, { connection: 'reconnecting' })
+// 广播帧 → 事件落地：帧带 run_id/seq/ts，先过「该 run 打开着标签页」守卫
+// （未打开的丢弃——侧栏态势由摘要轮询驱动）。ts 在帧顶层（快照路径则是
+// data 里已并入），统一并进 payload——appendTo 读 payload.ts
+function onBroadcastFrame(e) {
+  let frame
+  try {
+    frame = JSON.parse(e.data)
+  } catch {
+    return
   }
-  for (const type of EVENT_TYPES) es.addEventListener(type, (e) => onStreamEvent(runId, es, e))
-  setRun(runId, { es })
+  if (!openRunIds().has(frame.run_id)) return
+  ingestEvent(frame.run_id, {
+    seq: frame.seq,
+    type: frame.type,
+    payload: { ...frame.payload, ts: frame.ts },
+  })
 }
 
-// SSE 断线重连后服务端会全量重放，按 seq 去重；状态随事件类型同步推进
-// （重放的 stage.changed / 收尾事件会重复触发清单刷新，幂等无害）。
+// 打开着的会话标签页的 runId 集（分发守卫；loadRuns 剪枝前对恢复标签页
+// 宽进——不存在的 run 的帧会被 appendTo 的存在性守卫拦下）
+function openRunIds() {
+  const ids = new Set()
+  for (const t of state.tabs) if (t.kind === 'session') ids.add(t.runId)
+  return ids
+}
+
+// SSE 文本 → 事件数组：id/event/data 三行成帧，`:` 开头注释行（心跳）跳过。
+// 单帧 data 非法 JSON 只丢那一帧（外部输出不保证，坏一帧不放大成整批丢失）
+function parseSseEvents(text) {
+  const events = []
+  for (const block of text.split('\n\n')) {
+    if (!block || block.startsWith(':')) continue
+    let seq = null
+    let type = null
+    let data = null
+    for (const line of block.split('\n')) {
+      if (line.startsWith('id:')) seq = Number(line.slice(3).trim())
+      else if (line.startsWith('event:')) type = line.slice(6).trim()
+      else if (line.startsWith('data:')) data = line.slice(5).trim()
+    }
+    if (seq == null || !type || data == null) continue
+    try {
+      events.push({ seq, type, payload: JSON.parse(data) })
+    } catch {
+      // 坏帧丢弃：下一帧继续
+    }
+  }
+  return events
+}
+
+// 拉一次快照补历史：per-run 端点按 Last-Event-ID 重放、重放完即断，重叠
+// 事件由 appendTo 的 seq 去重吸收。run 已不在（服务端重启丢了空会话等）
+// 静默作罢——摘要轮询会把它从列表剪掉。
+async function loadSnapshot(runId) {
+  const run = state.runs[runId]
+  if (!run) return
+  const lastSeq = run.events.length ? run.events[run.events.length - 1].seq : 0
+  try {
+    const resp = await fetch(`/api/runs/${runId}/events`, { headers: { 'Last-Event-ID': String(lastSeq) } })
+    if (!resp.ok) return
+    const events = parseSseEvents(await resp.text())
+    if (!events.length) return
+    // 快照与全局流两路交错到达，按 seq 排序再走去重吸收
+    events.sort((a, b) => a.seq - b.seq)
+    for (const event of events) ingestEvent(runId, event)
+  } catch {
+    // 快照失败不打断使用：全局流仍在，断线恢复或下次打开再补
+  }
+}
+
+// 对打开的会话标签页逐个重拉快照（onopen 恢复与 loadRuns 首屏恢复共用）
+function refreshOpenSnapshots() {
+  for (const runId of openRunIds()) loadSnapshot(runId)
+}
+
+// 全局流：应用启动即建一条、永不主动关闭。断线由浏览器自动重连，
+// 恢复（onopen，含首次连上）对打开的会话标签页逐个重拉快照追平——
+// 断线期间错过的事件全靠快照补，重连本身不带断点。
+const globalStream = new EventSource('/api/stream')
+for (const type of EVENT_TYPES) globalStream.addEventListener(type, onBroadcastFrame)
+globalStream.onopen = () => {
+  set({ connection: 'live' })
+  refreshOpenSnapshots()
+}
+globalStream.onerror = () => {
+  if (globalStream.readyState !== EventSource.CLOSED) set({ connection: 'reconnecting' })
+}
+
+// 状态随事件类型同步推进（快照回放与实时广播同一归途，重复事件按 seq
+// 去重；重放的 stage.changed / 收尾事件会重复触发清单刷新，幂等无害）。
 // 单向推进：历史回放中的回合事件不把 ENDED 会话拉回可操作态。
 function appendTo(runId, event) {
   const run = state.runs[runId]
   if (!run || run.events.some((ev) => ev.seq === event.seq)) return
   const patch = { events: [...run.events, event] }
-  // 最后活动时刻以服务端事件 ts 为准（刷新/SSE 重放后不漂移）
+  // 最后活动时刻以服务端事件 ts 为准（刷新/快照重放后不漂移）
   if (event.payload.ts) patch.lastEventAt = event.payload.ts * 1000
   if (event.type === 'stage.changed') patch.stage = event.payload.stage
   if (event.type === 'session.title_changed') patch.title = event.payload.title
@@ -250,11 +313,9 @@ function makeRun(overrides) {
     resumedFrom: null,
     events: [],
     result: null,
-    connection: 'idle',
     startedAt: null,
     endedAt: null,
     lastEventAt: null,
-    es: null,
     ...overrides,
   }
 }
@@ -278,8 +339,7 @@ async function fetchSummaries() {
 // 启动加载：拉全量 run 摘要恢复会话列表（服务重启后经 transcript 重放，
 // 全部可续聊、ENDED 只读回看）；刷新恢复的标签集里不在列表的会话剪掉，
 // 无存续标签（或全被剪空）时首屏打开最新一条。尽力而为，
-// 失败从空开始。ENDED 会话重放完自动关流（session.ended），READY/RUNNING
-// 常驻等待续聊。
+// 失败从空开始。存续标签页的历史由快照补齐（实时事件走全局流）。
 export async function loadRuns() {
   try {
     const order = await fetchSummaries()
@@ -296,7 +356,7 @@ export async function loadRuns() {
       if (!remembered) patch.lastSessionKey = fallbackKey
       if (!liveTabs.some((t) => tabState.tabKey(t) === state.activeKey)) patch.activeKey = fallbackKey
       set(patch)
-      for (const t of liveTabs) if (t.kind === 'session') attachStream(t.runId)
+      refreshOpenSnapshots()
     } else {
       // 无存续会话标签页或全被剪空：回到首屏开最新一条
       set({ tabs: [], activeKey: null, lastSessionKey: null })
@@ -322,8 +382,8 @@ function mergeSummary(run, s) {
   }
 }
 
-// 摘要轮询：驱动非查看中标签页的状态点与排序（SSE 只覆盖打开的标签页，
-// 他人会话或重启新会话只有列表最知道）。轻字段覆盖，不动 events/es。
+// 摘要轮询：驱动非查看中标签页的状态点与排序（全局流只覆盖打开的标签
+// 页，他人会话或重启新会话只有列表最知道）。轻字段覆盖，不动 events。
 setInterval(() => pollSummaries(), 5000)
 
 async function pollSummaries() {
@@ -334,11 +394,13 @@ async function pollSummaries() {
   }
 }
 
-// 新会话落位（新建/克隆共用）：run 注册、标签页尾插并切为查看中
+// 新会话落位（新建/克隆共用）：run 注册、标签页尾插并切为查看中，再拉一次
+// 快照补齐开卷事件与转录历史（广播帧可能先于 run 落位到达被守卫丢弃，
+// 快照才是历史的确定入口；Last-Event-ID= 已有最大 seq，去重吸收重叠）
 function adoptNewRun(run) {
   set({ runs: { ...state.runs, [run.runId]: run }, order: [run.runId, ...state.order], submitError: null })
   applyTabState(tabState.openSession(state.tabs, state.activeKey, run.runId))
-  attachStream(run.runId)
+  loadSnapshot(run.runId)
 }
 
 // 新建 = 一步创建空会话（READY），无中间表单；新建不受其他会话执行影响
@@ -350,7 +412,6 @@ export async function createRun() {
         runId: data.run_id,
         status: data.status,
         resumedFrom: data.resumed_from ?? null,
-        connection: 'live',
         startedAt: Date.now(),
       })
     )
@@ -360,6 +421,7 @@ export async function createRun() {
 }
 
 // 克隆 = 从控制面会话（READY/ENDED）分叉新会话：事件流转录、标题继承
+// （转录历史经 adoptNewRun 的快照补齐——转录不带 session.started）
 export async function cloneRun() {
   const src = state.runs[controlRunId()]
   if (!src) return
@@ -370,7 +432,6 @@ export async function cloneRun() {
         runId: data.run_id,
         status: data.status,
         resumedFrom: data.resumed_from ?? null,
-        connection: 'live',
         startedAt: Date.now(),
       })
     )
@@ -442,18 +503,18 @@ export function activateTab(key) {
   set(patch)
 }
 
-// 打开（或激活既有）会话标签页并挂流：不创建会话、不产生服务端动作
-// （loadRuns 首屏恢复与列表/标签点击共用）
+// 打开（或激活既有）会话标签页并拉快照补历史：不创建会话、不产生服务端
+// 动作（loadRuns 首屏恢复与列表/标签点击共用）；已开着的标签页不重拉
 export function selectRun(runId) {
   const run = state.runs[runId]
   if (!run) return
+  const existed = openRunIds().has(runId)
   applyTabState(tabState.openSession(state.tabs, state.activeKey, runId))
-  attachStream(runId)
+  if (!existed) loadSnapshot(runId)
 }
 
-// 关闭标签页 = 只关视图：会话标签页断 SSE（会话仍在列表可重开），文件
-// 标签页内容缓存保留（重开瞬开）。断 SSE 在 tabState 判定之后——最后一枚
-// 会话标签页被拦截时原状态返回，不动它的流。
+// 关闭标签页 = 只关视图：会话标签页的历史留在内存（会话仍在列表可重开，
+// 重开时快照按 Last-Event-ID 只补缺口），文件标签页内容缓存保留
 export function closeTab(key) {
   const prevTabs = state.tabs
   applyTabState(tabState.closeTab(state.tabs, state.activeKey, key))
@@ -462,13 +523,6 @@ export function closeTab(key) {
   if (state.lastSessionKey === key && !state.tabs.some((t) => tabState.tabKey(t) === state.lastSessionKey)) {
     const last = state.tabs.filter((t) => t.kind === 'session').at(-1)
     if (last) set({ lastSessionKey: tabState.tabKey(last) })
-  }
-  const t = prevTabs.find((x) => tabState.tabKey(x) === key)
-  if (t?.kind !== 'session') return
-  const run = state.runs[t.runId]
-  if (run?.es) {
-    run.es.close()
-    setRun(t.runId, { es: null, connection: 'idle' })
   }
 }
 

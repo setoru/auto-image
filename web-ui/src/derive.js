@@ -103,8 +103,8 @@ export function fmtSize(bytes) {
 
 // ---------- 标签栏（多会话视图） ----------
 
-// 最后活动时刻：事件 ts（SSE / 摘要轮询同步进 run）优先，无活动的新会话
-// 回退创建时刻——新建因此天然排最前
+// 最后活动时刻：事件 ts（全局流 / 快照 / 摘要轮询同步进 run）优先，无活动
+// 的新会话回退创建时刻——新建因此天然排最前
 export function lastActivityAt(run) {
   return run?.lastEventAt ?? run?.startedAt ?? 0
 }
