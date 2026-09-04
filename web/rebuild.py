@@ -35,9 +35,9 @@ def recover_sessions(manager, store, list_sessions, get_session_messages, state,
 
     state 为落盘簿记整册（{ended_sessions, sessions, clone_sources}，见
     state.load_state）。transcript_times 为会话时刻对齐表读取器（uuid →
-    epoch 秒；事件时刻透传的源，缺省不透传）。历史读取失败只跳过对应
-    会话（空 transcript、损坏文件），不阻断服务启动——恢复是找回尽量多
-    的历史，不是启动的前置条件。
+    epoch 秒；重放事件的时刻透传源，缺省不透传、ts 回退当下）。历史读取
+    失败只跳过对应会话（空 transcript、损坏文件），不阻断服务启动——恢复
+    是找回尽量多的历史，不是启动的前置条件。
     """
     try:
         infos = list_sessions()
@@ -59,11 +59,15 @@ def recover_sessions(manager, store, list_sessions, get_session_messages, state,
             logger.warning("会话 %s 无可见消息，跳过该会话", info.session_id)
             continue
         try:
-            restored.append(_recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from))
+            times = transcript_times(info.session_id) if transcript_times else {}
+        except Exception:  # noqa: BLE001 —— 时刻源坏只回退当下，不丢会话
+            logger.warning("读取会话 %s 的时刻对齐表失败，ts 回退当下", info.session_id, exc_info=True)
+            times = {}
+        try:
+            restored.append(_recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from, times))
         except Exception:  # noqa: BLE001 —— 重放中途的任何异常只丢该条
             logger.warning("重放会话 %s 失败，跳过该会话", info.session_id, exc_info=True)
             continue
-    _ = transcript_times  # 透传载体（append 可选 ts）已就位，消费在重放路径
     return restored
 
 
@@ -87,13 +91,14 @@ def user_prompt_text(message):
     return text or None
 
 
-def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from):
+def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from, times=None):
     """单条 transcript 会话 → 内存 run + 事件流重放。
 
     身份映射命中的沿用原 run_id；墓碑命中标 ENDED；克隆链镜像命中找回
     resumed_from。turn_open 重放补 turn.interrupted（重启截断的未收尾回合，
-    删除伪造 turn.completed 的行为）。创建与末事件时刻以 transcript 元信息
-    近似（transcript 无逐事件时刻，上面的重放 ts 都是重启当下的时刻）。
+    删除伪造 turn.completed 的行为）。事件时刻按 times（uuid 对齐表）
+    透传源 transcript 行——消息 uuid 不在表内回退 append 当下；创建与末
+    活动时刻以 transcript 元信息近似（重放事件不是真实活动，见收尾处）。
     """
     run_id = reversed_map.get(info.session_id)
     if run_id is None or run_id in manager.runs:
@@ -116,42 +121,61 @@ def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, r
     manager.register(run)
     manager.adopt_ids([run.run_id])
     store.create(run.run_id)
-    store.append(run.run_id, "session.started", {})
-    replay_messages(run, store, messages)
+    store.append(run.run_id, "session.started", {}, ts=_first_time(messages, times))
+    replay_messages(run, store, messages, times)
     run.last_event_at = last_event_at  # 重放事件不是真实活动，恢复簿记值
     return run
 
 
-def replay_messages(run, store, messages):
+def _first_time(messages, times):
+    """会话首个时刻（session.started 的透传源）：首条消息的源时刻，对齐表
+    不覆盖（空表 / 首行缺 timestamp）时 None → append 当下。"""
+    for message in messages:
+        ts = times.get(getattr(message, "uuid", None))
+        if ts is not None:
+            return ts
+    return None
+
+
+def replay_messages(run, store, messages, times=None):
     """transcript 可见消息链 → 内部事件流（first_prompt / stage 随重放恢复），
     不含生命周期起止事件——新起点由调用方先补；收尾：完整回合补
     turn.completed，未收尾回合（transcript 推导 turn_open）补
-    turn.interrupted（重启截断，不伪造完成）。"""
+    turn.interrupted（重启截断，不伪造完成）。
+
+    事件时刻透传源消息行（times 按 uuid 对齐，缺项回退 append 当下）；
+    回合收尾事件取边界消息的时刻——turn.completed 是下一条用户输入前的
+    最后一条已落消息，turn.interrupted 是回合内最后一条已落消息（执行
+    确认推进到的最后位置，之后的时间没在执行）。"""
     tool_names = {}
     last_text = ""     # 当前回合最后一条 agent 文本（回合汇总来源）
+    last_ts = None     # 当前回合最后一条已落消息的源时刻（收尾事件透传源）
     turn_open = False  # 是否有未收尾的回合（首条用户输入之后、无下一条输入收口）
     for message in messages:
         raw = {"type": message.type, "message": message.message}
+        ts = times.get(getattr(message, "uuid", None)) if times else None
         prompt = user_prompt_text(raw)
         if prompt is not None:
             if turn_open:
-                store.append(run.run_id, "turn.completed", {"result": redact_text(last_text)})
+                store.append(run.run_id, "turn.completed", {"result": redact_text(last_text)}, ts=last_ts)
             # turn.started 与 user.message 配对（与实时回合一致），SSE 消费端
             # 不用区分实时流与重放流
-            store.append(run.run_id, "turn.started", {})
-            store.append(run.run_id, "user.message", {"text": prompt})
+            store.append(run.run_id, "turn.started", {}, ts=ts)
+            store.append(run.run_id, "user.message", {"text": prompt}, ts=ts)
             if run.first_prompt is None:
                 run.first_prompt = prompt
-            turn_open, last_text = True, ""
+            turn_open, last_text, last_ts = True, "", ts
             continue
         for etype, payload in normalize_message(raw, tool_names):
-            store.append(run.run_id, etype, payload)
+            store.append(run.run_id, etype, payload, ts=ts)
             if etype == "stage.changed":
                 run.stage = payload["stage"]
             elif etype == "agent.message":
                 last_text = payload["text"]
+        if ts is not None:
+            last_ts = ts
     if turn_open:
-        store.append(run.run_id, "turn.interrupted", {})
+        store.append(run.run_id, "turn.interrupted", {}, ts=last_ts)
 
 
 def _derived_run_id(manager, session_id):

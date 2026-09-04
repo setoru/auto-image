@@ -12,6 +12,7 @@ import tempfile
 import logging
 import os
 import sys
+import time
 from types import SimpleNamespace
 
 import httpx
@@ -58,6 +59,14 @@ def msg(mtype, content):
     )
 
 
+# 消息链的稳定 uuid 版本：同 content 不同回合的消息也各得其所（跨会话对齐
+# 表共享时按 uuid 精确对拍；时刻表即 {消息 uuid: epoch 秒}）
+def uuided(messages, base=0):
+    for i, m in enumerate(messages):
+        m.uuid = f"u{i + base:03d}"
+    return messages
+
+
 # 一段两回合的部署 transcript：首回合走 GUIDE 子 agent 工具调用，
 # 第二回合是纯文本追问——覆盖回合边界推导与阶段推导两条映射路径
 def deploy_transcript():
@@ -74,8 +83,9 @@ def deploy_transcript():
     ]
 
 
-def history_app(infos, messages_fn, **kwargs):
-    """以假 list_sessions / get_session_messages 装配的应用（重启后形态）。"""
+def history_app(infos, messages_fn, times_fn=None, **kwargs):
+    """以假 list_sessions / get_session_messages 装配的应用（重启后形态）；
+    times_fn 为假时刻表读取器（时刻透传对拍缝），缺省不透传。"""
     kwargs.setdefault("residual_cli_scan", lambda: [])  # pgrep 路径由专门测试覆盖
     kwargs.setdefault("scope_config", "/nonexistent-scope.yaml")  # 不载真实凭据（脱敏已知值清单隔离）
     kwargs.setdefault("state_path", tempfile.mkdtemp() + "/state.json")  # 簿记隔离（恢复见 test_state）
@@ -84,6 +94,7 @@ def history_app(infos, messages_fn, **kwargs):
         heartbeat_interval=HEARTBEAT,
         list_sessions_fn=lambda: list(infos),
         get_session_messages_fn=messages_fn,
+        transcript_times_fn=times_fn or (lambda sid: {}),
         **kwargs,
     )
 
@@ -215,6 +226,101 @@ async def test_replayed_run_serves_as_clone_source():
         assert [e["event"] for e in drop_title_events(events)][-1] == "turn.completed"
         # 工厂收到重放 run 找回的 SDK 会话 id（transcript 里的 session_id）
         assert app.state.session_factory.session_ids[-1] == sid
+
+
+async def test_replay_passes_source_times_through():
+    """重放事件 ts 透传源 transcript 行时刻（uuid 对齐）：session.started
+    取会话首个时刻、一条消息派生的多条事件共享同一时刻、收尾事件取边界
+    消息时刻——快照端点读回对拍 + 回合求和可得真实时长。"""
+    sid = "11111111-2222-3333-4444-555555555555"
+    T = 1_700_000_000.0
+    messages = uuided(deploy_transcript())
+    times = {m.uuid: T + 600 * i for i, m in enumerate(messages)}
+    app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)],
+                      lambda s: messages, times_fn=lambda s: times)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.get("/api/runs")).json()["runs"][0]["run_id"]
+        resp = await open_stream(client, run_id)
+        events, _ = await collect_sse(resp, deadline_s=0.5)
+        by_type = [(e["event"], e["data"]["ts"]) for e in events]
+        # 首条消息（用户指令）派生的事件共享其时刻；session.started 取会话首时刻
+        assert by_type[0] == ("session.started", T)
+        assert by_type[1] == ("turn.started", T)
+        assert by_type[2] == ("user.message", T)
+        # 一条 assistant 消息派生的事件共享同一源时刻（turn.started/user.message
+        # 与首消息同刻，第二消息的 thinking/text 各自取自己行的时刻）
+        assert by_type[3] == ("agent.thinking", T + 600)
+        assert by_type[4] == ("agent.message", T + 1200)
+        # 完整回合收尾：下一条用户输入前的最后一条消息时刻（u005 = T + 3000）
+        assert by_type[9] == ("turn.completed", T + 3000)
+        # 未收尾回合：以回合内最后一条已落消息时刻收口（u007 = T + 4200）
+        assert by_type[-1] == ("turn.interrupted", T + 4200)
+        # 前端求和口径对拍：各回合时长之和（扣空档）
+        assert _replayed_seconds(events) == (T + 3000 - T) + (T + 4200 - (T + 3600))
+
+
+def _replayed_seconds(events):
+    """前端 activeSeconds 同款求和：user.message 开段、回合收尾事件闭段。"""
+    seconds = 0.0
+    start = None
+    for e in events:
+        if e["event"] == "user.message":
+            start = e["data"]["ts"]
+        elif e["event"] in ("turn.completed", "turn.interrupted") and start is not None:
+            seconds += e["data"]["ts"] - start
+            start = None
+    return seconds
+
+
+async def test_replay_falls_back_to_now_without_source_times():
+    """消息 uuid 不在时刻表（transcript 缺 timestamp / 文件损坏）时 ts 回退
+    append 当下，恢复照常不阻断。"""
+    sid = "11111111-2222-3333-4444-555555555555"
+    app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)],
+                      lambda s: deploy_transcript(),
+                      times_fn=lambda s: {"u-does-not-exist": 123.0})
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        runs = (await client.get("/api/runs")).json()["runs"]
+        assert len(runs) == 1, runs  # 缺时刻源只回退、不阻断恢复
+        run_id = runs[0]["run_id"]
+        resp = await open_stream(client, run_id)
+        events, _ = await collect_sse(resp, deadline_s=0.5)
+        now = time.time()
+        for e in events:  # 未知 uuid 全部回退当下（远晚于 transcript 元信息时刻）
+            assert abs(e["data"]["ts"] - now) < 60, e
+
+
+async def test_replayed_run_clones_with_overwritten_activity():
+    """克隆会话历史事件 ts 与源一致（透传）；摘要 last_event_at 为克隆操作
+    时刻（覆写，防刚克隆会话沉底、侧栏排最前）。"""
+    sid = "11111111-2222-3333-4444-555555555555"
+    T = 1_700_000_000.0
+    messages = uuided(deploy_transcript())
+    times = {m.uuid: T + 600 * i for i, m in enumerate(messages)}
+    app = history_app([session_info(sid, "部署 nginx", 1_700_000_000_000)],
+                      lambda s: messages, times_fn=lambda s: times)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.get("/api/runs")).json()["runs"][0]["run_id"]
+        src_events, _ = await collect_sse(await open_stream(client, run_id), deadline_s=0.5)
+        # 源流历史（除 session.started：克隆新流有自己的起点事件）
+        src_ts = [(e["event"], e["data"]["ts"]) for e in src_events[1:]]
+
+        before = time.time()
+        r = await client.post(f"/api/runs/{run_id}/clone")
+        assert r.status_code == 200, r.text
+        new_id = r.json()["run_id"]
+
+        runs = {x["run_id"]: x for x in (await client.get("/api/runs")).json()["runs"]}
+        assert runs[new_id]["last_event_at"] >= before  # 覆写为克隆操作时刻
+        assert (await client.get("/api/runs")).json()["runs"][0]["run_id"] == new_id  # 排最前
+
+        clone_events, _ = await collect_sse(await open_stream(client, new_id), deadline_s=0.5)
+        # 历史事件时刻原样透传（对拍源流；克隆自己的 session.started 是新
+        # 会话真实起点，取当下，不在对拍范围）
+        assert [(e["event"], e["data"]["ts"]) for e in clone_events[1:]] == src_ts
 
 
 async def test_replay_skips_messageless_and_broken_sessions():

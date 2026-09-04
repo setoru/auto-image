@@ -198,12 +198,17 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             raise HTTPException(status_code=409, detail=exc.detail) from exc
         store.create(new.run_id)
         store.append(new.run_id, "session.started", {})
-        # 源流转录进新会话（seq 重新编号）：生命周期事件不是新会话的状态
-        # ——源的 session.ended 会被前端当成本流终态关流判死，克隆后无法续聊
+        # 源流转录进新会话（seq 重新编号、ts 原样透传——实时事件的 ts 本就是
+        # 真实时刻）：生命周期事件不是新会话的状态——源的 session.ended 会被
+        # 前端当成本流终态关流判死，克隆后无法续聊
         store.adopt_history(
             new.run_id, run.run_id,
             skip_types={"session.started", "session.ended"},
         )
+        # 转录不是真实活动（与 rebuild「重放事件不是真实活动」同款手法）：
+        # 末活动时刻覆写为克隆操作时刻——刚点的克隆在列表排最前，归档历史
+        # 的「N 分钟前」归源会话自己显示
+        new.last_event_at = time.time()
         persist()
         return {"run_id": new.run_id, "status": new.status, "resumed_from": run.run_id}
 
