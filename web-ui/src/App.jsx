@@ -231,6 +231,36 @@ function onEndRun(run) {
   store.endRun()
 }
 
+// ---------- 侧栏宽度（拖拽调整，localStorage 持久化） ----------
+
+const SIDE_W_KEY = 'va-side-w'
+export const SIDE_W_DEFAULT = 280
+const SIDE_W_MIN = 220
+const sideWMax = () => Math.round(window.innerWidth * 0.4) // 主区事件流是心脏，侧栏至多吃四成
+const clampSideW = (w) => Math.max(SIDE_W_MIN, Math.min(sideWMax(), w))
+
+function readSideW() {
+  try {
+    const raw = localStorage.getItem(SIDE_W_KEY)
+    if (raw != null) {
+      const v = Number(raw)
+      // Number(null) 是 0——先判 null 再转换，缺失时落默认宽而非最小宽
+      if (Number.isFinite(v)) return clampSideW(v) // 窗口变小后恢复时按当前视口收敛
+    }
+  } catch {
+    // 存储不可用：用默认宽，不影响功能
+  }
+  return SIDE_W_DEFAULT
+}
+
+function persistSideW(w) {
+  try {
+    localStorage.setItem(SIDE_W_KEY, String(w))
+  } catch {
+    // 存储不可用：只丢宽度存活，不影响使用
+  }
+}
+
 // 消息流：激活的会话标签页的事件渲染。ref/scroll 逻辑属主在本层，
 // 组件随标签页切换重挂（key=runId），follow 态自然复位
 function Stream({ run }) {
@@ -279,9 +309,42 @@ export default function App() {
   const s = store.useRunState()
   const control = store.useControlRun()
   const [sideOpen, setSideOpen] = useState(true)
+  const [sideW, setSideW] = useState(readSideW)
+  const dragRef = useRef(false)
   const activeTab = s.tabs.find((t) => tabKey(t) === s.activeKey) ?? null
   const activeRun = activeTab?.kind === 'session' ? s.runs[activeTab.runId] : null
   const activeArtifact = activeTab?.kind === 'file' ? s.artifactCache[activeTab.relPath] : null
+
+  // 拖把手：Pointer Events + setPointerCapture（触控板/触屏同路径）。拖拽中
+  // 禁 pin 钮的 left transition（否则钮滞后光标拖影）；pointerup 落定并
+  // 持久化。宽度写 --side-w 变量，.va-side 与 pin 钮定位同源引用。
+  const onHandlePointerDown = (e) => {
+    e.currentTarget.setPointerCapture(e.pointerId)
+    dragRef.current = true
+    document.body.classList.add('va-side-resizing') // 拖拽期全局光标 + 禁选中
+  }
+  const onHandlePointerMove = (e) => {
+    if (!dragRef.current) return
+    setSideW(clampSideW(e.clientX))
+  }
+  const onHandlePointerUp = (e) => {
+    if (!dragRef.current) return
+    dragRef.current = false
+    e.currentTarget.releasePointerCapture(e.pointerId)
+    document.body.classList.remove('va-side-resizing')
+    persistSideW(sideW)
+  }
+  // 双击把手回默认宽
+  const onHandleDoubleClick = () => {
+    setSideW(SIDE_W_DEFAULT)
+    persistSideW(SIDE_W_DEFAULT)
+  }
+  // 窗口缩放：超限宽度按当前视口收敛（拖拽上限 40vw 的动态半边）
+  useEffect(() => {
+    const onResize = () => setSideW((w) => clampSideW(w))
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
 
   return (
     <div className="va-root">
@@ -307,8 +370,20 @@ export default function App() {
         )}
       </header>
 
-      <div className="va-body">
+      <div className="va-body" style={{ '--side-w': `${sideW}px` }}>
         {sideOpen && <SidePanel />}
+        {sideOpen && (
+          <div
+            className="va-side-resize"
+            role="separator"
+            aria-orientation="vertical"
+            aria-label="拖拽调整侧栏宽度（双击恢复默认）"
+            onPointerDown={onHandlePointerDown}
+            onPointerMove={onHandlePointerMove}
+            onPointerUp={onHandlePointerUp}
+            onDoubleClick={onHandleDoubleClick}
+          />
+        )}
         <button
           className={`va-side-pin${sideOpen ? ' open' : ''}`}
           onClick={() => setSideOpen(!sideOpen)}

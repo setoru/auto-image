@@ -257,8 +257,10 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 }
 
 /* ---- 侧栏（「会话 | 产物」两面板） ---- */
+/* 宽度单源 --side-w：由 App 按 localStorage 恢复/拖拽写入（拖拽把手在右缘），
+   侧栏与 pin 钮骑缝位同源引用；默认 280px（变量缺失兜底，如首帧） */
 .va-side {
-  width: 280px; flex-shrink: 0; border-right: 1px solid var(--line);
+  width: var(--side-w, 280px); flex-shrink: 0; border-right: 1px solid var(--line);
   display: flex; flex-direction: column; min-height: 0; background: var(--surface);
 }
 /* 面板小 tab：切换会话列表与产物树（默认产物，选择持久化 localStorage） */
@@ -304,10 +306,11 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-sess-ago { flex-shrink: 0; color: var(--ink-3); font-size: 11px; font-family: var(--mono); }
 .va-sess-sub { color: var(--ink-3); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 /* 侧栏开合 pin 钮：竖向把手形（窄宽、加高、pill 圆角），垂直居中、
-   随栏缘水平移动——展开时骑缝在 280px 栏界线上，收起时滑回主区左缘
-   贴边；图标随态换向（«/»），描边分层（零阴影规则） */
+   随栏缘水平移动——展开时骑缝在栏界线上，收起时滑回主区左缘贴边；
+   图标随态换向（«/»），描边分层（零阴影规则）。left 走 --side-w 同源
+   （拖宽后骑缝位跟随）；拖拽期 va-side-resizing 禁 transition 防拖影 */
 .va-side-pin {
-  position: absolute; top: 50%; left: 280px; z-index: 5;
+  position: absolute; top: 50%; left: var(--side-w, 280px); z-index: 5;
   transform: translate(-50%, -50%);
   display: inline-flex; align-items: center; justify-content: center;
   width: 14px; height: 44px; padding: 0; font-size: 12px;
@@ -317,6 +320,18 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
   transition: left 0.18s ease;
 }
 .va-side-pin:not(.open) { left: 7px; }
+.va-side-resizing .va-side-pin { transition: none; }
+/* 拖拽把手：侧栏右缘 5px 竖条（透明，hover 显线提示可拖），pin 钮 z-index
+   更高压其上照常可点；双击回默认宽 */
+.va-side-resize {
+  position: absolute; top: 0; bottom: 0;
+  left: calc(var(--side-w, 280px) - 2.5px); width: 5px;
+  z-index: 4; cursor: col-resize; touch-action: none;
+}
+.va-side-resize:hover, .va-side-resize:active { background: var(--accent); opacity: 0.35; }
+/* 拖拽期：全局列光标 + 禁文本选中（指针掠过标签/标题时不闪烁） */
+.va-side-resizing { cursor: col-resize; user-select: none; }
+.va-side-resizing * { cursor: col-resize !important; }
 .va-side-pin:hover { background: var(--surface-dim); color: var(--ink); }
 .va-btn-sym { font-family: var(--mono); line-height: 1; }
 /* 产物面板头（原产物卡标题，去卡片边框后升为面板节标题） */
