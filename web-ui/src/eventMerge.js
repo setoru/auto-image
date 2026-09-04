@@ -25,6 +25,16 @@ function orderedUniqueEvents(existing, incoming) {
   return [...bySeq.values()].sort((a, b) => a.seq - b.seq)
 }
 
+function latestLoadedEventAt(events) {
+  let latest = null
+  for (const event of events) {
+    const timestamp = event.payload?.ts
+    if (typeof timestamp !== 'number' || !Number.isFinite(timestamp)) continue
+    latest = Math.max(latest ?? -Infinity, timestamp * 1000)
+  }
+  return latest
+}
+
 /**
  * 合并单个会话的事件事实，并从完整有序事件统一派生展示状态。
  * 摘要字段只在尚未见到对应事件时作为初值。
@@ -66,4 +76,33 @@ export function mergeSessionEvents(session, incoming = []) {
     lastEventAt,
     maxSeq: events.reduce((max, event) => Math.max(max, event.seq), 0),
   }
+}
+
+/**
+ * 把服务端摘要并入已缓存事件。摘要的最后活动晚于已加载事件，说明对应的
+ * 新事件尚未加载，此时摘要暂时提供权威展示值；若本地事件更新，则事件
+ * 派生值优先，避免在途旧摘要覆盖实时 tail。ENDED 在两路间都保持单向。
+ */
+export function mergeSessionSummary(session, summary) {
+  const merged = mergeSessionEvents(session)
+  const loadedEventAt = latestLoadedEventAt(merged.events)
+  const summaryCoversUnloadedEvents =
+    merged.events.length === 0 ||
+    (summary.lastEventAt != null &&
+      (loadedEventAt == null || summary.lastEventAt >= loadedEventAt))
+  const withFreshestFacts = summaryCoversUnloadedEvents
+    ? {
+        ...merged,
+        status: summary.status,
+        stage: summary.stage,
+        title: summary.title,
+        endedAt: summary.endedAt,
+        lastEventAt: summary.lastEventAt,
+      }
+    : merged
+
+  if (session.status === ENDED || merged.status === ENDED || summary.status === ENDED) {
+    return { ...withFreshestFacts, status: ENDED }
+  }
+  return withFreshestFacts
 }

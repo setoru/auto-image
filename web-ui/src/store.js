@@ -11,7 +11,7 @@
 // 非查看中的标签页状态点由 GET /api/runs 摘要轮询驱动。header 与输入条
 // 构成控制面，绑定 controlRunId 解析出的会话——激活文件标签页不换对象。
 import { useSyncExternalStore } from 'react'
-import { mergeSessionEvents, SESSION_STATUS } from './eventMerge.js'
+import { mergeSessionEvents, mergeSessionSummary, SESSION_STATUS } from './eventMerge.js'
 import * as tabState from './tabState.js'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
@@ -344,14 +344,16 @@ export async function loadRuns() {
 
 // 摘要 → run 的合并（loadRuns 与轮询共用同一形状）
 function mergeSummary(run, s) {
-  return mergeSessionEvents({
+  const session = {
     ...run,
-    status: run.status === ENDED ? ENDED : s.status,
-    stage: s.stage,
     firstPrompt: s.first_prompt,
-    title: s.title ?? null,
     resumedFrom: s.resumed_from,
     startedAt: s.started_at * 1000,
+  }
+  return mergeSessionSummary(session, {
+    status: s.status,
+    stage: s.stage,
+    title: s.title ?? null,
     endedAt: s.ended_at ? s.ended_at * 1000 : null,
     lastEventAt: s.last_event_at ? s.last_event_at * 1000 : null,
   })
