@@ -299,6 +299,32 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
+    # 全局事件流：一条连接广播全部会话的实时事件（帧带 run_id），零连接
+    # 状态——无 Last-Event-ID 断点、无连接簿记、无 TTL，增量游标是流自身
+    # 的局部变量；连接前的事件不重放（历史由快照补），断线重连靠快照重拉
+    # + per-run seq 去重吸收。永不因会话终态主动关闭：终态后不再产事件，
+    # 天然静默，空闲按 heartbeat_interval 心跳保活
+    @app.get("/api/stream")
+    async def global_stream():
+        async def generate():
+            with store.subscribe_global() as flag:
+                cursor = store.broadcast_len()
+                while True:
+                    flag.clear()
+                    for event in store.broadcast_from(cursor):
+                        cursor += 1
+                        yield _broadcast_chunk(event)
+                    try:
+                        await asyncio.wait_for(flag.wait(), timeout=heartbeat_interval)
+                    except asyncio.TimeoutError:
+                        yield ": ping\n\n"
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
     directory = static_dir or DEFAULT_STATIC_DIR
     if Path(directory).is_dir():
         app.mount("/", StaticFiles(directory=str(directory), html=True), name="ui")
@@ -322,6 +348,19 @@ def _sse_chunk(event):
     # ts 随 payload 下发（前端时长的冻结点），seq 走 SSE id 维持断点续传
     data = json.dumps({**event["payload"], "ts": event["ts"]}, ensure_ascii=False)
     return f"id: {event['seq']}\nevent: {event['type']}\ndata: {data}\n\n"
+
+
+def _broadcast_chunk(event):
+    # 全局帧：run_id/seq/ts/type/payload 全量下发（seq 仍是 per-run seq，
+    # 客户端去重锚点）；无 id 行——断点语义不存在，重连靠快照重拉
+    data = json.dumps({
+        "run_id": event["run_id"],
+        "seq": event["seq"],
+        "ts": event["ts"],
+        "type": event["type"],
+        "payload": event["payload"],
+    }, ensure_ascii=False)
+    return f"event: {event['type']}\ndata: {data}\n\n"
 
 
 def _parse_last_event_id(value):

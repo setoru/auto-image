@@ -3,6 +3,8 @@
 单进程单 worker 前提下的最简实现（dict + asyncio.Event 广播）。
 每条事件带 ts（服务端时刻，秒）——前端时长的冻结点（最后活动时刻）与
 累计执行时长的回合分段都以它为准，不受页面刷新/SSE 全量重放影响。
+全局广播日志（引用同批事件）供全局流增量拉取：连接起点即日志末尾，
+连接前的事件不入流，历史由快照端点补。
 """
 import asyncio
 import contextlib
@@ -14,6 +16,8 @@ class EventStore:
     def __init__(self):
         self._events = defaultdict(list)
         self._subscribers = defaultdict(set)
+        self._broadcast = []
+        self._global_subscribers = set()
         self._runs = None
 
     def bind_runs(self, runs):
@@ -35,11 +39,14 @@ class EventStore:
             "payload": payload,
         }
         self._events[run_id].append(event)
+        self._broadcast.append(event)
         if self._runs is not None:
             run = self._runs.get(run_id)
             if run is not None:
                 run.last_event_at = event["ts"]
         for flag in self._subscribers[run_id]:
+            flag.set()
+        for flag in self._global_subscribers:
             flag.set()
         return event
 
@@ -60,6 +67,14 @@ class EventStore:
         """seen_seq 已追上存储末尾（无更多事件可重放）。"""
         return not self.replay_from(run_id, seen_seq)
 
+    def broadcast_from(self, after):
+        """返回广播日志中位置严格大于 after 的全部事件（全局流增量拉取）。"""
+        return self._broadcast[after:]
+
+    def broadcast_len(self):
+        """广播日志末尾位置（全局流的连接起点，之前的事件不重放）。"""
+        return len(self._broadcast)
+
     @contextlib.contextmanager
     def subscribe(self, run_id):
         """注册一个唤醒信号；append 时被 set，订阅方自行 clear 后等待。
@@ -73,3 +88,14 @@ class EventStore:
             yield flag
         finally:
             self._subscribers[run_id].discard(flag)
+
+    @contextlib.contextmanager
+    def subscribe_global(self):
+        """全局唤醒信号（与 per-run subscribe 同构）：任何 run 的事件 append
+        都 set。游标归订阅方自持（局部变量），服务端无连接簿记。"""
+        flag = asyncio.Event()
+        self._global_subscribers.add(flag)
+        try:
+            yield flag
+        finally:
+            self._global_subscribers.discard(flag)

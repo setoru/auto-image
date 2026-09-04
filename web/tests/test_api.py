@@ -53,8 +53,9 @@ def drop_title_events(events):
     return [e for e in events if e["event"] != "session.title_changed"]
 
 
-async def collect_sse(resp, stop=None, deadline_s=5.0):
-    """聚合 SSE 流为 (事件列表, 心跳行数)；stop(ev) 为 True 时停止读取。"""
+async def collect_sse(resp, stop=None, deadline_s=5.0, max_pings=None):
+    """聚合 SSE 流为 (事件列表, 心跳行数)；stop(ev) 为 True 时停止读取，
+    max_pings 收满即停（静默期的流不会自己结束）。"""
     pings = 0
     events = []
     block = []
@@ -72,6 +73,8 @@ async def collect_sse(resp, stop=None, deadline_s=5.0):
             continue
         if line.startswith(":"):
             pings += 1
+            if max_pings is not None and pings >= max_pings:
+                break
             continue
         block.append(line)
     return events, pings
@@ -108,6 +111,14 @@ async def open_stream(client, run_id, last_event_id=None):
     headers = {"Last-Event-ID": str(last_event_id)} if last_event_id else {}
     return await client.send(
         client.build_request("GET", f"/api/runs/{run_id}/events", headers=headers),
+        stream=True,
+    )
+
+
+# 打开全局流：一条连接广播全部会话的实时事件，无 Last-Event-ID 断点语义
+async def open_global_stream(client):
+    return await client.send(
+        client.build_request("GET", "/api/stream"),
         stream=True,
     )
 
@@ -645,6 +656,132 @@ async def test_multiple_subscribers_same_session():
         types1 = [e["event"] for e in drop_title_events(events1)]
         types2 = [e["event"] for e in drop_title_events(events2)]
         assert types1 == types2, (types1, types2)
+
+
+# ---------- 全局事件流 ----------
+
+
+async def test_global_stream_frames_match_per_run_seq():
+    """帧形状 {run_id, seq, ts, type, payload}：seq 即 per-run 流的 SSE id
+    （客户端去重锚点，保持原值）；id 行不承载断点语义（无全局 seq）。"""
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        resp = await open_global_stream(client)
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        events, _ = await collect_sse(resp, stop=lambda e: e["event"] == "turn.completed")
+        await resp.aclose()
+        await wait_status(client, run_id, "READY")
+
+        events = drop_title_events(events)
+        per_run = drop_title_events((await collect_sse(await open_stream(client, run_id), deadline_s=1.0))[0])
+        # 开流前的 session.started 不在全局流上：连接晚于事件发生拿不到该事件
+        tail = [e for e in per_run if e["event"] != "session.started"]
+        assert [e["event"] for e in events] == [e["event"] for e in tail]
+        for g, p in zip(events, tail):
+            assert "id" not in g, g
+            d = g["data"]
+            assert d["run_id"] == run_id
+            assert d["seq"] == int(p["id"]), (d, p)
+            assert d["ts"] == p["data"]["ts"]
+            assert d["type"] == p["event"]
+            assert d["payload"] == {k: v for k, v in p["data"].items() if k != "ts"}
+        seqs = [e["data"]["seq"] for e in events]
+        assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)), seqs
+
+
+async def test_global_stream_mixes_multiple_runs_in_occurrence_order():
+    """两个并行会话的事件混在同一条流里：按发生序广播、各自 per-run seq
+    不重排。"""
+    app = make_app(delay=0.05)
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp = await open_global_stream(client)
+        run_a = (await client.post("/api/runs", json={})).json()["run_id"]
+        run_b = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_a}/messages", json={"text": "部署 nginx"})
+        await client.post(f"/api/runs/{run_b}/messages", json={"text": "部署 redis"})
+        done = set()
+
+        def both_completed(e):
+            if e["event"] == "turn.completed":
+                done.add(e["data"]["run_id"])
+            return done == {run_a, run_b}
+
+        events, _ = await collect_sse(resp, stop=both_completed)
+        await resp.aclose()
+        await wait_status(client, run_a, "READY", timeout_s=8.0)
+        await wait_status(client, run_b, "READY", timeout_s=8.0)
+        events = drop_title_events(events)
+        assert {e["data"]["run_id"] for e in events} == {run_a, run_b}
+        for rid in (run_a, run_b):
+            seqs = [e["data"]["seq"] for e in events if e["data"]["run_id"] == rid]
+            assert seqs == sorted(seqs) and len(seqs) == len(set(seqs)), (rid, seqs)
+        # 发生序：全流 ts 单调不减
+        tss = [e["data"]["ts"] for e in events]
+        assert tss == sorted(tss), tss
+        texts = sorted(e["data"]["payload"]["text"] for e in events if e["event"] == "user.message")
+        assert texts == ["部署 nginx", "部署 redis"]
+
+
+async def test_global_stream_multiple_clients_receive_equivalent_events():
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        resp1 = await open_global_stream(client)
+        resp2 = await open_global_stream(client)
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        events1, _ = await collect_sse(resp1, stop=lambda e: e["event"] == "turn.completed")
+        events2, _ = await collect_sse(resp2, stop=lambda e: e["event"] == "turn.completed")
+        await resp1.aclose()
+        await resp2.aclose()
+        await wait_status(client, run_id, "READY")
+        assert drop_title_events(events1) == drop_title_events(events2)
+        assert [e["event"] for e in drop_title_events(events1)][-1] == "turn.completed"
+
+
+async def test_global_stream_silent_on_ready_runs():
+    """READY 会话不产事件：全局流上静默，只有心跳保活。"""
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "READY")
+        async with client.stream("GET", "/api/stream") as resp:
+            assert resp.headers["content-type"].startswith("text/event-stream")
+            events, pings = await collect_sse(resp, deadline_s=2.0, max_pings=3)
+        assert drop_title_events(events) == []
+        assert pings >= 1, pings
+
+
+async def test_global_stream_does_not_replay_prior_events():
+    """连接前发生的事件不重放（历史靠快照补）；连接后的新回合实时到达。"""
+    app = make_app()
+    transport = StreamingASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        run_id = (await client.post("/api/runs", json={})).json()["run_id"]
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx"})
+        await wait_status(client, run_id, "READY")
+
+        # 连接晚于事件发生：历史（session.started 与第一回合）不出现在流上
+        resp = await open_global_stream(client)
+        first, pings = await collect_sse(resp, deadline_s=2.0, max_pings=3)
+        await resp.aclose()
+        assert drop_title_events(first) == [], first
+        assert pings >= 1, pings
+
+        # 连接先于第二回合：实时收到，从 turn.started 续接
+        resp = await open_global_stream(client)
+        await client.post(f"/api/runs/{run_id}/messages", json={"text": "继续"})
+        second, _ = await collect_sse(resp, stop=lambda e: e["event"] == "turn.completed")
+        await resp.aclose()
+        types = [e["event"] for e in drop_title_events(second)]
+        assert types[0] == "turn.started", types
+        assert "session.started" not in types, types
+        assert types[-1] == "turn.completed", types
 
 
 async def test_summary_tracks_last_event_at():
