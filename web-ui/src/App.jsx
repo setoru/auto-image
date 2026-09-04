@@ -108,7 +108,7 @@ function EventRow({ ev, prev, tools }) {
   if (ev.type === 'turn.stopped') {
     return (
       <div className="va-paused">
-        — 已停止（Esc 等效），等待指令 · 已提交的云操作不受停止影响，无法撤销 —
+        — 已停止，等待指令 · 已提交的云操作不受停止影响，无法撤销 —
       </div>
     )
   }

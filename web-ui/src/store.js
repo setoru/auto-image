@@ -441,7 +441,7 @@ export async function cloneRun() {
   }
 }
 
-// 停止 = CLI 的 Esc：打断控制面会话的当前回合（只作用它，不误停别人）
+// 停止：打断控制面会话的当前回合（只作用它，不误停别人）
 export async function stop() {
   const run = state.runs[controlRunId()]
   if (!run || run.status !== RUNNING) return

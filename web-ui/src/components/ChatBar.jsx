@@ -3,14 +3,13 @@
 // 作用对象行——点它切回该会话标签页再输入（作用对象先确认，就着产物
 // 清单也不会把指令误发进另一个挂起会话），执行中回合的「■ 停止」在
 // 折叠态仍在手边。右侧单按钮按状态变形，回车永远等价于点它：
-//   执行中   -> ■ 停止（Esc 等效——window 级监听，stop 自带会话判定，
-//               只停控制面会话；输入同步禁用，想改方向先停止——执行中
-//               发送被服务端 409 turn_in_progress 拒）
+//   执行中   -> ■ 停止（stop 自带会话判定，只停控制面会话；输入同步
+//               禁用，想改方向先停止——执行中发送被服务端 409
+//               turn_in_progress 拒）
 //   等待指令 -> 发送
 // 「⑂ 克隆」常驻：READY/ENDED 可点、RUNNING 禁用——克隆基于 transcript
 // 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏
 // 「+ 新建」。草稿按 runId 独立存 map，切标签页不丢字。
-import { useEffect } from 'react'
 import * as store from '../store.js'
 import { firstPromptPreview, tabDot } from '../derive.js'
 import { tabKey } from '../tabState.js'
@@ -24,16 +23,6 @@ export default function ChatBar() {
   // 激活的就是会话标签页时作用对象显而易见（胶囊窄形态常显左缘）；
   // 激活文件标签页时输入折叠为宽形态胶囊——先确认作用对象再输入
   const targetOn = activeTab?.kind === 'session'
-
-  // Esc = CLI 的 Esc：打断控制面会话的当前回合（「Esc 等效」文案的兑现；
-  // stop 自带执行中判定，非执行中按下无事发生）
-  useEffect(() => {
-    const onKey = (e) => {
-      if (e.key === 'Escape') store.stop()
-    }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
-  }, [])
 
   // 输入只由控制面会话状态决定（并行不受其他会话执行影响）；
   // 执行中禁用输入（无排队错觉），停止是显式按钮
