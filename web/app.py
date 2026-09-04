@@ -59,7 +59,8 @@ DEFAULT_MAX_PARALLEL_RUNS = 10
 
 def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
                artifact_roots=None, deploy_config=None, scope_config=None,
-               list_sessions_fn=None, get_session_messages_fn=None, residual_cli_scan=None,
+               list_sessions_fn=None, get_session_messages_fn=None, transcript_times_fn=None,
+               residual_cli_scan=None,
     state_path=None, title_factory=None, max_parallel_runs=None):
     """session_factory 可注入：生产为 ClaudeSDKClient 真实现（默认），
     测试注入按剧本推消息的假实现——注入边界即唯一测试缝。artifact_roots
@@ -67,7 +68,9 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     造桩用），默认项目根下。
     scope_config 为脱敏已知值清单的凭据源（测试传造桩，不载真实凭据）。
     list_sessions_fn / get_session_messages_fn 注入假历史（重启重建测试缝），
-    residual_cli_scan 注入残留 CLI 检测（pgrep 告警测试缝），默认生产实现。
+    transcript_times_fn 注入假时刻表（重放事件时刻透传的测试缝，形状
+    session_id → {uuid: epoch 秒}），residual_cli_scan 注入残留 CLI 检测
+    （pgrep 告警测试缝），默认生产实现。
     state_path 为簿记落盘路径（恢复测试缝），默认 HOME 下固定位置。
     title_factory 为标题生成会话工厂（测试缝；生产为独立 cwd 的隔离配置，
     transcript 不落项目根、不进重启恢复的发现层）。
@@ -130,6 +133,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         list_sessions_fn or sdk_mod.list_project_sessions,
         get_session_messages_fn or sdk_mod.project_session_messages,
         bookkeeping,
+        transcript_times=transcript_times_fn or sdk_mod.transcript_times,
     )
     if restored:
         logging.getLogger("web").info("服务重启后重放恢复 %d 条会话（可续聊）", len(restored))

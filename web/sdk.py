@@ -3,9 +3,18 @@
 真 SDK 把 CLI JSON 行解析成 dataclass 消息（AssistantMessage 等），
 服务端的映射层消费的是 CLI JSON 形状的 dict——to_dict 在此适配，
 使假剧本（fake.py 的 dict）与真会话走同一条 normalize 路径。
+
+transcript 时刻读取器（transcript_times / _session_transcript_path）也
+在此：SDK 的 SessionMessage 形状不带 timestamp，事件时刻透传（重启重放/
+克隆转录找源时刻）只能自读 transcript JSONL——不 import SDK 私有模块
+（_internal 随版本漂移），文件定位与目录名派生在 web 层薄薄复刻。
 """
 import json
+import logging
 import os
+import re
+import subprocess
+from datetime import datetime
 from pathlib import Path
 
 from claude_agent_sdk import (
@@ -203,3 +212,89 @@ def list_project_sessions(project_root=None):
 def project_session_messages(session_id, project_root=None):
     """单条 SDK 会话的可见消息链（重启重建的事件映射源，只读 transcript）。"""
     return get_session_messages(session_id, directory=str(project_root or PROJECT_ROOT))
+
+
+# ---------------------------------------------------------------------------
+# transcript 时刻读取器 —— 事件时刻透传的对齐表源
+# ---------------------------------------------------------------------------
+
+logger = logging.getLogger("web")
+
+# 目录名派生与 SDK 同规则：cwd 非字母数字全替换为 '-'（CLI 目录命名约定）
+_SANITIZE_RE = re.compile(r"[^a-zA-Z0-9]")
+
+
+def _sanitize_project_dir_name(path):
+    return _SANITIZE_RE.sub("-", path)
+
+
+def _claude_config_home():
+    """Claude 配置根（CLI 同约定：CLAUDE_CONFIG_DIR 优先）。"""
+    env = os.environ.get("CLAUDE_CONFIG_DIR")
+    return Path(env) if env else Path.home() / ".claude"
+
+
+def _project_transcript_dirs(project_root):
+    """部署会话 transcript 的候选目录集：项目根自身的派生目录 + git
+    worktree 兄弟目录（发现范围与 SDK list_sessions 的重启重放一致）。"""
+    root = str(Path(project_root).resolve())
+    dirs = [_claude_config_home() / "projects" / _sanitize_project_dir_name(root)]
+    try:
+        result = subprocess.run(
+            ["git", "worktree", "list", "--porcelain"],
+            cwd=root, capture_output=True, text=True, timeout=5, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return dirs  # git 缺失/慢：只查自身目录，找得到照常用
+    for line in result.stdout.splitlines():
+        if line.startswith("worktree "):
+            path = line[len("worktree "):]
+            if path and path != root:
+                dirs.append(_claude_config_home() / "projects" / _sanitize_project_dir_name(path))
+    return dirs
+
+
+def _session_transcript_path(session_id, project_root):
+    """session_id → transcript JSONL 路径；找不到返回 None。"""
+    for d in _project_transcript_dirs(project_root):
+        candidate = d / f"{session_id}.jsonl"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def transcript_times(session_id, project_root=None):
+    """会话 transcript 的 uuid → 时刻对齐表（epoch 秒）。
+
+    重放/转录路径的事件时刻以此对齐源 transcript 行；SDK 的
+    SessionMessage 不带 timestamp，uuid 是两边共有的关联键。每行只抽
+    uuid 与 timestamp 两个字段，不建消息链、不 import SDK 私有模块。
+    文件缺失/坏行/缺字段降级——整表读不出返回空 map 不抛（该会话
+    时刻回退当下，恢复不阻断，与 recover_sessions 逐会话容错一致）。
+    """
+    path = _session_transcript_path(session_id, str(project_root or PROJECT_ROOT))
+    if path is None:
+        return {}
+    try:
+        content = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        logger.warning("transcript 时刻读取失败（ts 回退当下）：%s", path, exc_info=True)
+        return {}
+    times = {}
+    for line in content.splitlines():
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        uuid = entry.get("uuid")
+        raw_ts = entry.get("timestamp")
+        if not isinstance(uuid, str) or not isinstance(raw_ts, str):
+            continue
+        try:
+            ts = datetime.fromisoformat(raw_ts.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        times[uuid] = ts.timestamp()
+    return times

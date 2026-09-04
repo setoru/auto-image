@@ -28,13 +28,16 @@ from .runs import ENDED, READY, Run
 logger = logging.getLogger("web")
 
 
-def recover_sessions(manager, store, list_sessions, get_session_messages, state):
+def recover_sessions(manager, store, list_sessions, get_session_messages, state,
+                     transcript_times=None):
     """启动时重放全部可找回的 transcript 会话，返回恢复的 run 列表（最新
     修改的在前）。
 
     state 为落盘簿记整册（{ended_sessions, sessions, clone_sources}，见
-    state.load_state）。历史读取失败只跳过对应会话（空 transcript、损坏
-    文件），不阻断服务启动——恢复是找回尽量多的历史，不是启动的前置条件。
+    state.load_state）。transcript_times 为会话时刻对齐表读取器（uuid →
+    epoch 秒；事件时刻透传的源，缺省不透传）。历史读取失败只跳过对应
+    会话（空 transcript、损坏文件），不阻断服务启动——恢复是找回尽量多
+    的历史，不是启动的前置条件。
     """
     try:
         infos = list_sessions()
@@ -60,6 +63,7 @@ def recover_sessions(manager, store, list_sessions, get_session_messages, state)
         except Exception:  # noqa: BLE001 —— 重放中途的任何异常只丢该条
             logger.warning("重放会话 %s 失败，跳过该会话", info.session_id, exc_info=True)
             continue
+    _ = transcript_times  # 透传载体（append 可选 ts）已就位，消费在重放路径
     return restored
 
 
