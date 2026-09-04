@@ -59,11 +59,11 @@ def msg(mtype, content):
     )
 
 
-# 消息链的稳定 uuid 版本：同 content 不同回合的消息也各得其所（跨会话对齐
-# 表共享时按 uuid 精确对拍；时刻表即 {消息 uuid: epoch 秒}）
-def uuided(messages, base=0):
+# 消息链的稳定 uuid 版本：同 content 不同回合的消息也各得其所（时刻表即
+# {消息 uuid: epoch 秒}，按 uuid 精确对拍）
+def uuided(messages):
     for i, m in enumerate(messages):
-        m.uuid = f"u{i + base:03d}"
+        m.uuid = f"u{i:03d}"
     return messages
 
 

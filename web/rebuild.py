@@ -91,7 +91,7 @@ def user_prompt_text(message):
     return text or None
 
 
-def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from, times=None):
+def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, resumed_from, times):
     """单条 transcript 会话 → 内存 run + 事件流重放。
 
     身份映射命中的沿用原 run_id；墓碑命中标 ENDED；克隆链镜像命中找回
@@ -127,11 +127,17 @@ def _recover_run(manager, store, info, messages, reversed_map, ended_sessions, r
     return run
 
 
+def _source_ts(message, times):
+    """消息的源时刻：uuid 对齐表命中取表值，缺项（表空 / 行缺 timestamp）
+    None → append 当下。"""
+    return times.get(getattr(message, "uuid", None)) if times else None
+
+
 def _first_time(messages, times):
-    """会话首个时刻（session.started 的透传源）：首条消息的源时刻，对齐表
-    不覆盖（空表 / 首行缺 timestamp）时 None → append 当下。"""
+    """会话首个时刻（session.started 的透传源）：首条消息的源时刻，全缺
+    时 None → append 当下。"""
     for message in messages:
-        ts = times.get(getattr(message, "uuid", None))
+        ts = _source_ts(message, times)
         if ts is not None:
             return ts
     return None
@@ -153,7 +159,7 @@ def replay_messages(run, store, messages, times=None):
     turn_open = False  # 是否有未收尾的回合（首条用户输入之后、无下一条输入收口）
     for message in messages:
         raw = {"type": message.type, "message": message.message}
-        ts = times.get(getattr(message, "uuid", None)) if times else None
+        ts = _source_ts(message, times)
         prompt = user_prompt_text(raw)
         if prompt is not None:
             if turn_open:
