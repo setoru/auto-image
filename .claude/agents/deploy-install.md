@@ -112,6 +112,7 @@ MSYS_NO_PATHCONV=1 python <ssh_skill_scripts>/ssh_upload.py <别名> "<本地路
 python <ecs_skill_scripts>/ecs.py create --name <ECS名> [规格参数透传]
 ```
 - 调用方在 prompt 中给了规格参数（`--flavor`/`--image`/`--disk-type`/`--disk-size`/`--bandwidth` 等）时透传给 ecs.py。
+- scope `ecs_create.server.no_eip: true`（私网形态）时忽略 `--bandwidth` 等公网参数——CLI 无反向开 EIP 开关，**禁止改写或复制 scope 去除 no_eip 来强开 EIP**；确需公网由用户先改 scope 配置后再跑。
 - 保留时长统一使用 `scope.yaml` 的 `ecs_create.server.terminate_hours`，由 ecs.py 读取并在创建请求前校验；deploy 不传 `--terminate-hours` 或 `--no-auto-terminate`。从构造建机请求时起算，沿用 ECS 脚本的 UTC 计算、分钟取整及下限缓冲，安装、验证、归档和等待输入都占用保留时间。报告记录本次使用的时长及来源；未配置时沿用 ecs-skill 的默认值。
 - 密码/密钥不显式传，由 scope.yaml 裁决（ecs-skill 按 CLI > 环境变量 > scope 的优先级自动判定密钥对或密码方式）。
 - **Bash 工具超时设为 ≥ 660000 毫秒**（ecs.py 最长 600s 轮询 + 60s 端口探测）。

@@ -37,6 +37,7 @@ export default function TaskDialog({ task = null, onClose, onCreated, returnFocu
   const [instances, setInstances] = useState(null)
   const [instanceError, setInstanceError] = useState(null)
   const [defaultError, setDefaultError] = useState(false)
+  const [hasEip, setHasEip] = useState(null) // null=未知（默认值未返回，字段照常显示，后端仍会剔除）
   const [saving, setSaving] = useState(false)
   const [refreshing, setRefreshing] = useState(false)
   const [problem, setProblem] = useState(null)
@@ -71,14 +72,15 @@ export default function TaskDialog({ task = null, onClose, onCreated, returnFocu
     if (!saving && problem) (fields.current[problem.field] || errorRef.current)?.focus()
   }, [saving, problem])
 
-  // 默认值只影响新建的未编辑字段；编辑始终以已保存参数为准。
+  // 公网形态用于新建和编辑；默认值只填新建的未编辑字段。
   useEffect(() => {
-    if (task) return
     let active = true
     fetch('/api/ecs/defaults').then(async (response) => {
       if (!response.ok) throw new Error('defaults unavailable')
       const data = await response.json()
       if (!active) return
+      setHasEip(data.has_eip !== false)
+      if (task) return
       const defaults = { image: data.image ?? '', flavor: data.flavor ?? '', diskSize: String(data.disk_size ?? ''), bandwidth: String(data.bandwidth ?? '') }
       const fill = Object.fromEntries(Object.entries(defaults).filter(([key]) => !touched.current.has(key)))
       setDraft(form => ({ ...form, ...fill }))
@@ -102,9 +104,9 @@ export default function TaskDialog({ task = null, onClose, onCreated, returnFocu
   const source = editor ? draft : task?.spec ? taskFormFromSpec(task.spec) : null
   const request = useMemo(() => {
     if (!source || (!editor && task?.status !== 'INIT')) return null
-    try { return { spec: taskSpecFromForm(source) } }
+    try { return { spec: taskSpecFromForm(source, hasEip) } }
     catch (error) { return { problem: taskFieldError(error) } }
-  }, [JSON.stringify(source), editor, task?.status])
+  }, [JSON.stringify(source), editor, task?.status, hasEip])
   // 输入与任务快照都参与预览身份，旧响应不能成为新内容的执行依据。
   const previewKey = request ? JSON.stringify([mode, request, task?.updatedAt, editUpdatedAt]) : null
   useEffect(() => {
@@ -145,7 +147,7 @@ export default function TaskDialog({ task = null, onClose, onCreated, returnFocu
     event.preventDefault()
     if (isBusy()) return
     let spec
-    try { spec = taskSpecFromForm(draft) }
+    try { spec = taskSpecFromForm(draft, hasEip) }
     catch (error) { setProblem(taskFieldError(error)); return }
     savingRef.current = true; setSaving(true); setProblem(null)
     try {
@@ -216,7 +218,7 @@ export default function TaskDialog({ task = null, onClose, onCreated, returnFocu
                 {field('image', '镜像 ID', '留空使用默认配置')}
                 {field('flavor', '规格', '如 c6.xlarge.2')}
                 {field('name', 'ECS 名称', '留空自动命名')}
-                <div className="va-task-number-fields">{field('diskSize', '系统盘 GB', '默认配置')}{field('bandwidth', '带宽 Mbit/s', '默认配置')}</div>
+                <div className="va-task-number-fields">{field('diskSize', '系统盘 GB', '默认配置')}{hasEip !== false && field('bandwidth', '带宽 Mbit/s', '默认配置')}</div>
                 {defaultError && <p className="va-task-help">默认配置未加载，可手动填写或留空使用默认值。</p>}
               </> : <label className="va-task-field"><span>选择实例</span>
                 <select className="va-cfg-input" ref={node => { fields.current.ecsInstance = node }} value={instanceKey(selected)} disabled={busy}

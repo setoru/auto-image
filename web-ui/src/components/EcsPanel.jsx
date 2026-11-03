@@ -127,7 +127,8 @@ function PasswordRow({ value }) {
   )
 }
 
-// 新建对话框：表单仅名称/规格/镜像/系统盘/带宽五项（其余网络与登录配置
+// 新建对话框：表单仅名称/规格/镜像/系统盘/带宽五项，私网形态（scope no_eip）
+// 下带宽字段隐藏（其余网络与登录配置
 // 全由 scope.yaml ecs_create.server 默认）；提交后同步等就绪（服务端轮询
 // ACTIVE + IP + 22 通，通常 1–10 分钟），期间保持对话框打开。结果两态：
 // ok=true 展示 IP 与登录凭据；ok=false 红框展示 error/hint + id（机器可能
@@ -278,7 +279,7 @@ function EcsCreateDialog({ onClose }) {
                 {field('flavor', '规格', '如 kc1.xlarge.2')}
                 {field('image', '镜像 ID')}
                 {field('diskSize', '系统盘 GB', `默认 ${defaults.disk_size}`)}
-                {field('bandwidth', '带宽 Mbit/s', `默认 ${defaults.bandwidth}`)}
+                {defaults.has_eip !== false && field('bandwidth', '带宽 Mbit/s', `默认 ${defaults.bandwidth}`)}
               </div>
               <div className="va-cfg-row">
                 <span className="va-cfg-label">region</span>

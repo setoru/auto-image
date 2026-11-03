@@ -4,7 +4,10 @@ import asyncio
 import json
 import os
 import sys
+import tempfile
 from pathlib import Path
+
+import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from web.fake import FakeSessionFactory  # noqa: E402
@@ -71,6 +74,48 @@ async def test_preview_and_edit_only_save_configuration():
     restarted = make_test_app(task_dir=app.state.test_root / "task")
     async with async_client(restarted) as client:
         assert await listed(client, task["task_id"]) == saved
+
+
+async def test_no_eip_scope_drops_bandwidth_from_task_spec():
+    """scope no_eip: true → 任务表单带宽不落盘、不进指令（publicip 整棵子树
+    忽略；编排无从把带宽值误读为「用户要求开 EIP」的依据）。"""
+    factory = FakeSessionFactory(script=[])
+    with tempfile.TemporaryDirectory() as td:
+        scope_path = Path(td) / "scope.yaml"
+        scope_path.write_text(
+            yaml.safe_dump({"ecs_create": {"server": {"no_eip": True}}}), encoding="utf-8")
+        app = make_test_app(session_factory=factory, scope_config=scope_path)
+        async with async_client(app) as client:
+            task = await create_task(client)
+            assert task["spec"]["ecs_params"] == {"disk_size": 80}  # bandwidth 被剔除
+            prompt = (await client.post("/api/tasks/preview", json=BASE_SPEC)).json()["prompt"]
+            assert "带宽" not in prompt
+            assert "系统盘GB=80" in prompt  # 其余参数照常透传
+
+
+async def test_private_scope_preview_matches_run_for_saved_bandwidth():
+    factory = FakeSessionFactory(script=[{"type": "result", "subtype": "success", "result": "完成"}])
+    app = make_test_app(session_factory=factory)
+    async with async_client(app) as client:
+        task = await create_task(client)
+        assert task["spec"]["ecs_params"]["bandwidth"] == 5
+        (app.state.test_root / "scope.yaml").write_text(
+            "ecs_create:\n  server:\n    no_eip: true\n", encoding="utf-8")
+        preview = await client.post("/api/tasks/preview", json=task["spec"])
+        assert preview.status_code == 200, preview.text
+        prompt = preview.json()["prompt"]
+        assert "带宽" not in prompt and "系统盘GB=80" in prompt
+        response = await client.post(f"/api/tasks/{task['task_id']}/run", json={
+            "expected_updated_at": task["updated_at"],
+        })
+        assert response.status_code == 200, response.text
+        await wait_ready(client, response.json()["run_id"])
+        assert factory.queries == [prompt]
+        started = await listed(client, task["task_id"])
+        assert started["turn_text"] == prompt
+        assert started["spec"] == task["spec"]
+        persisted = app.state.test_root / "task" / f"{task['task_id']}.json"
+        assert json.loads(persisted.read_text())["turn_text"] == prompt
 
 
 async def test_another_user_can_edit_and_start_with_identical_preview():

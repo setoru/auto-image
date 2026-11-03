@@ -99,8 +99,13 @@ REASON_NOT_ADMIN = "not_admin"
 UNKNOWN_ACTOR = "-"
 
 
-def _task_spec(body):
-    """新建、编辑与预览共用已有表单校验及规范化。"""
+def _task_spec(body, no_eip_scope=False):
+    """新建、编辑与预览共用已有表单校验及规范化。
+
+    no_eip_scope（scope.ecs_create.server.no_eip 为 true）时剔除
+    ecs_params.bandwidth：私网形态下公网参数整体忽略，带宽不落盘、
+    不进任务指令（后端硬保证，与建机 API 的 resolve_create_spec 同语义）。
+    """
     b = body or {}
     spec = {}
     software = b.get("software")
@@ -153,6 +158,8 @@ def _task_spec(body):
                     raise HTTPException(
                         status_code=422, detail=f"invalid ecs_params.{field} (int {lo}-{hi})")
                 clean_params[field] = val
+        if no_eip_scope:
+            clean_params.pop("bandwidth", None)
         spec["ecs_params"] = clean_params
     extra = b.get("extra_instructions")
     if extra is not None and not isinstance(extra, str):
@@ -310,6 +317,10 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     ecs_check_impl = ecs_check_fn or (lambda: ecs_mod.check_all(ecs_scope))
     ecs_create_impl = ecs_create_fn or (lambda body=None: ecs_mod.create_instance(ecs_scope, body))
     ecs_defaults_impl = ecs_defaults_fn or (lambda: ecs_mod.resolve_defaults(ecs_scope))
+    # 任务表单的公网参数忽略开关：scope 私网形态（no_eip: true）下 bandwidth
+    # 不落盘、不进指令（新建/编辑/预览/启动共用）
+    def validate_task_spec(body):
+        return _task_spec(body, no_eip_scope=ecs_mod.scope_no_eip(ecs_scope))
     app.state.run_manager = manager
     app.state.event_store = store
     app.state.session_factory = factory
@@ -628,7 +639,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     # 「▶ 运行」才建会话发指令。输入非法 422。
     @app.post("/api/tasks")
     async def create_task(body: dict | None = None):
-        spec = _task_spec(body)
+        spec = validate_task_spec(body)
         try:
             return task_store.create_manual(spec)
         except OSError as exc:
@@ -636,7 +647,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
 
     @app.post("/api/tasks/preview")
     async def preview_task(body: dict | None = None):
-        return {"prompt": tasks_mod.build_task_prompt(_task_spec(body))}
+        return {"prompt": tasks_mod.build_task_prompt(validate_task_spec(body))}
 
     def _pending_task_or_error(task_id, body, require_version=False):
         task = task_store.get(task_id)
@@ -658,7 +669,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         _pending_task_or_error(task_id, body, require_version=True)
         if not isinstance(body.get("spec"), dict):
             raise HTTPException(status_code=422, detail="spec must be an object")
-        spec = _task_spec(body["spec"])
+        spec = validate_task_spec(body["spec"])
         try:
             return task_store.update_manual(task_id, spec)
         except OSError as exc:
@@ -671,7 +682,7 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
     async def run_task(task_id: str, request: Request, body: dict | None = None):
         _restricted_or_503()
         task = _pending_task_or_error(task_id, body or {})
-        prompt = tasks_mod.build_task_prompt(task.get("spec") or {})
+        prompt = tasks_mod.build_task_prompt(validate_task_spec(task.get("spec") or {}))
         # 会话创建与首回合：owner 注入 + 审计前置（与 create_run / send 同构）
         run = manager.draft(owner=request.state.username)
         try:

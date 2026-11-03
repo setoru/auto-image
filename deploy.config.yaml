@@ -43,6 +43,10 @@ deploy_list_file: "{{software}}-deploy-list.md"
 archive_issues_file: "{{software}}-archive-issues.md"
 pipeline_result_file: "{{software}}-pipeline-result.md"
 
+# --- market-doc：沿用同一版本目录 ---
+usage_guide_file: "{{software}}-usage-guide.docx"
+usage_shots_file: "{{software}}-usage-shots.zip"
+
 # --- rpm-check（已有 RPM 包在目标 OS 的可安装性验证；输入=操作指导） ---
 # 输出落 rpmcheck/{{target_image}}/ 树——按目标镜像分目录，不与 rpm-build/
 # verify/archive 的 rpm/ 树混放；Web 产物区已注册 rpmcheck 根。target_image

@@ -26,6 +26,7 @@ from web.ecs import (  # noqa: E402
     _read_scope,
     generate_password,
     resolve_create_spec,
+    scope_no_eip,
     validate_password,
 )
 from web.tests.support import async_client, make_test_app  # noqa: E402
@@ -292,7 +293,8 @@ async def test_defaults_from_scope_without_secrets():
 
 
 async def test_defaults_scope_no_eip():
-    """scope no_eip: true → defaults.has_eip=False（面板据此隐藏/禁用公网相关项）。"""
+    """scope no_eip: true → defaults.has_eip=False 且带宽不给默认值（publicip
+    整棵子树忽略——即使 scope 配了 publicip.eip.bandwidth.size=10），表单不预填。"""
     with _Env():
         scope = {**FULL_SCOPE, "ecs_create": {"server": {
             **FULL_SCOPE["ecs_create"]["server"], "no_eip": True}}}
@@ -302,8 +304,30 @@ async def test_defaults_scope_no_eip():
                 r = await client.get("/api/ecs/defaults")
                 assert r.status_code == 200, r.text
                 assert r.json()["has_eip"] is False
+                assert r.json()["bandwidth"] is None
         finally:
             td.cleanup()
+
+
+async def test_scope_no_eip_helper():
+    """scope_no_eip：只读 ecs_create.server.no_eip，缺文件/缺段不抛、为 False。"""
+    td = tempfile.TemporaryDirectory()
+    root = Path(td.name)
+    try:
+        with_eip = root / "a.yaml"
+        with_eip.write_text(yaml.safe_dump(FULL_SCOPE), encoding="utf-8")
+        assert scope_no_eip(with_eip) is False
+        no_eip = root / "b.yaml"
+        scope = {**FULL_SCOPE, "ecs_create": {"server": {
+            **FULL_SCOPE["ecs_create"]["server"], "no_eip": True}}}
+        no_eip.write_text(yaml.safe_dump(scope), encoding="utf-8")
+        assert scope_no_eip(no_eip) is True
+        assert scope_no_eip(root / "missing.yaml") is False
+        empty = root / "c.yaml"
+        empty.write_text("{}\n", encoding="utf-8")
+        assert scope_no_eip(empty) is False
+    finally:
+        td.cleanup()
 
 
 async def test_defaults_missing_server_fields():

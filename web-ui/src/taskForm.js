@@ -13,7 +13,7 @@ export function taskFormFromSpec(spec) {
 
 const invalid = (field, text) => Object.assign(new Error(text), { field })
 
-export function taskSpecFromForm(form) {
+export function taskSpecFromForm(form, hasEip = true) {
   if (!form.software.trim()) throw invalid('software', '请填写软件名称')
   const spec = {
     software: form.software.trim(), version: form.version.trim(), task_type: form.taskType,
@@ -29,6 +29,7 @@ export function taskSpecFromForm(form) {
       if (form[key].trim()) params[key] = form[key].trim()
     }
     for (const [field, key, label] of [['diskSize', 'disk_size', '系统盘大小'], ['bandwidth', 'bandwidth', '带宽']]) {
+      if (key === 'bandwidth' && hasEip === false) continue
       if (!form[field].trim()) continue
       const value = Number(form[field])
       if (!Number.isFinite(value)) throw invalid(field, `${label}请填写数字，不要带单位`)

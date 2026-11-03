@@ -23,6 +23,15 @@ describe('任务表单请求', () => {
     })
   })
 
+  it('私网表单忽略带宽，保留其他字段及公网模式的校验', () => {
+    const form = { ...taskFormFromSpec(), software: 'nginx', diskSize: '80', bandwidth: 'abc' }
+    expect(taskSpecFromForm(form, false).ecs_params).toEqual({ disk_size: 80 })
+    expect(() => taskSpecFromForm(form, true)).toThrow('带宽请填写数字')
+    expect(() => taskSpecFromForm({ ...form, diskSize: '80GB' }, false)).toThrow('系统盘大小请填写数字')
+    expect(taskSpecFromForm({ ...form, bandwidth: '23' }, false).ecs_params).toEqual({ disk_size: 80 })
+    expect(taskSpecFromForm({ ...form, bandwidth: '23' }, true).ecs_params).toEqual({ disk_size: 80, bandwidth: 23 })
+  })
+
   it('切换到新建机器时不再提交旧目标', () => {
     const form = taskFormFromSpec({ software: 'nginx', ecsMode: 'existing',
       ecsInstance: { id: 'old-id', name: 'old', ip: '192.0.2.20' } })

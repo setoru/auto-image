@@ -397,6 +397,19 @@ def check_all(scope_path):
     }
 
 
+def scope_no_eip(scope_path):
+    """scope.ecs_create.server.no_eip 是否为 true（纯读文件，永不抛）。
+
+    任务链路据此忽略公网参数：no_eip 形态下 publicip 整棵子树（含带宽）
+    不进入任务指令，编排无从把带宽值误读为「用户要求开 EIP」。
+    """
+    scope = _read_scope(scope_path)
+    spec = {}
+    if isinstance(scope.get("ecs_create"), dict) and isinstance(scope["ecs_create"].get("server"), dict):
+        spec = scope["ecs_create"]["server"]
+    return spec.get("no_eip") is True
+
+
 def resolve_defaults(scope_path):
     """scope.yaml + env → 新建表单默认值视图（纯读取，永不抛、无密钥值）。
 
@@ -414,6 +427,7 @@ def resolve_defaults(scope_path):
     if isinstance(scope.get("ecs_create"), dict) and isinstance(scope["ecs_create"].get("server"), dict):
         spec = scope["ecs_create"]["server"]
     rv = spec.get("root_volume") if isinstance(spec.get("root_volume"), dict) else {}
+    no_eip = spec.get("no_eip") is True
     eip = {}
     pub = spec.get("publicip") if isinstance(spec.get("publicip"), dict) else {}
     if isinstance(pub.get("eip"), dict) and isinstance(pub["eip"].get("bandwidth"), dict):
@@ -439,9 +453,12 @@ def resolve_defaults(scope_path):
         "image": str(spec.get("imageRef") or "") or None,
         "disk_type": str(rv.get("volumetype") or "") or DEFAULT_ROOT_VOLUME_TYPE,
         "disk_size": rv.get("size") if isinstance(rv.get("size"), int) else DEFAULT_ROOT_VOLUME_SIZE,
-        "bandwidth": eip.get("size") if isinstance(eip.get("size"), int) else DEFAULT_BANDWIDTH_SIZE,
+        # no_eip（私网形态）下 publicip 整棵子树忽略：带宽不给默认值，表单不预填，
+        # 任务指令也就不会出现带宽值被编排误读为开 EIP 的依据
+        "bandwidth": None if no_eip else (
+            eip.get("size") if isinstance(eip.get("size"), int) else DEFAULT_BANDWIDTH_SIZE),
         "availability_zone": str(spec.get("availability_zone") or "") or None,
-        "has_eip": spec.get("no_eip") is not True,  # scope no_eip: true → 私网形态（与 ecs-skill 同语义，表单不暴露开关）
+        "has_eip": not no_eip,  # scope no_eip: true → 私网形态（与 ecs-skill 同语义，表单不暴露开关）
         "auth_method": auth_method,
         "auto_password": auto_password,
     }
