@@ -2,7 +2,7 @@
 # scope.yaml 已被 .gitignore 忽略。
 #
 # 这是 ecs-skill / ims-skill / obs-skill 的唯一凭证源。
-# 顶层 ak/sk/region/project_id 共享；各 skill 的段（ecs_create / ims_create / obs）共存。
+# 顶层 ak/sk/region/project_id 共享；各 skill 的段（ecs_create / ims_create / ims_copy / obs）共存。
 #
 # 优先级（高 → 低）：
 #   AK/SK : HUAWEICLOUD_SDK_AK / _SK 环境变量  >  下方 ak/sk
@@ -54,10 +54,13 @@ ecs_create:
 
 # ┌──────────────────────────────────────────────────────────────────┐
 # │ ims-skill 段                                                    │
-# │ ims_create 可选——不做企业项目管理时整段可省略。                │
+# │ ims_create / ims_copy 可选，对应命令按需读取。                 │
 # └──────────────────────────────────────────────────────────────────┘
 ims_create:
   enterprise_project_id: ""      # 企业项目 ID；留空/不写 → 不下发
+
+ims_copy:
+  agency_name: ims_copy_image    # IMS 跨区域复制委托；也可由 CLI --agency-name 提供
 
 # ┌──────────────────────────────────────────────────────────────────┐
 # │ obs-skill 段                                                    │

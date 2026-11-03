@@ -16,13 +16,24 @@ import socket
 import sys
 import tempfile
 from argparse import Namespace
+from unittest.mock import patch
 
 import yaml
-from huaweicloudsdkims.v2 import ImageInfo, JobEntities, ListImagesResponse, ShowJobResponse
+from huaweicloudsdkcore.exceptions.exceptions import ClientRequestException, SdkError
+from huaweicloudsdkims.v2 import (
+    BatchAddMembersResponse,
+    CopyImageCrossRegionResponse,
+    CreateImageResponse,
+    ImageInfo,
+    JobProgressEntities,
+    ListImagesResponse,
+    ShowJobProgressResponse,
+)
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "scripts"))
 import ims  # noqa: E402
-from ims_client import DEFAULT_SCOPE_PATH, resolve_credentials  # noqa: E402
+import ims_client  # noqa: E402
+from ims_client import Credentials, DEFAULT_SCOPE_PATH, resolve_credentials  # noqa: E402
 from ims_ops import IMAGE_TYPE_ECS, build_create_request  # noqa: E402
 
 
@@ -331,15 +342,16 @@ def test_default_scope_path_at_repo_root():
 
 # ---- 缝 C：poll_job 轮询逻辑（mock client，不触网）----
 def _job_resp(status, *, image_id=None, process_percent=None, fail_reason=None,
-              error_code=None):
-    """构造一个 ShowJobResponse mock。"""
-    entities = JobEntities(
+              error_code=None, job_type="imsCreateImageByInstance"):
+    """构造官方任务进度响应。"""
+    entities = JobProgressEntities(
         image_id=image_id,
         process_percent=process_percent,
     ) if (image_id or process_percent is not None) else None
-    return ShowJobResponse(
+    return ShowJobProgressResponse(
         status=status,
         job_id="j-fake",
+        job_type=job_type,
         entities=entities,
         fail_reason=fail_reason,
         error_code=error_code,
@@ -349,7 +361,7 @@ def _job_resp(status, *, image_id=None, process_percent=None, fail_reason=None,
 class FakeImsClient:
     """最小 mock ImsClient——按脚本返回 show_job / list_images 响应。
 
-    responses: list of ShowJobResponse（依次返回）。
+    responses: list of ShowJobProgressResponse（依次返回）。
     images: list of ImageInfo（list_images 恒返回此列表）。
     call_count: show_job 被调了几次。
     list_images_calls: list_images 被调了几次。
@@ -362,7 +374,8 @@ class FakeImsClient:
         self.call_count = 0
         self.list_images_calls = 0
 
-    def show_job(self, req):
+    def show_job_progress(self, req):
+        assert req.job_id, "查询必须携带 job ID"
         self.call_count += 1
         if self.call_count <= len(self._responses):
             return self._responses[self.call_count - 1]
@@ -641,7 +654,7 @@ def test_show_by_job_id_fail():
 def test_show_by_job_id_api_error():
     """--job-id：show_job API 异常 → ok=False + 退出码 1，stdout 纯 JSON。"""
     class BoomClient:
-        def show_job(self, req):
+        def show_job_progress(self, req):
             raise RuntimeError("timeout")
         def list_images(self, req):
             raise AssertionError("不应调 list_images")
@@ -680,7 +693,7 @@ def test_show_stdout_always_json_when_found():
 def _patch_build_client(client):
     """把 ims.build_client 替换为返回固定 mock client（cmd_create 用）。"""
     real = ims.build_client
-    ims.build_client = lambda _creds: client
+    ims.build_client = lambda _creds, **_kwargs: client
     try:
         yield
     finally:
@@ -713,7 +726,7 @@ def test_create_empty_job_id_has_status_and_hint():
     class EmptyJobClient:
         def create_image(self, req):
             return CreateImageResponse(job_id=None)
-        def show_job(self, req):
+        def show_job_progress(self, req):
             raise AssertionError("不应调 show_job")
         def list_images(self, req):
             raise AssertionError("不应调 list_images")
@@ -727,6 +740,327 @@ def test_create_empty_job_id_has_status_and_hint():
     assert payload["status"] == "FAIL", f"status 应为 FAIL，实得 {payload.get('status')!r}"
     assert "hint" in payload, f"失败契约应含 hint，实得 {payload!r}"
     assert payload["job_id"] == "", f"无 job_id 时应为空串，实得 {payload.get('job_id')!r}"
+
+
+class FakeDistributionClient(FakeImsClient):
+    def __init__(self, responses, *, job_id="j-distribution", submit_error=None):
+        super().__init__(responses, images=[_image(img_id="img-source", name="source-image-name")])
+        self.job_id = job_id
+        self.submit_error = submit_error
+        self.copy_requests = []
+        self.share_requests = []
+
+    def copy_image_cross_region(self, request):
+        self.copy_requests.append(request)
+        if self.submit_error:
+            raise self.submit_error
+        return CopyImageCrossRegionResponse(job_id=self.job_id)
+
+    def batch_add_members(self, request):
+        self.share_requests.append(request)
+        if self.submit_error:
+            raise self.submit_error
+        return BatchAddMembersResponse(job_id=self.job_id)
+
+    def create_image(self, request):
+        return CreateImageResponse(job_id=self.job_id)
+
+
+@contextlib.contextmanager
+def _temporary_logs():
+    with tempfile.TemporaryDirectory() as directory, \
+            patch.object(ims, "LOGS_DIR", pathlib.Path(directory)):
+        yield pathlib.Path(directory)
+
+
+def copy_scope():
+    return {**make_cli_scope(), "ims_copy": {"agency_name": "test-agency"}}
+
+
+COPY_FLAGS = ["copy-cross-region", "--id", "img-source", "--region", "cn-north-4"]
+SHARE_FLAGS = ["share", "--id", "img-destination", "--region", "cn-north-4",
+               "--account-id", "account-receiver"]
+
+
+def test_copy_dry_run_default_project_and_scope_agency():
+    with patch.object(ims, "build_client", side_effect=AssertionError("dry-run 构建了客户端")):
+        code, payload = run_cli(copy_scope(), [
+            *COPY_FLAGS, "--dry-run", "--source-image-name", "source-image-name",
+        ])
+    assert code == 0 and payload["ok"] is True
+    assert payload["source_region"] == "ap-southeast-3"
+    assert payload["destination_region"] == "cn-north-4"
+    request = payload["request"]
+    assert request["image_id"] == "img-source"
+    assert request["body"]["project_name"] == "cn-north-4"
+    assert request["body"]["agency_name"] == "test-agency"
+    assert request["body"]["name"] == "source-image-name"
+    assert "description" not in request["body"] and "vault_id" not in request["body"]
+    assert "OBS" in payload["cost_notice"]
+
+
+def test_copy_dry_run_cli_overrides_and_request_fields():
+    code, payload = run_cli(copy_scope(), [
+        *COPY_FLAGS, "--dry-run", "--agency-name", "cli-agency",
+        "--project-name", "cn-north-4_team", "--source-image-name", "source-image-name",
+        "--description", "copied from source",
+    ])
+    assert code == 0
+    assert payload["request"]["body"] == {
+        "agency_name": "cli-agency", "description": "copied from source",
+        "name": "source-image-name", "project_name": "cn-north-4_team", "region": "cn-north-4",
+    }
+
+
+def test_distribution_required_arguments():
+    for flags in (["copy-cross-region", "--id", "img-source"],
+                  ["copy-cross-region", "--region", "cn-north-4"],
+                  ["share", "--id", "img-destination"]):
+        code, _ = run_cli(copy_scope(), [*flags, "--dry-run"])
+        assert code == 2
+    code, payload = run_cli(make_cli_scope(), [*COPY_FLAGS, "--dry-run"])
+    assert code == 1 and payload is None
+
+
+def test_share_dry_run_uses_only_account_member_dimension():
+    with patch.object(ims, "build_client", side_effect=AssertionError("dry-run 构建了客户端")):
+        code, payload = run_cli(make_cli_scope(), [*SHARE_FLAGS, "--dry-run"])
+    assert code == 0
+    assert payload["region"] == "cn-north-4"
+    assert payload["request"]["body"] == {
+        "images": ["img-destination"], "domains": ["account-receiver"],
+    }
+
+
+def test_copy_submits_once_and_saves_identity_before_polling():
+    class LoggedClient(FakeDistributionClient):
+        def show_job_progress(self, request):
+            if self.call_count == 0:
+                files = list(ims.LOGS_DIR.glob("*.json"))
+                assert len(files) == 1
+                logged = json.loads(files[0].read_text())
+                assert logged["source_image_id"] == "img-source"
+                assert logged["source_region"] == "ap-southeast-3"
+                assert logged["destination_region"] == "cn-north-4"
+                assert logged["final"]["job_id"] == self.job_id
+                assert logged["final"]["status"] == "SUBMITTED"
+            return super().show_job_progress(request)
+
+    client = LoggedClient([
+        _job_resp("INIT", process_percent=0),
+        _job_resp("RUNNING", process_percent=0.4),
+        _job_resp("SUCCESS", image_id="img-new", job_type=ims.CROSS_REGION_COPY_JOB),
+    ])
+    builds = []
+
+    def build(creds, **kwargs):
+        builds.append((creds.region, kwargs))
+        return client
+
+    with _temporary_logs(), patch.object(ims, "build_client", side_effect=build), _patch_sleep():
+        code, payload = run_cli(copy_scope(), COPY_FLAGS)
+        logged = json.loads(pathlib.Path(payload["log"]).read_text())
+    assert code == 0 and payload["status"] == "SUCCESS"
+    assert payload["destination_image_id"] == "img-new"
+    assert payload["source_image_id"] == "img-source"
+    assert builds == [("ap-southeast-3", {})]
+    assert len(client.copy_requests) == 1 and client.call_count == 3
+    assert client.list_images_calls == 1
+    assert client.copy_requests[0].body.name == payload["image_name"] == "source-image-name"
+    assert logged["poll_trace"][1]["process_percent"] == 0.4
+    assert logged["final"]["ok"] is True
+
+
+def test_copy_empty_job_id_does_not_poll():
+    client = FakeDistributionClient([], job_id=None)
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(copy_scope(), COPY_FLAGS)
+    assert code == 1 and payload["status"] == "FAIL"
+    assert payload["job_id"] == "" and "job_id" in payload["error"]
+    assert client.call_count == 0
+
+
+def test_copy_source_name_is_always_read_from_source_image():
+    client = FakeDistributionClient([_job_resp("SUCCESS", image_id="img-new")])
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(copy_scope(), [*COPY_FLAGS, "--source-image-name", "stale-preview-name"])
+    assert code == 0 and payload["image_name"] == "source-image-name"
+    assert client.copy_requests[0].body.name == "source-image-name"
+    assert client.list_images_calls == 1
+
+
+def test_copy_long_chinese_name_keeps_job_log_before_polling():
+    source_name = "镜" * 128
+
+    class LongNameClient(FakeDistributionClient):
+        def show_job_progress(self, request):
+            files = list(ims.LOGS_DIR.glob("*.json"))
+            assert len(files) == 1, "合法长镜像名不应影响 job 身份落盘"
+            logged = json.loads(files[0].read_text())
+            assert logged["final"]["job_id"] == self.job_id
+            assert logged["request"]["body"]["name"] == source_name
+            return super().show_job_progress(request)
+
+    client = LongNameClient([_job_resp("SUCCESS", image_id="img-new")])
+    client._images = [_image(img_id="img-source", name=source_name)]
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(copy_scope(), COPY_FLAGS)
+        assert payload["log"] and pathlib.Path(payload["log"]).is_file()
+    assert code == 0 and payload["image_name"] == source_name
+    assert client.copy_requests[0].body.name == source_name
+
+
+def test_copy_missing_source_never_submits():
+    client = FakeDistributionClient([])
+    client._images = []
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(copy_scope(), COPY_FLAGS)
+    assert code == 1 and "未找到源镜像" in payload["error"]
+    assert payload["job_id"] == "" and client.copy_requests == []
+
+
+def test_copy_dry_run_requires_known_source_name():
+    with patch.object(ims, "build_client", side_effect=AssertionError("dry-run 构建了客户端")):
+        code, payload = run_cli(copy_scope(), [*COPY_FLAGS, "--dry-run"])
+    assert code == 1 and payload is None
+
+
+def test_copy_submission_errors_preserve_sdk_codes_without_retry():
+    for error_code in ("IMG.0149", "IMG.0151"):
+        client = FakeDistributionClient([], submit_error=ClientRequestException(
+            400, SdkError(error_code=error_code, error_msg="official error detail"),
+        ))
+        with _temporary_logs(), _patch_build_client(client):
+            code, payload = run_cli(copy_scope(), COPY_FLAGS)
+        assert code == 1 and payload["error_code"] == error_code
+        assert "official error detail" in payload["error"] and payload["hint"]
+        assert len(client.copy_requests) == 1 and client.call_count == 0
+
+
+def test_copy_query_exception_keeps_last_status_and_job_id():
+    class QueryErrorClient(FakeDistributionClient):
+        def show_job_progress(self, request):
+            if self.call_count:
+                raise RuntimeError("query connection failed")
+            return super().show_job_progress(request)
+
+    client = QueryErrorClient([_job_resp("RUNNING", process_percent=0.5)])
+    with _temporary_logs(), _patch_build_client(client), _patch_sleep():
+        code, payload = run_cli(copy_scope(), COPY_FLAGS)
+        logged = json.loads(pathlib.Path(payload["log"]).read_text())
+    assert code == 1 and payload["status"] == "RUNNING"
+    assert payload["job_id"] == client.job_id
+    assert "query connection failed" in payload["error"]
+    assert "--region ap-southeast-3" in payload["hint"]
+    assert logged["final"]["job_id"] == client.job_id
+
+
+def test_copy_timeout_preserves_initializing_status():
+    client = FakeDistributionClient([_job_resp("INIT")])
+    with _temporary_logs(), _patch_build_client(client), _patch_sleep(), \
+            patch.object(ims.time, "monotonic", side_effect=[0, 0, 2]):
+        code, payload = run_cli(copy_scope(), [*COPY_FLAGS, "--timeout", "1"])
+    assert code == 1 and payload["status"] == "INIT"
+    assert payload["job_id"] == client.job_id and "超时" in payload["error"]
+
+
+def test_copy_failed_job_and_missing_result_id():
+    for response in (
+        _job_resp("FAIL", fail_reason="agency denied", error_code="IMG.0151"),
+        _job_resp("SUCCESS", job_type=ims.CROSS_REGION_COPY_JOB),
+    ):
+        client = FakeDistributionClient([response])
+        with _temporary_logs(), _patch_build_client(client):
+            code, payload = run_cli(copy_scope(), COPY_FLAGS)
+        assert code == 1 and payload["ok"] is False
+        assert payload["job_id"] == client.job_id and payload["error"]
+        assert payload["destination_image_id"] == ""
+        if response.status == "FAIL":
+            assert payload["error_code"] == "IMG.0151"
+            assert payload["fail_reason"] == "agency denied"
+
+
+def test_share_success_without_new_image_id():
+    client = FakeDistributionClient([
+        _job_resp("SUCCESS", job_type=ims.ADD_IMAGE_MEMBERS_JOB),
+    ])
+    with _temporary_logs(), patch.object(ims, "build_client", return_value=client) as build:
+        code, payload = run_cli(make_cli_scope(), SHARE_FLAGS)
+    assert code == 0 and payload["status"] == "SUCCESS"
+    assert payload["image_id"] == "img-destination"
+    assert payload["account_id"] == "account-receiver"
+    assert "destination_image_id" not in payload
+    assert len(client.share_requests) == 1 and client.list_images_calls == 0
+    assert build.call_args.kwargs == {"region": "cn-north-4"}
+
+
+def test_share_failure_retains_image_account_and_job():
+    client = FakeDistributionClient([
+        _job_resp("FAIL", fail_reason="member invalid", error_code="IMG.0001"),
+    ])
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(make_cli_scope(), SHARE_FLAGS)
+    assert code == 1 and payload["fail_reason"] == "member invalid"
+    assert payload["image_id"] == "img-destination" and payload["account_id"] == "account-receiver"
+    assert payload["job_id"] == client.job_id
+
+
+def test_show_distribution_success_never_queries_source_image():
+    for job_type, image_id in ((ims.CROSS_REGION_COPY_JOB, "img-new"),
+                               (ims.ADD_IMAGE_MEMBERS_JOB, None)):
+        client = FakeImsClient([_job_resp("SUCCESS", image_id=image_id, job_type=job_type)])
+        code, payload = _run_show_helper(ims._show_by_job_id, client, job_id="j-distribution")
+        assert code == 0 and payload["job_type"] == job_type
+        assert client.list_images_calls == 0
+        if image_id:
+            assert payload["destination_image_id"] == image_id
+
+
+def test_show_running_recovery_command_keeps_query_region():
+    client = FakeImsClient([_job_resp("RUNNING", process_percent=0.3)])
+    with _patch_build_client(client):
+        code, payload = run_cli(make_cli_scope(), [
+            "show", "--job-id", "j-source", "--region", "ap-southeast-1",
+        ])
+    assert code == 1 and "--region ap-southeast-1" in payload["hint"]
+    assert "--scope" in payload["hint"]
+
+
+def test_region_override_drops_only_the_source_project_id():
+    class CapturingBuilder:
+        def __init__(self, client_type):
+            self.credentials = None
+            self.region = None
+
+        def with_credentials(self, credentials):
+            self.credentials = credentials
+            return self
+
+        def with_region(self, region):
+            self.region = region
+            return self
+
+        def build(self):
+            return self
+
+    credentials = Credentials("AK-PLACEHOLDER", "SK-PLACEHOLDER", "ap-southeast-3", "source-project")
+    with patch.object(ims_client, "ClientBuilder", CapturingBuilder), _no_network():
+        source = ims_client.build_client(credentials)
+        same_region = ims_client.build_client(credentials, region="ap-southeast-3")
+        destination = ims_client.build_client(credentials, region="cn-north-4")
+    assert source.credentials.project_id == same_region.credentials.project_id == "source-project"
+    assert not destination.credentials.project_id
+    assert destination.region.id == "cn-north-4"
+    assert destination.region.endpoints == ["https://ims.cn-north-4.myhuaweicloud.com"]
+    assert credentials.project_id == "source-project" and credentials.region == "ap-southeast-3"
+
+
+def test_create_success_keeps_existing_contract_on_new_job_api():
+    client = FakeDistributionClient([_job_resp("SUCCESS", image_id="img-created")])
+    with _temporary_logs(), _patch_build_client(client):
+        code, payload = run_cli(make_cli_scope(), ["create", "--instance-id", "i-source"])
+    assert code == 0 and payload["image_id"] == "img-created"
+    assert payload["region"] == "ap-southeast-3" and payload["instance_id"] == "i-source"
 
 
 TESTS = [v for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]

@@ -69,13 +69,20 @@ def resolve_credentials(scope: dict[str, Any]) -> Credentials:
     return Credentials(ak=ak, sk=sk, region=region, project_id=project_id)
 
 
-def build_client(creds: Credentials) -> ImsClient:
-    """官方 ImsClient（系统盘镜像 API）。"""
-    endpoint = f"https://{IMS_ENDPOINT_TEMPLATE.replace('{region}', creds.region)}"
-    credentials = BasicCredentials(creds.ak, creds.sk, creds.project_id) if creds.project_id else BasicCredentials(creds.ak, creds.sk)
+def build_client(creds: Credentials, *, region: str | None = None) -> ImsClient:
+    """构造区域客户端；异区调用由 SDK 解析目的区域的默认 IAM 项目。"""
+    target_region = (region if region is not None else creds.region).strip()
+    if not target_region:
+        raise ValueError("region 不能为空。")
+    endpoint = f"https://{IMS_ENDPOINT_TEMPLATE.replace('{region}', target_region)}"
+    project_id = creds.project_id if target_region == creds.region else ""
+    credentials = (
+        BasicCredentials(creds.ak, creds.sk, project_id)
+        if project_id else BasicCredentials(creds.ak, creds.sk)
+    )
     return (
         ClientBuilder(ImsClient)
         .with_credentials(credentials)
-        .with_region(Region(id=creds.region, endpoint=endpoint))
+        .with_region(Region(id=target_region, endpoint=endpoint))
         .build()
     )
