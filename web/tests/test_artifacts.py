@@ -148,6 +148,63 @@ async def test_browse_rpm_root_with_stage_badges():
             assert stages["install-rpm.sh"] == "ARCHIVE"
 
 
+async def test_browse_market_doc_json_without_filename_prefix():
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        capture = {
+            "temporary_instance": None,
+            "scope": ["打开软件界面"],
+            "checks": [{"operation": "首页", "method": "browser", "evidence": "shots/home.png"}],
+            "gaps": [],
+        }
+        cleanup = {"temporary_instance": None, "status": "not_required", "recorded_at": "2026-11-04T00:00:00Z"}
+        content = {
+            "deployment": {"software": "aionui", "version": "2.2.2"},
+            "description": ["商品说明"],
+            "ports": [22, 3000],
+            "intro": ["进入页面"],
+            "sections": [],
+            "references": [],
+        }
+        market_files = {
+            "deploy/agentscope/2.0.11/capture.json": capture,
+            "deploy/agentscope/2.0.11/capture.cleanup.json": cleanup,
+            "deploy/agentscope/2.0.11/content.json": content,
+            "deploy/aionui/2.2.2/aionui-market-capture.json": capture,
+            "deploy/aionui/2.2.2/aionui-market-capture.cleanup.json": cleanup,
+            "deploy/aionui/2.2.2/aionui-market-data.json": content,
+            "deploy/draft/1.0/session-record.json": {"temporary_instance": None},
+        }
+        ordinary_files = {
+            "deploy/aionui/2.2.2/aionui-install-meta.json": {"path": "create", "server_alias": "srv"},
+            "deploy/ordinary/1.0/capture.json": {"capture": "application setting"},
+            "deploy/ordinary/1.0/capture.cleanup.json": {"status": "complete"},
+            "deploy/ordinary/1.0/content.json": {"sections": []},
+            "deploy/ordinary/1.0/list.json": ["application data"],
+            "rpm/demo/1.0/capture.json": capture,
+        }
+        for relative, value in {**market_files, **ordinary_files}.items():
+            path = root / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(value), encoding="utf-8")
+        malformed = "deploy/ordinary/1.0/malformed.json"
+        (root / malformed).write_text("not valid JSON", encoding="utf-8")
+        make_output_tree(root / "deploy", "nextcloud/35.0.2/.scratch/pdfcheck", ("pg-1.png",))
+        make_output_tree(root / "rpm", "demo/1.0/.scratch", ("build.log",))
+        async with await run_with_client(root) as client:
+            response = await client.get("/api/artifacts")
+            assert response.status_code == 200, response.text
+            groups = response.json()["groups"]
+            listed = {f"{group['dir']}/{file['name']}" for group in groups for file in group["files"]}
+            assert not set(market_files) & listed, sorted(set(market_files) & listed)
+            assert listed == set(ordinary_files) | {malformed, "rpm/demo/1.0/.scratch/build.log"}, sorted(listed)
+            assert not any(group["dir"] == "deploy/agentscope/2.0.11" for group in groups)
+            relative = "deploy/agentscope/2.0.11/capture.json"
+            response = await client.get(f"/api/artifacts/file/{relative}")
+            assert response.status_code == 200, response.text
+            assert json.loads(response.json()["content"]) == capture
+
+
 async def test_browse_rpm_packages_binary_flag_and_badge():
     with tempfile.TemporaryDirectory() as tmp:
         root = Path(tmp)

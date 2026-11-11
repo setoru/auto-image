@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 身份 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 文件与目录 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -107,18 +107,18 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。云 Agent 卸载让镜像不携带与华为云管控侧绑定的客户端身份（两块均为**先杀进程再删身份文件**——agent 带守护自拉起，进程不死会在删文件后重新落盘，故块尾 `pgrep` 复验，仍在运行即清理未完成）；安全基线两项各自消除一类交付缺陷——密码策略确保后续改密强制复杂度校验，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。UniAgent 保留客户端并按[官方制镜像方式一](https://support.huaweicloud.com/intl/zh-cn/bestpractice-aom2/aom_05_0007.html)清理指定文件与目录，HostGuard 卸载（两块均为**先杀进程再清理**——agent 带守护自拉起，进程不死会在删文件后重新落盘，故块尾 `pgrep` 复验，仍在运行即清理未完成）；安全基线两项各自消除一类交付缺陷——密码策略确保后续改密强制复杂度校验，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
-# —— UniAgent 身份清理（容错：未安装或已停止均不阻塞）——
-# 顺序约束：先杀进程再删身份文件。uniagentd 带守护自拉起，service stop 单独可能停不净，
+# —— UniAgent 制镜像前清理（容错：未安装或已停止均不阻塞）——
+# 顺序约束：先杀进程再清理。uniagentd 带守护自拉起，service stop 单独可能停不净，
 # 存活进程会在删文件后重新落盘 .sn 与日志目录，使清理落空——停进程用尽手段后强杀、等待、再删文件、复验。
 systemctl stop uniagentd 2>/dev/null || true
 service uniagentd stop 2>/dev/null || true
 pkill -9 uniagentd 2>/dev/null || true
 sleep 1
-rm -f /etc/uniagentd/uniagentd.sn || true
-rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ || true
+rm -f /etc/uniagentd/uniagentd.sn /usr/local/uniagentd/conf/uniagentd.conf || true
+rm -rf /usr/local/uniagentd/log/ /usr/local/uniagentd/tmp/ /usr/local/uniagentd/libexec/ || true
 if pgrep -x uniagentd >/dev/null 2>&1; then echo "uniagentd 仍在运行"; else echo "uniagentd 已停止"; fi
 # —— HostGuard（HSS Agent）卸载（容错：未安装或已停止均不阻塞）——
 # 范围：只卸载 agent 本体。/etc/init.d/HSSInstall（开机自动安装 agent 的安装器）保留，不在此清理。
@@ -252,7 +252,7 @@ python <ecs_skill_scripts>/ecs.py change-os \
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：systemctl/service stop uniagentd + pkill -9 + 删身份文件 + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：<本次真实值> | 状态：<本次结果>
 - 输出摘要：<本次真实输出；未执行则说明>
 

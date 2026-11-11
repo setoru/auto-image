@@ -239,6 +239,14 @@ OBS 配置修改先审计后执行；OBS 全局配置（凭据/桶/endpoint）�
   只补尚未加载的事实，不能用旧状态覆盖更新事件。
 - RPM 等二进制产物在 Markdown 解析前分流，只显示元数据、不可预览说明与
   原始文件下载；Markdown 与 JSON 仍按文本方式显示。
+- 本地产物清单递归浏览 `deploy/`、`rpm/`、`rpmcheck/` 和旧版 `hce/`，
+  隐藏内部临时/簿记文件，以及 `deploy/` 下 market-doc 的使用指南、截图包、
+  内容/采集记录（`*-usage-guide.*`、`*-usage-shots.*`、`*-usage-content.*`、
+  `*-usage-capture.*`）和 `shots/`、`.scratch/` 子树。任意命名的 JSON 按
+  market-doc 输入结构识别：含 `temporary_instance` 的采集记录/清理回执，
+  或同时含 `deployment/description/ports/intro/sections/references` 的内容 JSON。
+  普通同名 JSON 与无法解析的 JSON 继续显示。仅从清单隐藏，文件仍保存在
+  本地，已知路径的读取、下载和打包沿用原有接口。
 
 ## 当前版本产物与并行运行
 
@@ -327,7 +335,7 @@ cd web-ui && npm test && npm run build    # 前端完整测试与生产构建
 | `events.py` | 进程内事件存储：seq 递增、快照重放、全局订阅唤醒 |
 | `session.py` | 回合执行（send 起回合级 asyncio.Task，SDK 连接只包住一个回合；停止意图覆盖连接建立前与 query 前的启动窗口） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
-| `artifacts.py` | deploy/ + rpm/ 多根全量产物浏览（目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
+| `artifacts.py` | 多根产物浏览（隐藏内部文件与 market-doc 文件/素材；目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的恢复（单一流程）：全量 transcript 按 session 粒度重放 + state 簿记叠加——身份映射命中的沿用原 run_id 并恢复 owner 归属，墓碑会话标 ENDED；其余重放会话 READY 可续聊，未收尾回合（transcript 推导 turn_open）补 `turn.interrupted` 不伪造完成 |
 | `state.py` | 恢复簿记（`~/.auto-image-web/state.json`，全量原子替换，带显式 version）：墓碑（用户 ENDED 的 session_id 集合）+ 身份映射（run_id ↔ session_id）+ Fork 来源镜像（session_id → 来源 run_id）+ owner 归属（run_id → 用户；与身份映射同生命周期登记）（stage/title/first_prompt 从 transcript 重放推导）；读取按状态分类（modern/legacy/missing/corrupt）支撑受限恢复判定，strict 落盘失败抛 `StatePersistError`（控制动作 503 门）；初始化标记（state 同名 `.initialized`）区分首次启动与初始化后缺失 |

@@ -1,10 +1,11 @@
-"""产物多根全量浏览：目录分组清单、内容读取、单文件下载与批量 zip。
+"""产物多根浏览：目录分组清单、内容读取、单文件下载与批量 zip。
 
 产物由流水线落盘在多根目录下（deploy.config.yaml 的 output_dir 固定
 前缀 deploy/ + rpm 流水线产物目录 rpm/ + rpm-check/hce-rpm-check 按目标
-镜像分目录的报告树 rpmcheck/）；本模块只读浏览全部产物（含
-历史轮次、重跑备份与杂项文件），不做任何按会话/阶段的过滤——侧栏产物
-区即各根目录的镜像，清单组键带根前缀（deploy/…、rpm/…、rpmcheck/…），约定命名的
+镜像分目录的报告树 rpmcheck/）；本模块只读浏览产物（含
+历史轮次、重跑备份与杂项文件），清单隐藏内部文件与 deploy 下的
+market-doc 使用指南、记录及截图素材，不做按会话/阶段的过滤。
+清单组键带根前缀（deploy/…、rpm/…、rpmcheck/…），约定命名的
 文件带阶段徽标（deploy 文件名从 config 派生，rpm 约定单点维护于
 RPM_FILE_STAGES；{{software}} 占位剥去得后缀），非约定的（.v1 备份、
 人工杂项）无徽标平铺。
@@ -14,9 +15,11 @@ resolve 后必须仍位于该根内且是普通文件，否则按 404 处理—�
 文件读取器。
 """
 import io
+import json
 import os
 import zipfile
 from datetime import datetime
+from fnmatch import fnmatchcase
 from pathlib import Path, PurePosixPath
 
 import yaml
@@ -27,6 +30,32 @@ from .normalize import ARCHIVE, BUILD, GUIDE, INSTALL, VERIFY
 def _is_internal_file(name):
     """Hide atomic-write scratch and legacy record bookkeeping from artifact UI."""
     return name in {".records.lock", ".commit-sequence.json"} or (name.startswith((".deploy-", ".record-")) and name.endswith(".tmp"))
+
+
+# market-doc 文件族：使用指南的渲染件与采集清理回执沿用同一命名。
+MARKET_DOC_PATTERNS = (
+    "*-usage-guide.*",
+    "*-usage-shots.*",
+    "*-usage-content.*",
+    "*-usage-capture.*",
+)
+
+
+def _is_market_doc_file(path):
+    if any(fnmatchcase(path.name, pattern) for pattern in MARKET_DOC_PATTERNS):
+        return True
+    if path.suffix != ".json":
+        return False
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False
+    # 采集记录/清理回执共有 temporary_instance；内容 JSON 沿用构建输入必需键。
+    return isinstance(data, dict) and (
+        "temporary_instance" in data
+        or {"deployment", "description", "ports", "intro", "sections", "references"}.issubset(data)
+    )
+
 
 # deploy.config.yaml 的产物文件键 → 所属阶段（config 是文件名的唯一权威源，
 # 改名 / 加键只动 config：改名自动跟随，新键不在此映射即无徽标）
@@ -118,14 +147,19 @@ def browse(artifact_roots, file_stages):
     """
     groups = {}
     for root_name, root_path in artifact_roots.items():
-        for dirpath, _dirnames, filenames in os.walk(root_path):
+        for dirpath, dirnames, filenames in os.walk(root_path):
+            if root_name == "deploy":
+                dirnames[:] = [name for name in dirnames if name not in {"shots", ".scratch"}]
             rel_dir = Path(dirpath).relative_to(root_path).as_posix()
             group_dir = f"{root_name}/{rel_dir}" if rel_dir != "." else root_name
             for name in filenames:
-                if _is_internal_file(name):
+                path = Path(dirpath) / name
+                if _is_internal_file(name) or (
+                    root_name == "deploy" and _is_market_doc_file(path)
+                ):
                     continue
                 try:
-                    stat = os.stat(Path(dirpath) / name)
+                    stat = os.stat(path)
                 except OSError:
                     continue
                 stage = stage_for_file(name, file_stages)
