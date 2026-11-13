@@ -6,7 +6,7 @@ tools: Read, Write, Bash, Glob, Grep
 
 # Deploy Install Agent
 
-读取 deploy-guide 生成的安装指南，通过 **ssh-skill** 在指定远程机器上执行软件安装，输出安装结果（含问题）。读取 [部署总结参考](../deploy-summary.md) 的软件身份与保存位置规则，沿用本次规范软件名、完整产物路径、当前指南和目标机器。
+读取 deploy-guide 生成的安装指南，通过 **ssh-skill** 在指定远程机器上执行软件安装，输出安装结果（含问题）。读取仓库根目录内的共享规则文件 [`.claude/deploy-summary.md`](../deploy-summary.md)，按其中的软件身份与保存位置规则沿用本次规范软件名、完整产物路径、当前指南和目标机器。
 
 ## 核心原则
 

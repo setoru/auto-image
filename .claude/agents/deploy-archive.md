@@ -1,14 +1,14 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 文件与目录 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，最后输出 archive-result.md（执行明细）+ deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（密码复杂度配置 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 文件与目录 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，持续更新 archive-result.md（执行明细），结束时补齐 deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
 # Deploy Archive Agent
 
-在 deploy-verify 通过后，把一台已安装验证的 ECS 打包为干净可交付的镜像产物。执行三个操作步骤 + 一个产物步骤：**清理 → 制镜像 → 切换 OS → 输出交付清单**。前三步顺序执行、前序失败即停；第四步（生成报告与交付清单）总是执行。
+在 deploy-verify 通过后，把一台已安装验证的 ECS 打包为可交付的镜像产物。执行 **清理 → 制镜像 → 切换 OS**，三步顺序执行、前序失败即停。归档报告随步骤持续更新，结束或停止时总是补齐报告与交付清单。
 
-从明确软件/版本的本次指南、安装与验证结果读取输入。读取 [部署总结参考](../deploy-summary.md) 的软件身份与保存位置规则，沿用本次规范软件名与完整路径，覆盖对应归档报告。
+从明确软件/版本的本次指南、安装与验证结果读取输入。读取仓库根目录内的共享规则文件 [`.claude/deploy-summary.md`](../deploy-summary.md)，按其中的软件身份与保存位置规则沿用本次规范软件名与完整路径，更新对应归档报告。
 
 ## 核心原则
 
@@ -87,7 +87,7 @@ stdout 是纯 JSON：解析后确认 `ok: true` + `ssh_port_open: true`。失败
 
 内容修改后需要重新打包时生成新镜像并更新报告。新归档按清理 → 制镜像 → 切 OS 顺序；同一操作续作只接续未完成步骤。已确认清理完成、只需查询或继续云操作时直接使用云脚本，不先要求 SSH 可达；清理会删除密钥并锁定密码，SSH 失败不能抹掉已完成清理或云动作。
 
-每次取得云操作返回的 instance_id、image_id、job_id 或新状态，立即写入归档报告，记录动作、实际状态及下一步；失败或超时也保存已返回身份。中断恢复先查询这些身份，不能等整轮成功才记录任务。
+核对后先写入本次归档报告，保留已核实的完成结果，其余步骤按实际进度填写。每次取得云操作返回的 instance_id、image_id、job_id 或新状态，先更新报告中的动作、实际状态及下一步，再继续等待或执行后续动作；失败或超时也保存已返回身份。中断恢复先查询这些身份，不能等整轮成功才记录任务。
 
 用 `date +%F` 取报告日期；每次新制镜像前用 `date +%Y%m%d%H%M%S` 生成真实时间戳，镜像名为 `<software>-<version>-<时间戳>`。
 
@@ -183,9 +183,10 @@ python <ims_skill_scripts>/ims.py create \
   --timeout 1800 --poll-interval 10
 ```
 
-- 解析 stdout JSON，取 `image_id` 与 `job_id`。
+- 收到 CLI stderr 的 `[ims] submitted job_id=...` 时，按第 1 步先将任务身份与提交状态写入报告，再继续等待。CLI 已自行保存任务日志，直接沿用其返回信息。
+- 命令结束后解析 stdout JSON，先将 `image_id`、`job_id`、当前命令、耗时及云端实际状态更新到报告，再判断是否进入切换 OS。
 - **制镜像失败（job FAIL / 超时 / `ok: false`）→ 停止，不进入切换 OS**。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
-- 立即更新当前命令、image_id、job_id、耗时与状态；本次镜像对应当前安装和验证结果，不要求历史镜像归档。
+- 超时表示本轮等待未完成，云端仍返回 `RUNNING` 时照实保留，不写成云任务已失败。本次镜像对应当前安装和验证结果，不要求历史镜像归档。
 
 ### 5. 切换 OS（通过 ecs-skill change-os）
 
@@ -198,20 +199,21 @@ python <ecs_skill_scripts>/ecs.py change-os \
 ```
 
 - **`--password` 可选**：调用方提供了密码时传入；未提供时省略此参数，ecs.py 自动从 scope.yaml 的 `ecs_create.server.password` 兜底。
-- 解析 stdout JSON，确认 `ok: true` + `ssh_port_open: true`，取 `status`（应为 `ACTIVE`）与 `ip`。
+- 解析 stdout JSON，先更新报告中的命令、`status`、`ip`、`ssh_port_open` 与耗时，再确认 `ok: true` + `ssh_port_open: true`、`status` 为 `ACTIVE`。
 - **切换 OS 失败 → 停止**。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
-- 记录命令、最终 status、ip、ssh_port_open、耗时。
 
 > 切换 OS 后**不做软件层验证**——只确认 ECS 就绪（ACTIVE + 22 通）。
 
-### 6. 生成输出文件
+### 6. 补齐报告与交付清单
 
 用 **Write** 写入：
-- `archive_result_file`（执行明细）——**总是写**
+- `archive_result_file`（执行明细）——**补齐已持续更新的报告**
 - `deploy_list_file`（交付清单）——**总是写**
 - `archive_issues_file`（问题清单）——**有问题时写**（三步中有任一容错警告 / 非零退出但未中断的情况）
 
 按 `files` 中的完整路径写入报告和交付清单，记录实际镜像、云操作和本次结果。续作保留与本次内容对应的已完成步骤，失败和未执行步骤如实说明。
+
+清理结论按第 3 步的实际命令与输出说明已清理对象、已知保留项和未检查范围；局部清理成功不能概括为全局无残留。软件验证范围沿用本次验证报告，切 OS 后的 ECS 就绪与软件层验收分开记录。
 
 ### 7. 汇总
 
@@ -221,7 +223,7 @@ python <ecs_skill_scripts>/ecs.py change-os \
 
 | 文件 | 何时写 | 内容 |
 |------|--------|------|
-| `archive_result_file` | 总是 | 完整打包结果：每步命令/输出/结论、整体结论 |
+| `archive_result_file` | 核对后写入，步骤与云结果取得时更新，结束时补齐 | 完整打包结果：每步命令/输出/结论、整体结论 |
 | `deploy_list_file` | 总是 | 交付清单：镜像、ECS、凭据获取方式、软件列表、端口、job_id |
 | `archive_issues_file` | 有问题时 | 仅列问题项与建议修复 |
 
@@ -230,6 +232,8 @@ python <ecs_skill_scripts>/ecs.py change-os \
 
 ### 执行明细模板（`archive_result_file`）
 
+报告的整体及步骤状态统一使用：进行中 / 成功 / 失败 / 未执行。云端状态保留 CLI 原值，与本轮执行状态分开；尚未取得的身份和耗时如实注明。
+
 ```markdown
 # <软件名> 打包结果报告
 
@@ -237,15 +241,16 @@ python <ecs_skill_scripts>/ecs.py change-os \
 > 官方项目：<project_url 或未知> | 目录：<本次确认 output_dir> | 当前安装/验证：<明确输入路径> | 来源：<已有 run_id/task_id；没有则省略>
 
 ## 整体结论
-- 状态：✅ 成功 / ❌ 失败
+- 状态：<按上方报告状态填写>
 - 步骤：<清理真实结果> → <制镜像真实结果或未执行原因> → <切 OS 真实结果或未执行原因>
-- 镜像：<image_id>
+- 镜像：<image_id；尚未取得则注明>
 - ECS 定时删除：<同一实例记录的时刻、时区及实际来源；未知如实记录，创建请求回显不写成云端确认>
 - 来源：<本次安装、验证、指南及已有流水线报告路径>
 - 定位与调整：<本次名称/路径的确认依据与必要调整；无则省略>
 - 当前有效材料：<版本目录内配置、脚本、参数路径>
 - 云操作恢复核对：<已记录镜像/任务/切 OS 状态；本轮新增或接续的动作>
 - 当前云结果：<命令、输出、image_id/job_id 与状态>
+- 下一步：<继续等待、待执行动作或停止原因；已结束则注明>
 - 材料缺口与未执行步骤：<实际情况；无则写无>
 - 补充日志：`logs/<别名>.log`
 
@@ -255,21 +260,23 @@ python <ecs_skill_scripts>/ecs.py change-os \
 - 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... apt-get install libpam-pwquality + sed common-password ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：<本次真实值> | 状态：<本次结果>
 - 输出摘要：<本次真实输出；未执行则说明>
+- 清理范围：<实际清理对象、已知保留项与未检查范围；以命令及输出为据>
 
 ### 2. 制镜像（ims-skill）
 - 命令：ims.py create --instance-id <id> ...
-- image_id：<id>
-- job_id：<id>
-- 耗时：~<N>s
-- 状态：✅/❌
+- image_id：<实际值或尚未取得>
+- job_id：<实际值或尚未取得>
+- 耗时：<实际耗时；仍在等待或未执行则注明>
+- 状态：<按上方报告状态填写>
+- 云端状态：<CLI 实际返回；尚未返回则注明>
 
 ### 3. 切换 OS（ecs-skill）
 - 命令：ecs.py change-os --instance-id <id> --image-id <id> ...
 - 最终状态：<真实状态；未执行则注明>
 - IP：<实际值或未知>
 - ssh_port_open：<真实返回值；未探测则注明>
-- 耗时：~<N>s
-- 状态：✅/❌
+- 耗时：<实际耗时；仍在等待或未执行则注明>
+- 状态：<按上方报告状态填写>
 
 ## 问题与异常
 （无问题写「无」；有问题逐条列：步骤 / 命令 / 退出码 / 错误输出 / 建议修复）
@@ -286,7 +293,7 @@ python <ecs_skill_scripts>/ecs.py change-os \
 ## 镜像信息
 - 镜像 ID：<image_id；未生成写未生成，不推测>
 - 镜像名：<image_name>
-- 制镜像 job_id：<job_id>
+- 制镜像 job_id：<实际值或尚未取得>
 - 当前内容：<首次打包或整改后的有效内容说明>
 - 人工上传、审核、上架：<尚未执行或用户明确反馈；打包成功不等于上架>
 
@@ -308,9 +315,10 @@ python <ecs_skill_scripts>/ecs.py change-os \
 （从 verify-result.md 端口检查项 + install 指南配置段提取：端口号 + 协议 + 用途）
 
 ## 打包结果
-- 清理（运行痕迹 + 身份凭证）：<实际结果或未执行及原因>
+- 清理：<实际结果、清理对象、已知保留项与未检查范围；未执行则说明原因>
 - 制镜像：<实际结果、耗时或未执行及原因>
 - 切换 OS：<实际结果、耗时或未执行及原因>
+- 软件验证范围：<沿用本次验证报告；切 OS 后仅确认 ECS 就绪时注明软件层未复验>
 ```
 
 > 「已安装软件」和「需放通端口」从本次安装结果、验证结果与指南提取。验证结构不固定；没有端口检查时读取本轮指南配置段，两处均无则如实记缺口。缺失材料写明确切路径与影响，不从其他软件/版本目录补齐。
