@@ -7,7 +7,7 @@ allowed-tools: Agent, Read, Write, Bash, Glob
 
 # Deploy 部署流水线
 
-完整部署依次派发 guide → install → verify → archive；读取仓库根目录内的共享规则文件 [`.claude/deploy-summary.md`](../../deploy-summary.md)，按其中规则确认软件名称与完整产物路径，同版本覆盖对应产物。guide 默认查找已有总结作为调查参考；总结由用户独立手动调用 deploy-summary，缺少总结不影响部署。
+完整部署依次派发 guide → install → verify → archive；读取仓库根目录内的共享规则文件 [`.claude/deploy-summary.md`](../../deploy-summary.md)，按其中规则确认软件名称与完整产物路径，同版本覆盖对应产物。guide 默认查找并阅读已有总结，确认本次交付要求并参考有效经验；总结由用户独立手动调用 deploy-summary，缺少总结不影响部署。
 
 ## 编排职责与门禁
 
@@ -15,12 +15,12 @@ allowed-tools: Agent, Read, Write, Bash, Glob
 
 | 阶段 | 当前产物 | 进入下步条件 |
 |------|------|------|
-| guide | install_file、verify_file | 本次指南生成完成；verify 头部有精确的 `> 验证契约: exit-code-v1`，否则停止 |
+| guide | install_file、verify_file | 本次指南覆盖已确认交付要求；verify 头部有精确的 `> 验证契约: exit-code-v1`，否则停止 |
 | install | install_result_file、install_meta_file | 安装失败仍派发 verify 采证，机器缺口如实透传 |
 | verify | verify_result_file | 仅本次实际通过且对应当前安装、目标机器和版本时进入 archive；其他结论跳过 |
 | archive | archive_result_file、deploy_list_file | 记录本次真实结果与镜像；未执行或失败不视为完成 |
 
-每步完成后用 Read 校验对应产物已落盘，核对软件、版本、机器及本次调用结果；不能只检查旧同名文件存在。guide 产物缺失或失败停止后续；install 结果缺失记失败，仍执行 verify 采证；verify 报告缺失或未通过则跳过 archive；archive 报告或交付清单缺失记失败。archive 跳过原因引用 verify 的具体结论，保留软件失败、基础设施异常、检查项无法判定和指南问题的区别，不能都改写成软件未装好。
+每步完成后用 Read 校验对应产物已落盘，核对软件、版本、机器、本次交付要求及调用结果；不能只检查旧同名文件存在。guide 产物缺失或失败停止后续；install 结果缺失记失败，仍执行 verify 采证；verify 报告缺失或未通过则跳过 archive；archive 报告或交付清单缺失记失败。archive 跳过原因引用 verify 的具体结论，保留软件失败、基础设施异常、检查项无法判定和指南问题的区别，不能都改写成软件未装好。
 
 ## 输入与续作
 
@@ -51,25 +51,25 @@ ECS 公网形态由 scope `ecs_create.server.no_eip` 决定：`no_eip: true`（�
 
 ### 1. 生成或校正指南
 
-通过 Agent（subagent_type: deploy-guide）传入原始软件名、目标版本（若有）、文档/链接、分支/tag（若有）、目标环境与来源，以及第 0 步收集的明确路径；同时要求返回本次确认的完整路径结果。单独传入用户的参考要求（若有），已有用户反馈和当前失败现象一并提供。
+通过 Agent（subagent_type: deploy-guide）传入原始软件名、目标版本（若有）、文档/链接、分支/tag（若有）、目标环境与来源，以及第 0 步收集的明确路径；同时要求返回本次确认的完整路径结果、交付基线与本次明确变更依据、最终交付要求摘要。用户原话、明确约束、参考要求（若有）、已有反馈和当前失败现象一并提供；本回合阶段限制作为执行边界单独说明。guide 按共享规则从总结确定交付基线，再应用本次明确变更；安装方式与检查范围由 guide 调查确认，编排不将自行选择的路线或组件取舍写成用户要求。
 
-guide 按共享参考负责官方项目确认、路径定位、自动查找与阅读及本次指南生成；解析警告或辅助脚本异常按其中的“警告与路径纠正”处理。结束后捕获其确认的 `software`、`project_url`、`canonical_name`（若有）、`version`、`output_dir` 和 `files`，连同必要的定位依据与调整传给后续阶段。读取 `files.install_file` 和 `files.verify_file`，并确认验证指南在首个二级标题前包含精确的 `> 验证契约: exit-code-v1`；指南缺失或标记错误即停止后续，不由编排执行验证代码块。
+guide 按共享参考负责官方项目确认、路径定位、自动查找与阅读及本次指南生成；解析警告或辅助脚本异常按其中的“警告与路径纠正”处理。结束后捕获其确认的 `software`、`project_url`、`canonical_name`（若有）、`version`、`output_dir` 和 `files`，连同交付基线、变更依据、要求摘要及必要的定位依据传给后续阶段。读取 `files.install_file` 和 `files.verify_file`，核对基线中未被明确变更的要求是否保留，以及安装、启动、配置步骤与必选检查是否覆盖本次要求；有遗漏交回 guide 校正。确认验证指南在首个二级标题前包含精确的 `> 验证契约: exit-code-v1`；指南缺失或标记错误即停止后续，不由编排执行验证代码块。
 
 ### 2. 执行安装
 
-通过 Agent（subagent_type: deploy-install）传入当前软件/版本、指南路径、已知 alias/instance_id/认证方式和 ECS 创建规格，已有定时删除记录及来源一并传入。已有 alias 使用指定机器；无 alias 且没有关联实例时，由 install 调用 ecs-skill 创建并注册，保留时长沿用 `scope.yaml` 的统一配置，编排不另传时长覆盖参数。已有机器和续作沿用原安排，配置变更不重置已创建实例的时间。
+通过 Agent（subagent_type: deploy-install）传入当前软件/版本、指南路径、交付要求摘要与适配说明、已知 alias/instance_id/认证方式和 ECS 创建规格，已有定时删除记录及来源一并传入。已有 alias 使用指定机器；无 alias 且没有关联实例时，由 install 调用 ecs-skill 创建并注册，保留时长沿用 `scope.yaml` 的统一配置，编排不另传时长覆盖参数。已有机器和续作沿用原安排，配置变更不重置已创建实例的时间。
 
 结束后读取 `install_result_file` 与 `install_meta_file`，缓存 meta 中的 `server_alias`、`instance_id`、`path`、`auth_method`、`auto_terminate_time` 及报告中的时间来源。后续 alias 以 install 实际使用并保存的值为准，尤其创建路径不可猜测。meta 缺失或某字段未知时，沿用本次已核对的调用方/会话机器信息，不把已知值写空；仍无 instance_id 则注明 archive 将跳过。安装失败仍派发 verify 只读采证。
 
 ### 3. 只读验证
 
-通过 Agent（subagent_type: deploy-verify）传入当前软件/版本、验证指南、当前安装结果和明确目标机器。每次实际执行检查，旧通过文件不能替代本次结果。
+通过 Agent（subagent_type: deploy-verify）传入当前软件/版本、本次交付要求、验证指南、当前安装结果和明确目标机器。每次实际执行检查，旧通过文件不能替代本次结果。
 
 读取本次 `verify_result_file`；只有本次实际通过、机器与安装内容对应时才进入 archive，目标版本已确定时还须与实测版本一致。无法判定、失败或报告缺失则跳过，写明报告中的具体原因或材料缺口。
 
 ### 4. 打包归档
 
-本次 verify 通过且 instance_id 明确时，通过 Agent（subagent_type: deploy-archive）传入本次指南/安装/验证路径、目标机器、认证方式、已有定时删除记录及来源与已有 image_id/job_id/动作结果；否则跳过并说明原因。创建路径 instance_id 由 install meta 自动提供，已有机器则沿用已核对信息，编排不猜测云资源身份。
+本次 verify 通过且 instance_id 明确时，通过 Agent（subagent_type: deploy-archive）传入本次已核对并验证的交付要求、本次指南/安装/验证路径、目标机器、认证方式、已有定时删除记录及来源与已有 image_id/job_id/动作结果；否则跳过并说明原因。创建路径 instance_id 由 install meta 自动提供，已有机器则沿用已核对信息，编排不猜测云资源身份。
 
 子 agent 遵循清理 → 制镜像 → 切 OS 顺序并输出交付清单；续作先核对已有云动作，进行中或已完成操作不重复提交。只剩云操作时不要求重新 SSH 清理。结束后读取 `archive_result_file`、`deploy_list_file` 与实际镜像身份。上传、审核和上架仍由用户完成。
 
@@ -88,6 +88,7 @@ guide 按共享参考负责官方项目确认、路径定位、自动查找与�
 > 来源：<已有 run_id/task_id；无 Web 上下文则注明> | 目录：<本次确认 output_dir>
 
 ## 本次输入
+- 本次交付要求：<guide 确认的基线来源、本次明确变更及要求摘要；完整组成和实现见当前安装指南“记录与适配”>
 - 目标机器与来源：<alias、已知 instance_id、认证方式；秘密值省略>
 - 定时删除：<本次建机保留小时数及配置来源、记录的时刻及其时区和实际来源；未知如实记录，创建请求回显不写成云端确认>
 - 续作机器核对：<需要使用原 ECS 时记录本次当前时间（UTC）、instance_id、原删除时刻及来源、比较结果；已到期时补本次云端查询时间、实际返回与后续处理，未查询说明原因；不使用原 ECS 时省略>
@@ -114,5 +115,5 @@ guide 按共享参考负责官方项目确认、路径定位、自动查找与�
 - 人工上架：<已有明确反馈或尚待用户操作，执行成功不推断上架>
 
 ## 当前缺口
-<未执行步骤、无法判定原因、缺失材料和下一步；无则写无。>
+<尚未落实的本次交付要求、未执行步骤、无法判定原因、缺失材料和下一步；无则写无。>
 ```
