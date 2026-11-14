@@ -31,9 +31,11 @@ def test_system_prompt_covers_control_boundary():
 
 
 def test_options_pin_control_boundary():
-    """options 装配：系统提示词注入、固定上限在场。"""
+    """options 装配：Claude Code 系统提示词预设追加部署约束、固定上限在场。"""
     options = default_options()
-    assert options.system_prompt == SYSTEM_PROMPT
+    assert options.system_prompt == {
+        "type": "preset", "preset": "claude_code", "append": SYSTEM_PROMPT,
+    }
     assert options.max_turns == 200
 
 
@@ -45,7 +47,7 @@ def test_summary_is_document_only_without_a_new_remediation_route():
     for phrase in ("deploy_record", "state.json", "补救范围", "经 guide 修订", "固定目录"):
         assert phrase not in SYSTEM_PROMPT, phrase
     for start in (SessionStart.fresh("session-a"), SessionStart.resume("session-a")):
-        assert default_options(start).system_prompt == SYSTEM_PROMPT
+        assert default_options(start).system_prompt["append"] == SYSTEM_PROMPT
 
 
 def test_session_start_distinguishes_new_resume_and_fork():

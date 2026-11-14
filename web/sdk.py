@@ -103,6 +103,7 @@ def default_options(start=None):
     """SDK options 全配：cwd=项目根，setting_sources 不设（SDK 默认
     user/project/local，project source 从 cwd 发现 .claude/ 与 CLAUDE.md）。
 
+    系统提示词采用 Claude Code 预设，并追加本项目的部署约束。
     tools 必须显式给 claude_code 预设（--tools default）：SDK 不传 --tools
     时 CLI 的基础工具集不含子 agent 工具，四阶段流水线无从推进。
     permission_mode 必须给 bypassPermissions：无值守会话无人批准，SDK 默认
@@ -123,7 +124,7 @@ def default_options(start=None):
         resume=context_session_id,
         session_id=target_session_id if context_session_id is None or fork_session else None,
         fork_session=fork_session,
-        system_prompt=SYSTEM_PROMPT,
+        system_prompt={"type": "preset", "preset": "claude_code", "append": SYSTEM_PROMPT},
         permission_mode="bypassPermissions",
         tools={"type": "preset", "preset": "claude_code"},
         mcp_servers={"exa-search": EXA_MCP_SERVER},
