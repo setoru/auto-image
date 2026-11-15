@@ -14,6 +14,8 @@ import { useSyncExternalStore } from 'react'
 import { fmtSize } from './derive.js'
 import { mergeSessionEvents, mergeSessionSummary, SESSION_STATUS } from './eventMerge.js'
 import * as tabState from './tabState.js'
+import { requestSubmission } from './submissionResponse.js'
+import { readDrafts, writeDrafts, removeDrafts } from './draftStorage.js'
 import { emptyUsersQuery, USER_PAGE_SIZES, getUserListView, filterAndSortUsers } from './userList.js'
 
 // 与服务端内部事件协议一致的事件类型全集（四族：session.* / turn.* /
@@ -129,7 +131,9 @@ let state = {
   submitError: null,
   notice: null,               // 成功提示条（与 submitError 对称，绿色短暂展示）
   now: Date.now(),
-  drafts: {},                // 会话草稿镜像（runId → 文本；真身在 setDraft 侧的 map）
+  drafts: {},                // 正文订阅快照；版本与发送反馈由同一草稿记录维护
+  identityEpoch: 0,
+  draftStorageError: false,
   artifacts: { groups: [] }, // deploy/ + rpm/ 全量产物（目录分组，全局不属于任何 run）
   artifactCache: {},         // 产物内容多槽缓存（relPath → 条目+content），关标签页不清
   artifactSel: {},           // 批量下载勾选集（relPath → true，随清单刷新剪枝）
@@ -482,16 +486,19 @@ function parseSseEvents(text) {
 async function loadSnapshot(runId) {
   const epoch = identityEpoch
   const run = state.runs[runId]
-  if (!run) return
+  if (!run) return false
   const lastSeq = run.maxSeq ?? 0
   try {
     const resp = await fetch(`/api/runs/${runId}/events`, { headers: { 'Last-Event-ID': String(lastSeq) } })
-    if (!resp.ok) return
+    if (!resp.ok) { await handleReadRejection(resp, epoch); return false }
+    if (!resp.headers.get('content-type')?.includes('text/event-stream')) return false
     const events = parseSseEvents(await resp.text())
-    if (epoch !== identityEpoch || !events.length) return
+    if (epoch !== identityEpoch || !state.runs[runId]) return false
     ingestEvents(runId, events)
+    return true
   } catch {
     // 快照失败不打断使用：全局流仍在，断线恢复或下次打开再补
+    return false
   }
 }
 
@@ -507,6 +514,18 @@ function refreshOpenSnapshots() {
 // 初始拉取）不启动——未认证客户端读不到任何业务数据。
 let globalStream = null
 let identityEpoch = 0
+
+function businessAccessLost(status, detail) {
+  if (status !== 401 && !(status === 403 && detail === 'password_change_required')) return false
+  deauthed('登录已失效或需要修改密码，请重新登录')
+  return true
+}
+
+async function handleReadRejection(response, epoch) {
+  if (epoch !== identityEpoch || ![401, 403].includes(response.status)) return
+  const data = await response.json().catch(() => null)
+  if (epoch === identityEpoch && typeof data?.detail === 'string') businessAccessLost(response.status, data.detail)
+}
 
 // 认证失效统一出口：回登录壳并关停数据面。SSE onerror / 401 响应都会
 // 走这里；EventSource 关闭后浏览器不再自动重连（不无限重连的权威手段）。
@@ -525,6 +544,8 @@ function deauthed(reasonText) {
   for (const id of timersRef) clearInterval(id)
   timersRef.clear()
   for (const key of Object.keys(drafts)) delete drafts[key]
+  let draftStorageError = false
+  try { removeDrafts() } catch { draftStorageError = true }
   set({
     auth: 'anonymous', user: null, canManageUsers: false, userVersion: null,
     passwordChange: { busy: false, error: null },
@@ -535,7 +556,7 @@ function deauthed(reasonText) {
     runs: {}, order: [], capacity: null,
     tabs: [], activeKey: null, lastSessionKey: null,
     tasks: [], activeTaskId: null, taskActions: {},
-    drafts: {},
+    drafts: {}, identityEpoch, draftStorageError,
     artifacts: { groups: [] }, artifactCache: {}, artifactSel: {}, artifactZipping: false,
     obs: { objects: [], bucket: null, region: null, domain: null, error: null, loading: false },
     obsCache: {}, obsArchiving: false, obsZipArchiving: false,
@@ -616,6 +637,15 @@ function acceptIdentity(data) {
   const userAccess = state.user === data.username && canManageUsers ? state.userAccess : emptyUserAccess()
   const userReset = state.user === data.username && canManageUsers ? state.userReset : emptyUserReset()
   set({ auth: 'user', user: data.username, canManageUsers, users, usersQuery, userCreate, userAccess, userReset, userVersion: null, authNotice: null })
+  if (draftsRestoredEpoch !== identityEpoch) {
+    draftsRestoredEpoch = identityEpoch
+    try {
+      Object.assign(drafts, readDrafts(data.username))
+      publishDrafts()
+    } catch {
+      set({ draftStorageError: true })
+    }
+  }
 }
 
 export function setUsersKeyword(keyword) {
@@ -1037,23 +1067,46 @@ function makeRun(overrides) {
 // 以服务端为源覆盖；容量字段（匿名全局 running count / max parallel）随
 // 摘要周期一并刷新——跨用户负载可见，他人会话细节不可见。返回列表 order
 // （失败返回 null，调用方各自善后）
+let summariesRequest = 0
 async function fetchSummaries() {
   const epoch = identityEpoch
+  const request = ++summariesRequest
   const resp = await fetch('/api/runs')
-  if (!resp.ok) return null
+  if (!resp.ok) { await handleReadRejection(resp, epoch); return null }
   const { runs, running_count: runningCount, max_parallel: maxParallel } = await resp.json()
-  if (epoch !== identityEpoch) return null
+  if (epoch !== identityEpoch || request !== summariesRequest) return null
+  if (!Array.isArray(runs) || !runs.every(run => typeof run?.run_id === 'string')) return null
   const map = {}
   const order = []
-  for (const s of runs ?? []) {
+  for (const s of runs) {
     map[s.run_id] = mergeSummary(state.runs[s.run_id] ?? makeRun({ runId: s.run_id }), s)
     order.push(s.run_id)
   }
   const capacity = runningCount != null && maxParallel != null
     ? { runningCount, maxParallel }
     : null
-  set({ runs: { ...state.runs, ...map }, order, capacity })
+  set({ runs: map, order, capacity })
+  const removedDrafts = Object.keys(drafts).filter(id => !map[id])
+  if (removedDrafts.length) {
+    for (const id of removedDrafts) delete drafts[id]
+    publishDrafts()
+  }
+  reconcileSessionTabs()
   return order
+}
+
+// 启动、轮询和核对使用同一完整清单；删除会话时一并协调标签与控制对象。
+function reconcileSessionTabs() {
+  const liveTabs = state.tabs.filter(t => t.kind !== 'session' || !!state.runs[t.runId])
+  const lastSession = liveTabs.filter(t => t.kind === 'session').at(-1)
+  if (lastSession && liveTabs.length === state.tabs.length) return
+  const lastSessionKey = lastSession ? tabState.tabKey(lastSession) : null
+  set({
+    tabs: liveTabs,
+    lastSessionKey: liveTabs.some(t => tabState.tabKey(t) === state.lastSessionKey) ? state.lastSessionKey : lastSessionKey,
+    activeKey: liveTabs.some(t => tabState.tabKey(t) === state.activeKey) ? state.activeKey : lastSessionKey ?? (liveTabs.length ? tabState.tabKey(liveTabs.at(-1)) : null),
+  })
+  if (!lastSession && state.order.length) selectRun(state.order[0])
 }
 
 // 启动加载：拉全量 run 摘要恢复会话列表（服务重启后经 transcript 重放，
@@ -1061,27 +1114,12 @@ async function fetchSummaries() {
 // 无存续标签（或全被剪空）时首屏打开最新一条。尽力而为，
 // 失败从空开始。存续标签页的历史由快照补齐（实时事件走全局流）。
 export async function loadRuns() {
+  const alreadyOpen = openRunIds()
   try {
     const order = await fetchSummaries()
-    if (!order?.length) return
-    // 存续会话标签页里在列表的保留（服务端重启丢了空会话等则剪掉；文件
-    // 标签页防御性保留——启动恢复时本就没有）；全剪空（列表换代等）退回
-    // 首屏开最新一条
-    const liveTabs = state.tabs.filter((t) => t.kind !== 'session' || !!state.runs[t.runId])
-    if (liveTabs.some((t) => t.kind === 'session')) {
-      // 剪枝后记忆失效（记住的会话被剪掉）时换记末位会话标签页
-      const remembered = liveTabs.some((t) => tabState.tabKey(t) === state.lastSessionKey)
-      const fallbackKey = tabState.tabKey(liveTabs[liveTabs.length - 1])
-      const patch = { tabs: liveTabs }
-      if (!remembered) patch.lastSessionKey = fallbackKey
-      if (!liveTabs.some((t) => tabState.tabKey(t) === state.activeKey)) patch.activeKey = fallbackKey
-      set(patch)
-      refreshOpenSnapshots()
-    } else {
-      // 无存续会话标签页或全被剪空：回到首屏开最新一条
-      set({ tabs: [], activeKey: null, lastSessionKey: null })
-      selectRun(order[0])
-    }
+    if (order === null) return
+    // 新打开的会话已由 selectRun 拉快照；这里只补原有标签的历史。
+    for (const runId of openRunIds()) if (alreadyOpen.has(runId)) loadSnapshot(runId)
   } catch {
     // 历史加载失败不打断使用：界面从空会话开始
   }
@@ -1126,6 +1164,8 @@ async function pollSummaries() {
 // 快照补齐开卷事件与转录历史（广播帧可能先于 run 落位到达被守卫丢弃，
 // 快照才是历史的确定入口；Last-Event-ID= 已有最大 seq，去重吸收重叠）
 function adoptNewRun(run) {
+  // 创建前发出的清单不能把刚落位的会话与草稿当成已删除。
+  ++summariesRequest
   set({ runs: { ...state.runs, [run.runId]: run }, order: [run.runId, ...state.order], submitError: null })
   applyTabState(tabState.openSession(state.tabs, state.activeKey, run.runId))
   loadSnapshot(run.runId)
@@ -1188,28 +1228,38 @@ export async function stop() {
   }
 }
 
-// 向控制面会话发指令：执行中发送由服务端 409（turn_in_progress）拒绝，
-// 想改方向先显式停止。返回是否投递成功（失败时输入由调用方保留）。
+// 回执只确认受理；运行状态仍由事件和摘要归并。结算始终绑定原提交。
 export async function send(text) {
   const epoch = identityEpoch
   const trimmed = (text ?? '').trim()
   const run = state.runs[controlRunId()]
-  if (!run || !trimmed) return false
+  if (!run || !trimmed || state.auth !== 'user' || submissionOf(run.runId)?.status === 'sending') return false
+  if (run.status === RUNNING) return false
   if (!isOperable(run.status)) {
     // 只读会话（已结束）不静默吞掉输入，给出出路提示
     fail('该会话只读（已结束）——「+ 新建」或 Fork 此会话后继续')
     return false
   }
+  const draft = drafts[run.runId] ?? { text: '', version: 0 }
+  const attempt = { status: 'sending', text: trimmed, version: draft.version }
+  updateDraft(run.runId, { ...draft, submission: attempt })
+  let result
   try {
-    const data = await sendJson(`/api/runs/${run.runId}/messages`, { text: trimmed })
-    if (epoch !== identityEpoch) return
-    setRun(run.runId, { status: data.status })
-    return true
-  } catch (err) {
-    if (epoch !== identityEpoch) return
-    fail(`发送失败：${conflictMessage(err)}`)
-    return false
+    result = await requestSubmission(run.runId, trimmed)
+  } catch {
+    result = { status: 'unknown' }
   }
+  if (epoch !== identityEpoch || !state.runs[run.runId] || submissionOf(run.runId) !== attempt) return
+  if (businessAccessLost(result.httpStatus, result.detail)) return false
+  const accepted = result.status === 'accepted'
+  const current = drafts[run.runId]
+  updateDraft(run.runId, { ...current,
+    text: accepted && current.version === attempt.version ? '' : current.text,
+    submission: { ...attempt, status: result.status,
+      ...(result.status === 'rejected' ? { message: conflictMessage({ status: result.httpStatus, detail: result.detail }) } : {}),
+    },
+  })
+  return accepted
 }
 
 // 结束控制面会话（显式、不可逆；执行中或挂起均可）
@@ -1374,23 +1424,60 @@ export function clearArtifactSel() {
 
 // ---------- 输入草稿 ----------
 
-// 每枚会话标签页独立草稿（runId → 文本），切标签页不丢输入中的字；发送
-// 成功后由调用方清空。入 state 容器：受控输入的字必须驱动重渲染，否则
-// 下一次外来渲染（轮询/SSE/时长针）会用旧 value 把 DOM 里的字冲掉
+// 正文、编辑版本与最近发送共享记录。正文快照驱动受控输入，切标签不丢字。
 const drafts = {}
+let draftsRestoredEpoch = null
+
+function publishDrafts() {
+  set({ drafts: Object.fromEntries(Object.entries(drafts).map(([id, item]) => [id, item.text])) })
+  if (state.auth !== 'user') return
+  let draftStorageError = false
+  try { writeDrafts(state.user, drafts) } catch { draftStorageError = true }
+  if (state.draftStorageError !== draftStorageError) set({ draftStorageError })
+}
+
+function updateDraft(runId, draft) {
+  drafts[runId] = draft
+  publishDrafts()
+}
 
 export function draftOf(runId) {
-  return drafts[runId] ?? ''
+  return drafts[runId]?.text ?? ''
 }
 
-export function setDraft(runId, text) {
-  drafts[runId] = text
-  set({ drafts: { ...drafts } })
+export function submissionOf(runId) {
+  return drafts[runId]?.submission ?? null
 }
 
-export function clearDraft(runId) {
-  delete drafts[runId]
-  set({ drafts: { ...drafts } })
+export function setDraft(runId, text, epoch = identityEpoch) {
+  if (epoch !== identityEpoch || !runId) return
+  const draft = drafts[runId] ?? { text: '', version: 0 }
+  if (draft.text === text) return
+  updateDraft(runId, { ...draft, text, version: draft.version + 1 })
+}
+
+export function clearDraft(runId, epoch = identityEpoch) {
+  setDraft(runId, '', epoch)
+}
+
+export function dismissSubmission(runId) {
+  if (submissionOf(runId)?.status !== 'unknown') return
+  const { submission, ...draft } = drafts[runId]
+  updateDraft(runId, draft)
+}
+
+// 核对只更新事实与读取进度，不推断这些事实是否对应本次提交。
+export async function refreshSubmission(runId) {
+  const epoch = identityEpoch
+  const submission = submissionOf(runId)
+  if (submission?.status !== 'unknown' || submission.refresh === 'loading') return
+  const checking = { ...submission, refresh: 'loading' }
+  updateDraft(runId, { ...drafts[runId], submission: checking })
+  const [summaries, snapshot] = await Promise.allSettled([fetchSummaries(), loadSnapshot(runId)])
+  if (epoch !== identityEpoch || !state.runs[runId] || submissionOf(runId) !== checking) return
+  const success = summaries.status === 'fulfilled' && summaries.value !== null
+    && snapshot.status === 'fulfilled' && snapshot.value
+  updateDraft(runId, { ...drafts[runId], submission: { ...checking, refresh: success ? 'success' : 'error' } })
 }
 
 // ---------- 产物文件标签页 ----------

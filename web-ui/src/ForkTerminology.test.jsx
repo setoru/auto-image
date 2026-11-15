@@ -17,6 +17,7 @@ vi.mock('./store.js', () => ({
     events: [],
   }),
   draftOf: () => '',
+  submissionOf: () => null,
   isOperable: (status) => status === 'READY' || status === 'RUNNING',
   send: vi.fn(),
   stop: vi.fn(),

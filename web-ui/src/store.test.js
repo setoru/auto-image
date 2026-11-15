@@ -242,7 +242,7 @@ describe('快照与全局流归并', () => {
       `event: ${type}`,
       `data: ${JSON.stringify(payload)}`,
     ].join('\n')).join('\n\n')
-    const response = (body) => ({ ok: true, text: async () => body })
+    const response = (body) => new Response(body, { headers: { 'Content-Type': 'text/event-stream' } })
     const deferredResponse = () => {
       let resolve
       const promise = new Promise((done) => { resolve = (body) => done(response(body)) })
@@ -389,7 +389,7 @@ describe('任务面板联动', () => {
         return { ok: true, json: async () => ({ task_id: 'task-1', run_id: 'run_manual', status: 'RUNNING' }) }
       }
       if (url === '/api/runs/run_manual/events') {
-        return { ok: true, text: async () => '' }
+        return new Response('', { headers: { 'Content-Type': 'text/event-stream' } })
       }
       return { ok: false }
     })

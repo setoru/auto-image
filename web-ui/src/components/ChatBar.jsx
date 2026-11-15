@@ -9,7 +9,8 @@
 //   等待指令 -> 发送
 // 「⑂ Fork」常驻：READY/ENDED 可点、RUNNING 禁用——Fork 基于 transcript
 // 续接，执行中的上下文是过时的（服务端 409 同源）。新建会话入口在标签栏
-// 「+ 新建」。草稿按 runId 独立存 map，切标签页不丢字。
+// 「+ 新建」。草稿与发送反馈由 store 按会话保存和结算。
+import { useRef } from 'react'
 import * as store from '../store.js'
 import { firstPromptPreview, tabDot } from '../derive.js'
 import { tabKey } from '../tabState.js'
@@ -24,11 +25,49 @@ function autoSize(el) {
   el.style.height = `${Math.min(el.scrollHeight, lh * 5 + 16)}px`
 }
 
+function SubmissionFeedback({ runId, submission, onDismiss }) {
+  if (!submission) return null
+  const { status, message, refresh } = submission
+  const label = {
+    sending: '正在发送指令…',
+    accepted: '指令已接收；这仅代表受理，不表示部署成功。',
+    rejected: `未发送：${message}`,
+    unknown: '发送结果未确认，指令可能已接收。请查看最新记录，避免重复发送。',
+  }[status]
+  return (
+    <div className={`chat-feedback ${status}`}>
+      <p role="status"><span className="chat-feedback-run">会话 {runId}</span> · {label}</p>
+      {status === 'unknown' && <>
+        <div className="chat-feedback-actions">
+          <button
+            aria-disabled={refresh === 'loading'}
+            onClick={() => refresh !== 'loading' && store.refreshSubmission(runId)}
+          >{refresh === 'loading' ? '正在刷新…' : '刷新会话记录'}</button>
+          <button onClick={onDismiss} title="只收起本机提醒，不清草稿、不撤销发送">收起提示</button>
+          <span>收起仅移除本机提醒，不撤销发送。</span>
+        </div>
+        {refresh && <p className="chat-refresh-result" role="status">{{
+          loading: '正在读取会话记录…',
+          success: '记录已刷新，请查看内容核对；本次发送结果仍未确认。',
+          error: '记录刷新失败，请稍后再试；本次发送结果仍未确认。',
+        }[refresh]}</p>}
+        <details className="chat-submission-text">
+          <summary>查看本次提交内容</summary>
+          <pre>{submission.text}</pre>
+        </details>
+      </>}
+    </div>
+  )
+}
+
 export default function ChatBar() {
   const s = store.useRunState()
   const run = store.useControlRun()
   const runId = run?.runId ?? null
   const text = store.draftOf(runId)
+  const submission = store.submissionOf(runId)
+  const inputRef = useRef(null)
+  const targetRef = useRef(null)
   const activeTab = s.tabs.find((t) => tabKey(t) === s.activeKey) ?? null
   // 激活的就是会话标签页时作用对象显而易见（胶囊窄形态常显左缘）；
   // 激活文件标签页时输入折叠为宽形态胶囊——先确认作用对象再输入
@@ -39,9 +78,9 @@ export default function ChatBar() {
   const canInputHere = !!run && store.isOperable(run.status) && run.status !== 'RUNNING'
   const isTerminal = !!run && !store.isOperable(run.status)
 
-  const send = async () => {
-    if (!text.trim()) return
-    if (await store.send(text)) store.clearDraft(runId)
+  const send = () => {
+    if (!canInputHere || !text.trim() || submission?.status === 'sending') return
+    store.send(text)
   }
   // 停止只打断后续动作：已提交的云操作不可撤销（与消息流提示一致）
   const act = () => (run?.status === 'RUNNING' ? store.stop() : send())
@@ -51,8 +90,8 @@ export default function ChatBar() {
     btnLabel = '■ 停止'
     btnDisabled = false
   } else if (canInputHere) {
-    btnLabel = '发送 ⏎'
-    btnDisabled = !text.trim()
+    btnLabel = submission?.status === 'sending' ? '发送中…' : '发送 ⏎'
+    btnDisabled = !text.trim() || submission?.status === 'sending'
   } else {
     btnLabel = isTerminal ? '会话已结束' : '无会话'
     btnDisabled = true
@@ -71,6 +110,7 @@ export default function ChatBar() {
   const target = (wide) => (
     <button
       className={`chat-target${wide ? ' wide' : ''}`}
+      ref={targetRef}
       onClick={() => runId && store.activateTab(tabKey({ kind: 'session', runId }))}
       title={`输入发送到此会话 · ${runId}${targetOn ? '' : '（点击切回它的标签页）'}`}
     >
@@ -96,48 +136,50 @@ export default function ChatBar() {
     </button>
   )
 
-  // 折叠态（激活的是文件标签页）：输入位换成作用对象行；「■ 停止」在
-  // 执行中保留——看产物时停止仍在手边
-  if (run && !targetOn) {
-    return (
-      <div className="chat-bar">
-        {target(true)}
-        {forkBtn}
-        {run.status === 'RUNNING' && (
-          <button className="chat-send" onClick={act}>
-            {btnLabel}
-          </button>
-        )}
-      </div>
-    )
+  const dismiss = () => {
+    store.dismissSubmission(runId)
+    const focusTarget = targetOn && run?.status !== 'RUNNING' ? inputRef : targetRef
+    focusTarget.current?.focus()
   }
 
+  // 文件视图仍保留原控制面和停止入口；反馈也标明同一会话归属。
+  const collapsed = !!run && !targetOn
   return (
-    <div className="chat-bar">
-      {run && target()}
-      {forkBtn}
-      <textarea
-        rows={1}
-        value={text}
-        disabled={!canInputHere}
-        placeholder={placeholder}
-        title={run?.status === 'RUNNING' ? '回合执行中不能输入——想改方向点「■ 停止」' : undefined}
-        onChange={(e) => {
-          store.setDraft(runId, e.target.value)
-          autoSize(e.target)
-        }}
-        onKeyDown={(e) => {
-          // Enter 发送、Shift+Enter 换行（多要素指令的行间组织）
-          if (e.key === 'Enter' && !e.shiftKey && !btnDisabled) {
-            e.preventDefault()
-            act()
-          }
-        }}
-        ref={(el) => el && autoSize(el)}
-      />
-      <button className="chat-send" onClick={act} disabled={btnDisabled}>
-        {btnLabel}
-      </button>
+    <div className="chat-composer">
+      <SubmissionFeedback runId={runId} submission={submission} onDismiss={dismiss} />
+      <p className={`chat-draft-hint${s.draftStorageError ? ' unavailable' : ''}`} role={s.draftStorageError ? 'status' : undefined}>
+        {s.draftStorageError
+          ? '本机保存失败，刷新恢复不可用；当前仍可输入和发送，草稿与发送提示请在离开前自行保留。'
+          : '草稿和未确认发送提示仅在此浏览器保存，可在刷新后恢复。'}
+      </p>
+      <div className={`chat-bar${collapsed ? ' collapsed' : ''}`}>
+        {run && target(collapsed)}
+        {forkBtn}
+        {!collapsed && <textarea
+          rows={1}
+          value={text}
+          aria-label={isTerminal ? '已结束会话的草稿（可复制）' : '部署指令'}
+          disabled={!run || run.status === 'RUNNING'}
+          readOnly={isTerminal}
+          placeholder={placeholder}
+          title={run?.status === 'RUNNING' ? '回合执行中不能输入——想改方向点「■ 停止」' : isTerminal ? '会话已结束，保留的草稿可选择复制' : undefined}
+          onChange={(e) => {
+            store.setDraft(runId, e.target.value, s.identityEpoch)
+            autoSize(e.target)
+          }}
+          onKeyDown={(e) => {
+            // 发送中仍可编辑，Enter 不再次投递；Shift+Enter 保留换行。
+            if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing && !isTerminal) {
+              e.preventDefault()
+              if (!btnDisabled) act()
+            }
+          }}
+          ref={(el) => { inputRef.current = el; autoSize(el) }}
+        />}
+        {(!collapsed || run.status === 'RUNNING') && <button className="chat-send" onClick={act} disabled={btnDisabled}>
+          {btnLabel}
+        </button>}
+      </div>
     </div>
   )
 }
