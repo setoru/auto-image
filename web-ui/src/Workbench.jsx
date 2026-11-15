@@ -4,8 +4,9 @@
 // 混排，只压主区）+ 编辑区（按激活标签页渲染消息流或文件内容）+ 底部
 // 常驻对话输入条。header 与输入条构成控制面，绑定最后激活的会话标签页
 // ——激活文件标签页不换对象。
-import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useRef, useState } from 'react'
 import * as store from './store.js'
+import { useSessionReading } from './useSessionReading.js'
 import { RUN_STATUS_LABEL, STAGE_LABEL, fmtActive, fmtLastActivity } from './derive.js'
 import { mdToHtml } from './markdown.js'
 import { tabKey } from './tabState.js'
@@ -22,14 +23,15 @@ const STATUS_TONE = { RUNNING: 'running', ENDED: 'warn' }
 // 异常收尾（无最终文本 / 被停止 / 失败摘要）才保留汇总框。
 // 线上不断言「可继续」——活会话输入条已表达，只读回放里则与语义相悖
 function TurnCompletedRow({ ev, prev }) {
+  const row = { 'data-event-seq': ev.seq }
   const result = String(ev.payload.result ?? '').trim()
   if (!result) return null // 空结果（重放的历史常见）不成空框
   const dup =
     prev?.type === 'agent.message' &&
     String(prev.payload.text ?? '').trim() === result
-  if (dup) return <div className="va-stage-line">─ 回合完成 ─</div>
+  if (dup) return <div {...row} className="va-stage-line">─ 回合完成 ─</div>
   return (
-    <div className="va-result">
+    <div {...row} className="va-result">
       <div className="va-result-title">回合汇总（turn.completed，会话可继续）</div>
       <div className="va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(result) }} />
     </div>
@@ -89,42 +91,43 @@ function IoTodos({ todos }) {
 // 事件下未 memo 的行每次都重执行（含 markdown 重解析），必须按引用短路。
 // tools 索引只增不换（见 Stream 内说明），prev/ev 同为稳定事件引用。
 const EventRow = memo(function EventRow({ ev, prev, tools }) {
+  const row = { 'data-event-seq': ev.seq }
   if (ev.type === 'stage.changed') {
-    return <div className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
+    return <div {...row} className="va-stage-line">─ 进入 {STAGE_LABEL[ev.payload.stage] ?? ev.payload.stage} ─</div>
   }
   if (ev.type === 'user.message') {
-    return <div className="va-user">{ev.payload.text}</div>
+    return <div {...row} className="va-user">{ev.payload.text}</div>
   }
   if (ev.type === 'turn.started') {
     return null // 回合开卷标记（与 user.message 配对），消息行已表达
   }
   if (ev.type === 'turn.stopped') {
     return (
-      <div className="va-paused">
+      <div {...row} className="va-paused">
         — 已停止，等待指令 · 已提交的云操作不受停止影响，无法撤销 —
       </div>
     )
   }
   if (ev.type === 'turn.failed') {
-    return <div className="va-failed">回合失败（会话可继续）：{ev.payload.message}</div>
+    return <div {...row} className="va-failed">回合失败（会话可继续）：{ev.payload.message}</div>
   }
   if (ev.type === 'turn.interrupted') {
     return (
-      <div className="va-paused">
+      <div {...row} className="va-paused">
         — 服务重启，上一回合被中断 · 已提交的云操作不受影响，无法撤销 —
       </div>
     )
   }
   if (ev.type === 'agent.thinking') {
     return (
-      <details className="va-thinking">
+      <details {...row} className="va-thinking">
         <summary>Thinking &gt;</summary>
         <div className="va-thinking-body">{ev.payload.text}</div>
       </details>
     )
   }
   if (ev.type === 'agent.message') {
-    return <div className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
+    return <div {...row} className="va-msg va-md" dangerouslySetInnerHTML={{ __html: mdToHtml(ev.payload.text) }} />
   }
   if (ev.type === 'agent.tool_started' || ev.type === 'agent.tool_finished') {
     // 同 id 已有 finished：行移到 finished 位置渲染成 ✓，此处跳过
@@ -141,7 +144,7 @@ const EventRow = memo(function EventRow({ ev, prev, tools }) {
       : null
     const mark = ev.type === 'agent.tool_started' ? '▶' : '✓'
     return (
-      <details className="va-tool">
+      <details {...row} data-tool-id={ev.payload.id || undefined} className="va-tool">
         <summary>{mark} <b>{head.tool}</b>({head.summary})</summary>
         <div className="va-tool-detail">
           {head.diff ? <IoDiff text={head.diff} /> : head.todos ? <IoTodos todos={head.todos} /> : <IoBlock title="输入" text={input} />}
@@ -160,7 +163,7 @@ const EventRow = memo(function EventRow({ ev, prev, tools }) {
     return null // 标题落 header / 下拉，不在消息流渲染
   }
   if (ev.type === 'session.ended') {
-    return <div className="va-canceled">— 会话已结束（可回看，只能 Fork）—</div>
+    return <div {...row} className="va-canceled">— 会话已结束（可回看，只能 Fork）—</div>
   }
   return null
 })
@@ -207,16 +210,14 @@ function persistSideW(w) {
 }
 
 // 消息流：激活的会话标签页的事件渲染。ref/scroll 逻辑属主在本层，
-// 组件随标签页切换重挂（key=runId），follow 态自然复位。
+// 组件随标签页切换重挂（key=runId），阅读现场由独立内存缓存恢复。
 // tools 索引配 memo(EventRow)：startedById 可原地补录（只有新 finished 行
 // 读它）；finishedIds 不能——已渲染的 started 行靠 has(id) 判定成 null，
 // 引用不变则 memo 短路、旧行不重跑，会与 finished 行重复成两行。因此每
 // 有新 finished 到达，finishedIds 复制成新 Set 并换新 tools 引用，只在
 // finished 事件（低频）时破 memo，时长针/轮询的高频渲染仍全短路。
-function Stream({ run, visible }) {
-  const scrollRef = useRef(null)
-  const readingTop = useRef(0)
-  const [follow, setFollow] = useState(true)
+function Stream({ run, visible, epoch }) {
+  const { scrollRef, follow, pending, jump } = useSessionReading(run, visible, epoch)
   const toolsRef = useRef(null)
   if (toolsRef.current === null || toolsRef.current.forRunId !== run.runId) {
     toolsRef.current = { forRunId: run.runId, startedById: new Map(), finishedIds: new Set() }
@@ -230,33 +231,8 @@ function Stream({ run, visible }) {
       toolsRef.current = tools
     }
   }
-  // 暂停跟随期间新到的事件数：跳底钮如实报数，别让人盲跳
-  const [seenCount, setSeenCount] = useState(run.events.length)
-  const pending = run.events.length - seenCount
-  useEffect(() => {
-    if (visible && follow) setSeenCount(run.events.length)
-  }, [visible, follow, run.events.length])
-
-  const scrollToBottom = () => {
-    const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
-  }
-
-  useLayoutEffect(() => {
-    if (!visible) return
-    if (follow) scrollToBottom()
-    else scrollRef.current.scrollTop = readingTop.current
-  }, [run.events.length, follow, visible])
-
-  const onScroll = () => {
-    if (!visible) return // 隐藏布局产生的滚动事件不能覆盖阅读位置与跟随状态
-    const el = scrollRef.current
-    readingTop.current = el.scrollTop
-    setFollow(el.scrollHeight - el.scrollTop - el.clientHeight < 40)
-  }
-
   return (
-    <div className="va-stream" ref={scrollRef} onScroll={onScroll}>
+    <div className="va-stream" ref={scrollRef} tabIndex={0} aria-label="会话记录">
       {run.events.length === 0 && (
         <div className="va-empty-hint">空会话——输入第一条部署指令（软件 + 文档链接 + 目标机器）。</div>
       )}
@@ -266,11 +242,7 @@ function Stream({ run, visible }) {
       {!follow && (
         <button
           className="va-jump"
-          onClick={() => {
-            setFollow(true)
-            setSeenCount(run.events.length)
-            scrollToBottom()
-          }}
+          onClick={jump}
         >
           ↓ 回到最新{pending > 0 ? `（${pending} 条新事件）` : ''}
         </button>
@@ -399,7 +371,7 @@ export default function Workbench({ visible }) {
             ) : activeTab.kind === 'file' ? (
               <ArtifactView key={tabKey(activeTab)} artifact={activeArtifact} onDownload={store.downloadArtifact} />
             ) : activeRun ? (
-              <Stream key={activeRun.runId} run={activeRun} visible={visible} />
+              <Stream key={activeRun.runId} run={activeRun} visible={visible} epoch={s.identityEpoch} />
             ) : null}
           </div>
         </div>

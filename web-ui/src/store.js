@@ -544,6 +544,7 @@ function deauthed(reasonText) {
   for (const id of timersRef) clearInterval(id)
   timersRef.clear()
   for (const key of Object.keys(drafts)) delete drafts[key]
+  readings.clear()
   let draftStorageError = false
   try { removeDrafts() } catch { draftStorageError = true }
   set({
@@ -1086,6 +1087,7 @@ async function fetchSummaries() {
     ? { runningCount, maxParallel }
     : null
   set({ runs: map, order, capacity })
+  for (const id of readings.keys()) if (!map[id]) readings.delete(id)
   const removedDrafts = Object.keys(drafts).filter(id => !map[id])
   if (removedDrafts.length) {
     for (const id of removedDrafts) delete drafts[id]
@@ -1317,6 +1319,24 @@ export function closeTab(key) {
     const last = state.tabs.filter((t) => t.kind === 'session').at(-1)
     if (last) set({ lastSessionKey: tabState.tabKey(last) })
   }
+}
+
+// 阅读现场仅存本次登录内存；像素变化不发布工作台快照。
+const readings = new Map()
+
+export function readingOf(runId) {
+  return readings.get(runId) ?? null
+}
+
+export function saveReading(runId, reading, epoch) {
+  if (state.auth !== 'user' || epoch !== identityEpoch || !state.runs[runId]) return
+  readings.set(runId, reading)
+}
+
+export function pendingEventCount(runId) {
+  const seenSeq = readingOf(runId)?.seenSeq
+  if (seenSeq == null) return 0
+  return state.runs[runId]?.events.filter(event => event.seq > seenSeq).length ?? 0
 }
 
 // ---------- 产物 ----------
