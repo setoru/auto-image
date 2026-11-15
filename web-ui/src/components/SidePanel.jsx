@@ -16,7 +16,7 @@ import ObsPanel from './ObsPanel.jsx'
 import TasksPanel from './TasksPanel.jsx'
 import StageBadge from './StageBadge.jsx'
 import {
-  RUN_STATUS_LABEL, STAGE_LABEL, firstPromptPreview, lastActivityAt, tabDot, fmtAgo,
+  RUN_STATUS_LABEL, STAGE_LABEL, firstPromptText, firstPromptPreview, lastActivityAt, tabDot, fmtAgo,
   fmtSize, artifactTree, subtreeRels, defaultOpenPaths, artifactFileCount,
 } from '../derive.js'
 
@@ -58,25 +58,51 @@ function SessionRow({ run, on, open }) {
   )
 }
 
-// 会话面板：全部会话按服务端序（order 即最后活跃降序）平铺，不加搜索/
-// 分组/排序控件——列表保持简单，最近的总在最上。「已开标签页」标记从
-// tabs 派生，不另立状态
-function SessionPanel({ order, runs, controlId, openIds }) {
+// 筛选只派生展示，保留服务端最近活跃顺序；使用完整字段而非行标题预览。
+function SessionPanel({ order, runs, controlId, openIds, keyword }) {
+  const inputRef = useRef(null)
+  const query = keyword.trim().toLowerCase()
+  const sessions = order.map(id => runs[id]).filter(Boolean)
+  const matches = query ? sessions.filter(run =>
+    [run.title, firstPromptText(run), run.runId].some(text => text?.toLowerCase().includes(query)),
+  ) : sessions
   return (
     <div className="va-side-panel">
-      {order.map((id) => {
-        const run = runs[id]
-        if (!run) return null
-        return (
-          <SessionRow
-            key={id}
-            run={run}
-            on={id === controlId}
-            open={openIds.has(id)}
-          />
-        )
-      })}
-      {order.length === 0 && <div className="va-side-empty">暂无会话——点标签栏「+ 新建」</div>}
+      <label className="va-session-filter-label" htmlFor="va-session-keyword">会话关键词</label>
+      <div className="va-session-filter">
+        <input
+          id="va-session-keyword"
+          ref={inputRef}
+          type="search"
+          value={keyword}
+          placeholder="标题、首条指令或 ID"
+          onChange={event => store.setSessionKeyword(event.target.value)}
+        />
+        <button
+          aria-label="清除会话关键词"
+          disabled={!keyword}
+          onClick={() => {
+            store.setSessionKeyword('')
+            inputRef.current?.focus()
+          }}
+        >清除</button>
+      </div>
+      <div className="va-session-filter-count" role="status" aria-live="polite">
+        {`匹配 ${matches.length} / 共 ${sessions.length} 条`}
+      </div>
+      {matches.map(run => (
+        <SessionRow
+          key={run.runId}
+          run={run}
+          on={run.runId === controlId}
+          open={openIds.has(run.runId)}
+        />
+      ))}
+      {sessions.length === 0 ? (
+        <div className="va-side-empty">暂无会话——点标签栏「+ 新建」</div>
+      ) : matches.length === 0 && (
+        <div className="va-side-empty">没有匹配的会话，试试其他关键词或清除筛选</div>
+      )}
     </div>
   )
 }
@@ -308,7 +334,7 @@ export default function SidePanel() {
       </div>
       <div className="va-side-panel-wrap" id="va-side-panel" role="tabpanel">
         {panel === 'sessions' ? (
-          <SessionPanel order={s.order} runs={s.runs} controlId={store.controlRunId()} openIds={openIds} />
+          <SessionPanel order={s.order} runs={s.runs} controlId={store.controlRunId()} openIds={openIds} keyword={s.sessionKeyword} />
         ) : panel === 'tasks' ? (
           <TasksPanel />
         ) : panel === 'obs' ? (

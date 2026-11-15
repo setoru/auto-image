@@ -147,7 +147,12 @@ let state = {
   tasks: [],                 // 流水线任务（rpm-*/deploy-* 派发即建；服务端 task/ 目录持久化）
   taskActions: {},            // 各任务的启动进度与错误，列表和详情共用
   sidePanel: readSidePanel(), // 侧栏面板选择（上提到 store：会话标签的任务 pill 要跨面板跳转）
+  sessionKeyword: '',        // 本页登录内保留；筛选不改完整清单或控制面
   activeTaskId: null,        // 任务面板高亮行（openTask 跳转锚点）
+}
+
+export function setSessionKeyword(keyword) {
+  if (state.auth === 'user') set({ sessionKeyword: keyword })
 }
 
 export function setSidePanel(panel) {
@@ -554,7 +559,7 @@ function deauthed(reasonText) {
     usersQuery: emptyUsersQuery(),
     userCreate: { busy: false, error: null, notice: null, verifyUsername: null },
     userAccess: emptyUserAccess(), userReset: emptyUserReset(),
-    runs: {}, order: [], capacity: null,
+    runs: {}, order: [], capacity: null, sessionKeyword: '',
     tabs: [], activeKey: null, lastSessionKey: null,
     tasks: [], activeTaskId: null, taskActions: {},
     drafts: {}, identityEpoch, draftStorageError,
