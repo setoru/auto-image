@@ -13,8 +13,9 @@ const { state } = vi.hoisted(() => ({ state: {
   userReset: { target: null, busy: false, error: null, notice: null, verifyUsername: null, unknown: false },
   userAccess: { target: null, busy: false, error: null, notice: null, verifyUsername: null },
   artifacts: { groups: [] }, artifactSel: {},
+  artifactKeyword: '', artifactDirToggles: {}, artifactQueryToggles: {},
 } }))
-vi.mock('./store.js', () => ({ useRunState: () => state, refreshUsers: vi.fn(), createUser: vi.fn(), setUsersPageSize: vi.fn() }))
+vi.mock('./store.js', () => ({ useRunState: () => state, refreshUsers: vi.fn(), createUser: vi.fn(), setUsersPageSize: vi.fn(), setArtifactKeyword: vi.fn() }))
 import SidePanel from './components/SidePanel.jsx'
 import UsersPanel from './components/UsersPanel.jsx'
 

@@ -148,11 +148,25 @@ let state = {
   taskActions: {},            // 各任务的启动进度与错误，列表和详情共用
   sidePanel: readSidePanel(), // 侧栏面板选择（上提到 store：会话标签的任务 pill 要跨面板跳转）
   sessionKeyword: '',        // 本页登录内保留；筛选不改完整清单或控制面
+  artifactKeyword: '',
+  artifactDirToggles: {},     // 普通展开与查询期间的覆盖分开；切面板后仍可恢复
+  artifactQueryToggles: {},
   activeTaskId: null,        // 任务面板高亮行（openTask 跳转锚点）
 }
 
 export function setSessionKeyword(keyword) {
   if (state.auth === 'user') set({ sessionKeyword: keyword })
+}
+
+export function setArtifactKeyword(keyword) {
+  if (state.auth !== 'user' || state.artifactKeyword === keyword) return
+  set({ artifactKeyword: keyword, artifactQueryToggles: {} })
+}
+
+export function setArtifactDirOpen(path, open) {
+  if (state.auth !== 'user') return
+  const key = state.artifactKeyword.trim() ? 'artifactQueryToggles' : 'artifactDirToggles'
+  set({ [key]: { ...state[key], [path]: open } })
 }
 
 export function setSidePanel(panel) {
@@ -560,6 +574,7 @@ function deauthed(reasonText) {
     userCreate: { busy: false, error: null, notice: null, verifyUsername: null },
     userAccess: emptyUserAccess(), userReset: emptyUserReset(),
     runs: {}, order: [], capacity: null, sessionKeyword: '',
+    artifactKeyword: '', artifactDirToggles: {}, artifactQueryToggles: {},
     tabs: [], activeKey: null, lastSessionKey: null,
     tasks: [], activeTaskId: null, taskActions: {},
     drafts: {}, identityEpoch, draftStorageError,

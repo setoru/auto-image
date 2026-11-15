@@ -166,8 +166,9 @@ export function runningOthers(runs, controlId) {
 // 服务端清单组键（"rpm/httpd/2.4.57" 形）按 / 拆段逐级挂载：节点.path 即
 // 组键（勾选/下载的寻址前缀），files 为该目录自身组内文件，count 为子树
 // 文件总数。子目录次序取首见次序——组间已按最新落盘降序，各级天然「最新
-// 在前」；返回根层节点（deploy、rpm……），空清单返回 []。
-export function artifactTree(groups) {
+// 在前」。查询先保留完整清单的祖先次序，再过滤文件和空目录，避免移除
+// 较新分组后使同一软件的旧版本跳到别的软件后面。
+export function artifactTree(groups, query = '') {
   const roots = []
   const byPath = new Map()
   for (const g of groups) {
@@ -184,14 +185,19 @@ export function artifactTree(groups) {
       }
       node = child
     }
-    if (node) node.files = g.files
+    if (node) node.files = query
+      ? g.files.filter(file => `${g.dir}/${file.name}`.toLowerCase().includes(query))
+      : g.files
   }
-  const tally = (n) => n.files.length + n.dirs.reduce((sum, d) => sum + tally(d), 0)
-  for (const r of roots) r.count = tally(r)
-  return roots
+  const tally = (n) => {
+    n.dirs = n.dirs.filter(d => tally(d) > 0)
+    n.count = n.files.length + n.dirs.reduce((sum, d) => sum + d.count, 0)
+    return n.count
+  }
+  return roots.filter(r => tally(r) > 0)
 }
 
-// 产物文件总数（「产物 · N」的 N，面板头唯一显示位）：清单平铺分组求和
+// 完整产物清单的文件总数：供面板与当前匹配数对照。
 export function artifactFileCount(groups) {
   return groups.reduce((n, g) => n + g.files.length, 0)
 }

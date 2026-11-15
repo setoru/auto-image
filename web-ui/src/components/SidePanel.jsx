@@ -58,9 +58,35 @@ function SessionRow({ run, on, open }) {
   )
 }
 
+function KeywordFilter({ id, label, placeholder, keyword, onChange }) {
+  const inputRef = useRef(null)
+  return (
+    <>
+      <label className="va-keyword-filter-label" htmlFor={id}>{label}</label>
+      <div className="va-keyword-filter">
+        <input
+          id={id}
+          ref={inputRef}
+          type="search"
+          value={keyword}
+          placeholder={placeholder}
+          onChange={event => onChange(event.target.value)}
+        />
+        <button
+          aria-label={`清除${label}`}
+          disabled={!keyword}
+          onClick={() => {
+            onChange('')
+            inputRef.current?.focus()
+          }}
+        >清除</button>
+      </div>
+    </>
+  )
+}
+
 // 筛选只派生展示，保留服务端最近活跃顺序；使用完整字段而非行标题预览。
 function SessionPanel({ order, runs, controlId, openIds, keyword }) {
-  const inputRef = useRef(null)
   const query = keyword.trim().toLowerCase()
   const sessions = order.map(id => runs[id]).filter(Boolean)
   const matches = query ? sessions.filter(run =>
@@ -68,26 +94,9 @@ function SessionPanel({ order, runs, controlId, openIds, keyword }) {
   ) : sessions
   return (
     <div className="va-side-panel">
-      <label className="va-session-filter-label" htmlFor="va-session-keyword">会话关键词</label>
-      <div className="va-session-filter">
-        <input
-          id="va-session-keyword"
-          ref={inputRef}
-          type="search"
-          value={keyword}
-          placeholder="标题、首条指令或 ID"
-          onChange={event => store.setSessionKeyword(event.target.value)}
-        />
-        <button
-          aria-label="清除会话关键词"
-          disabled={!keyword}
-          onClick={() => {
-            store.setSessionKeyword('')
-            inputRef.current?.focus()
-          }}
-        >清除</button>
-      </div>
-      <div className="va-session-filter-count" role="status" aria-live="polite">
+      <KeywordFilter id="va-session-keyword" label="会话关键词" placeholder="标题、首条指令或 ID"
+        keyword={keyword} onChange={store.setSessionKeyword} />
+      <div className="va-keyword-filter-count" role="status" aria-live="polite">
         {`匹配 ${matches.length} / 共 ${sessions.length} 条`}
       </div>
       {matches.map(run => (
@@ -112,22 +121,24 @@ function SessionPanel({ order, runs, controlId, openIds, keyword }) {
 // 全选 / 部分半选 / 无）；展开状态由父级 toggles 字典集中管理，未动过的
 // 目录落到 defaultOpen（最新一组所在路径自动展开）。文件行「已开标签页」
 // 弱标记与高亮从 tabs 派生，不另立状态。
-function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, depth = 0 }) {
+function ArtDir({ node, toggles, filtering, defaultOpen, openFiles, activeRel, depth = 0 }) {
   const s = store.useRunState()
-  const open = toggles[node.path] ?? defaultOpen.has(node.path)
+  const open = toggles[node.path] ?? (filtering || defaultOpen.has(node.path))
   const rels = subtreeRels(node)
   const selCount = rels.reduce((n, p) => n + (s.artifactSel[p] ? 1 : 0), 0)
   const allOn = rels.length > 0 && selCount === rels.length
   const some = selCount > 0 && !allOn
-  const toggleOpen = () => setToggles({ ...toggles, [node.path]: !open })
+  const toggleOpen = () => store.setArtifactDirOpen(node.path, !open)
   return (
     <div className={`va-art-group va-local-art-group${depth >= 3 ? ' va-art-depth-limit' : ''}`}>
       <div
         className="va-art-dir-head"
         role="button"
         tabIndex={0}
+        aria-expanded={open}
         onClick={toggleOpen}
         onKeyDown={(e) => {
+          if (e.target !== e.currentTarget) return
           if (e.key === 'Enter' || e.key === ' ') {
             e.preventDefault()
             toggleOpen()
@@ -145,10 +156,11 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, 
           }}
           onChange={() => store.setArtifactSel(rels, !allOn)}
           onClick={(e) => e.stopPropagation()}
-          title="勾选本目录（含子目录）全部文件"
+          aria-label={`选择 ${node.path} 下${filtering ? '匹配' : '全部'}文件`}
+          title={filtering ? '勾选本目录（含子目录）匹配文件' : '勾选本目录（含子目录）全部文件'}
         />
         <span className="va-art-name">{node.name}</span>
-        <span className="va-art-count" title="本目录（含子目录）文件数">{node.count}</span>
+        <span className="va-art-count" title={filtering ? '本目录（含子目录）匹配文件数' : '本目录（含子目录）文件数'}>{node.count}</span>
       </div>
       {open && (
         <div className="va-art-children">
@@ -163,6 +175,7 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, 
                 className={`va-art-item${activeRel === rel ? ' on' : ''}`}
                 onClick={() => store.openArtifact(rel, f)}
                 onKeyDown={(e) => {
+                  if (e.target !== e.currentTarget) return
                   if (e.key === 'Enter' || e.key === ' ') {
                     e.preventDefault()
                     store.openArtifact(rel, f)
@@ -174,6 +187,7 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, 
                   type="checkbox"
                   className="va-art-check"
                   checked={!!s.artifactSel[rel]}
+                  aria-label={`选择 ${rel}`}
                   onChange={() => store.toggleArtifactSel(rel)}
                   onClick={(e) => e.stopPropagation()}
                 />
@@ -196,7 +210,7 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, 
             )
           })}
           {node.dirs.map((d) => (
-            <ArtDir key={d.path} node={d} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpen} openFiles={openFiles} activeRel={activeRel} depth={depth + 1} />
+            <ArtDir key={d.path} node={d} toggles={toggles} filtering={filtering} defaultOpen={defaultOpen} openFiles={openFiles} activeRel={activeRel} depth={depth + 1} />
           ))}
         </div>
       )}
@@ -212,7 +226,8 @@ function ArtDir({ node, toggles, setToggles, defaultOpen, openFiles, activeRel, 
 function ArtifactPanel({ openFiles, activeRel }) {
   const s = store.useRunState()
   const groups = s.artifacts.groups
-  const [toggles, setToggles] = useState({})
+  const query = s.artifactKeyword.trim().toLowerCase()
+  const toggles = query ? s.artifactQueryToggles : s.artifactDirToggles
   const [exportOpen, setExportOpen] = useState(false)
   const anchorRef = useRef(null)
   const closeExport = (run) => {
@@ -229,32 +244,41 @@ function ArtifactPanel({ openFiles, activeRel }) {
     document.addEventListener('mousedown', onDown)
     return () => document.removeEventListener('mousedown', onDown)
   }, [exportOpen])
-  const roots = artifactTree(groups)
+  const roots = artifactTree(groups, query)
+  const matchRels = roots.flatMap(subtreeRels)
+  const matchPaths = new Set(matchRels)
+  const defaultOpen = defaultOpenPaths(groups)
   const fileCount = artifactFileCount(groups)
   const selCount = Object.keys(s.artifactSel).length
+  const outsideCount = Object.keys(s.artifactSel).filter(path => !matchPaths.has(path)).length
   return (
     <div className="va-side-panel va-art-panel">
-      <div className="va-art-panel-head">产物 · {fileCount}</div>
-      {fileCount > 0 && (
+      <KeywordFilter id="va-artifact-keyword" label="产物关键词" placeholder="文件名、软件或版本路径"
+        keyword={s.artifactKeyword} onChange={store.setArtifactKeyword} />
+      <div className="va-keyword-filter-count" role="status" aria-live="polite">
+        {`匹配 ${matchRels.length} / 共 ${fileCount} 个文件`}
+      </div>
+      <div className="va-art-selection" role="status" aria-live="polite">
+        {outsideCount > 0 ? `已选 ${selCount}，其中 ${outsideCount} 项不在当前筛选结果` : `已选 ${selCount}`}
+      </div>
+      {(fileCount > 0 || selCount > 0) && (
         <div className="va-art-tools">
-          <button onClick={() => store.setArtifactSel(roots.flatMap(subtreeRels), true)}>
-            全选
+          <button onClick={() => store.setArtifactSel(matchRels, true)} disabled={matchRels.length === 0}>
+            全选匹配项
           </button>
           <button onClick={() => store.clearArtifactSel()} disabled={selCount === 0}>
-            清空
+            清空全部已选
           </button>
-          {/* 三条导出路径收拢为一个主按钮 + 单选小弹层（差异曾只活在
-              tooltip 里——三个同权重蓝钮是全 UI 最差的决策点）。锚定 span
-              挂在导出钮外——浮层相对它定位到按钮右侧，而非整个工具行 */}
+          {/* 三种导出沿用全局勾选集；目录折叠与关键词只改变展示。 */}
           <span className="va-art-export-anchor" ref={anchorRef}>
             <button
               className="va-art-zip"
               onClick={() => setExportOpen((v) => !v)}
               disabled={selCount === 0 || s.artifactZipping || s.obsArchiving || s.obsZipArchiving}
               aria-expanded={exportOpen}
-              title="勾选产物的导出方式（下载 zip / 上传 OBS 散件 / 上传 OBS 单包）"
+              title="导出全部已选，包含筛选外文件（ZIP 下载 / OBS 散件 / OBS 单包）"
             >
-              导出{selCount ? ` (${selCount})` : ''}
+              导出全部已选 ({selCount})
             </button>
             {exportOpen && (
               <div className="va-art-export" role="menu" aria-label="导出方式">
@@ -262,34 +286,38 @@ function ArtifactPanel({ openFiles, activeRel }) {
                   role="menuitem"
                   onClick={() => closeExport(() => store.downloadArtifactZip())}
                   disabled={s.artifactZipping}
-                  title="勾选的产物打包成一个 zip 下载到本机（文件名自动带时间戳）"
+                  title="全部已选打包成一个 ZIP 下载到本机（文件名自动带时间戳）"
                 >
-                  {s.artifactZipping ? '打包中…' : '下载 zip'}
+                  {s.artifactZipping ? '打包中…' : '下载 ZIP'} · 全部已选 ({selCount})
                 </button>
                 <button
                   role="menuitem"
                   onClick={() => closeExport(() => store.archiveToObs())}
                   disabled={s.obsArchiving}
-                  title="勾选的产物逐个上传到 OBS 桶（对象名 = 产物路径，同名覆盖）"
+                  title="全部已选逐个上传到 OBS 桶（对象名 = 产物路径，同名覆盖）"
                 >
-                  {s.obsArchiving ? '归档中…' : '上传 OBS · 散件'}
+                  {s.obsArchiving ? '归档中…' : '上传 OBS · 散件'} · 全部已选 ({selCount})
                 </button>
                 <button
                   role="menuitem"
                   onClick={() => closeExport(() => store.archiveZipToObs())}
                   disabled={s.obsZipArchiving}
-                  title="勾选的产物打成一个 zip（自定义包名）上传到 OBS 的 zip/ 目录"
+                  title="全部已选打成一个 ZIP（自定义包名）上传到 OBS 的 zip/ 目录"
                 >
-                  {s.obsZipArchiving ? '打包中…' : '上传 OBS · 单包'}
+                  {s.obsZipArchiving ? '打包中…' : '上传 OBS · 单包'} · 全部已选 ({selCount})
                 </button>
               </div>
             )}
           </span>
         </div>
       )}
-      {roots.length === 0 && <div className="va-side-empty">deploy/ · rpm/ 下暂无产物</div>}
+      {fileCount === 0 ? (
+        <div className="va-side-empty">deploy/ · rpm/ 下暂无产物</div>
+      ) : roots.length === 0 && (
+        <div className="va-side-empty">没有匹配的产物，试试其他关键词或清除筛选</div>
+      )}
       {roots.map((r) => (
-        <ArtDir key={r.path} node={r} toggles={toggles} setToggles={setToggles} defaultOpen={defaultOpenPaths(groups)} openFiles={openFiles} activeRel={activeRel} />
+        <ArtDir key={r.path} node={r} toggles={toggles} filtering={!!query} defaultOpen={defaultOpen} openFiles={openFiles} activeRel={activeRel} />
       ))}
     </div>
   )
