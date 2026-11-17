@@ -315,19 +315,17 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .va-side-panel-wrap { flex: 1; min-height: 0; display: flex; flex-direction: column; }
 .va-side-empty { color: var(--ink-3); font-size: 12.5px; padding: 6px 6px; }
 
-/* ---- 会话与产物关键词 ---- */
-.va-keyword-filter-label, .va-keyword-filter-count { font-size: 12px; color: var(--ink-2); }
-.va-keyword-filter { display: flex; gap: 6px; }
-.va-keyword-filter input {
-  flex: 1; min-width: 0; width: 0; border: 1px solid var(--line); border-radius: 6px;
-  padding: 7px 10px; font: inherit; font-size: 13px;
+/* ---- 会话与产物搜索 ---- */
+.va-keyword-filter {
+  flex-shrink: 0; min-width: 0; width: 100%; height: 30px;
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 4px 8px; font: inherit; font-size: 13px;
   color: var(--ink); background: var(--surface); caret-color: var(--accent);
 }
-.va-keyword-filter input::placeholder { color: var(--ink-3); }
-.va-keyword-filter button { flex-shrink: 0; }
-.va-keyword-filter :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.va-keyword-filter::placeholder { color: var(--ink-3); }
+.va-keyword-filter:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 600px) {
-  .va-keyword-filter input, .va-keyword-filter button { min-height: 44px; }
+  .va-keyword-filter { height: 44px; }
 }
 /* 行是 div 而非 button：当前行需要整体高亮且可能含后续交互件 */
 .va-sess-row {

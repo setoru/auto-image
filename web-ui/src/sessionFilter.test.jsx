@@ -69,10 +69,9 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-it('标题显示截短后仍能命中完整标题尾部，并显示匹配数与总数', () => {
+it('标题显示截短后仍能命中完整标题尾部', () => {
   store.setSessionKeyword('TitleTail')
   expect(rows()).toEqual([`Alpha ${'长标题'.repeat(11)}长…`])
-  expect(markup()).toContain('匹配 1 / 共 3 条')
   expect(fetch.mock.calls).toEqual([])
 })
 
@@ -118,7 +117,6 @@ it('沿用完整清单的最近活跃顺序，后台标题、指令和新会话�
   ]
   await store.loadRuns()
   expect(rows()).toEqual(['新增 Alpha', 'Beta Redis', 'Alpha Nginx'])
-  expect(markup()).toContain('匹配 3 / 共 4 条')
   expect(store.getState().sessionKeyword).toBe('alpha')
 })
 
@@ -126,16 +124,15 @@ it('零匹配和暂无数据分别提示，清除后恢复原列表', async () =
   const original = rows()
   store.setSessionKeyword('missing')
   expect(rows()).toEqual([])
-  expect(markup()).toContain('没有匹配的会话')
-  expect(markup()).toContain('匹配 0 / 共 3 条')
+  expect(markup()).toContain('未找到相关会话')
   expect(markup()).not.toContain('暂无会话')
   store.setSessionKeyword('')
   expect(rows()).toEqual(original)
   summaries = []
   await store.loadRuns()
   expect(markup()).toContain('暂无会话')
-  expect(markup()).toContain('匹配 0 / 共 0 条')
-  expect(markup()).not.toContain('没有匹配的会话')
+  expect(rows()).toEqual([])
+  expect(markup()).not.toContain('未找到相关会话')
 })
 
 it('隐藏控制面会话只改变侧栏展示，完整数据、标签、草稿、阅读和勾选保持', () => {

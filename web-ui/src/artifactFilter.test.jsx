@@ -81,7 +81,6 @@ afterEach(() => {
 it('完整路径按去首尾空白和忽略大小写匹配，并保留全部祖先与计数', () => {
   store.setArtifactKeyword('  RPM/NGINX/1.25.3/RPMS/NGINX-1.25.3.rpm  ')
   expect(filePaths()).toEqual(['rpm/nginx/1.25.3/rpms/Nginx-1.25.3.RPM'])
-  expect(markup()).toContain('匹配 1 / 共 5 个文件')
   for (const path of ['rpm', 'rpm/nginx', 'rpm/nginx/1.25.3', 'rpm/nginx/1.25.3/rpms']) {
     expect(markup()).toContain(`title="${path}"`)
   }
@@ -137,7 +136,8 @@ it('查询自动展开匹配祖先，折叠只影响展示；改词重开，清�
   expect(filePaths()).toEqual([nginx, 'deploy/nginx/1.24.0/nginx-old-report.md', redis])
   store.setArtifactDirOpen('deploy/nginx', false)
   expect(filePaths()).toEqual([redis])
-  expect(markup()).toContain('匹配 3 / 共 5 个文件')
+  expect([...markup().matchAll(/class="va-art-count"[^>]*>(\d+)</g)].map(match => Number(match[1])))
+    .toEqual([3, 2, 1, 1])
   store.setSidePanel('sessions')
   store.setSidePanel('artifacts')
   expect(filePaths()).toEqual([redis])
@@ -145,7 +145,6 @@ it('查询自动展开匹配祖先，折叠只影响展示；改词重开，清�
   expect(filePaths()).toEqual([nginx, 'deploy/nginx/1.24.0/nginx-old-report.md', redis])
   store.setArtifactKeyword('')
   expect(filePaths()).toEqual([redis])
-  expect(markup()).toContain('匹配 5 / 共 5 个文件')
   store.setArtifactKeyword('   ')
   expect(filePaths()).toEqual([redis])
 })
@@ -153,17 +152,15 @@ it('查询自动展开匹配祖先，折叠只影响展示；改词重开，清�
 it('零匹配与暂无数据分别提示，清除后恢复原清单', async () => {
   store.setArtifactKeyword('missing')
   expect(filePaths()).toEqual([])
-  expect(markup()).toContain('没有匹配的产物')
-  expect(markup()).toContain('匹配 0 / 共 5 个文件')
+  expect(markup()).toContain('未找到相关产物')
   expect(markup()).not.toContain('暂无产物')
   store.setArtifactKeyword('')
   expect(filePaths()).toEqual([nginx, 'deploy/nginx/1.25.3/z-last.log'])
-  expect(markup()).toContain('匹配 5 / 共 5 个文件')
   groups = []
   await store.refreshArtifacts()
   expect(markup()).toContain('暂无产物')
-  expect(markup()).not.toContain('没有匹配的产物')
-  expect(markup()).toContain('匹配 0 / 共 0 个文件')
+  expect(filePaths()).toEqual([])
+  expect(markup()).not.toContain('未找到相关产物')
 })
 
 it('筛选不搜索已开正文、OBS 对象或清单外路径，也不改工作现场', async () => {
@@ -200,14 +197,13 @@ it('预选 nginx 与 redis 后仅显示 nginx，零匹配与折叠均保留全�
   await store.refreshArtifacts()
   store.setArtifactSel([nginx, redis], true)
   store.setArtifactKeyword('nginx')
-  expect(markup()).toContain('匹配 1 / 共 2 个文件')
   expect(markup()).toContain('已选 2，其中 1 项不在当前筛选结果')
   expect(checkedFiles()).toEqual([nginx])
   store.setArtifactDirOpen('deploy', false)
   expect(filePaths()).toEqual([])
   expect(markup()).toContain('已选 2，其中 1 项不在当前筛选结果')
   store.setArtifactKeyword('nothing')
-  expect(markup()).toContain('匹配 0 / 共 2 个文件')
+  expect(filePaths()).toEqual([])
   expect(markup()).toContain('已选 2，其中 2 项不在当前筛选结果')
   expect(exportButton()).toContain('全部已选 (2)')
   expect(exportButton()).not.toContain('disabled')
@@ -276,7 +272,6 @@ it('后台完整清单刷新继续应用原词，新增匹配文件自动出现�
     'deploy/nginx/1.26.0/nginx-new-report.md', nginx, 'deploy/nginx/1.25.3/z-last.log',
     'deploy/nginx/1.24.0/nginx-old-report.md', 'rpm/nginx/1.25.3/rpms/Nginx-1.25.3.RPM',
   ])
-  expect(markup()).toContain('匹配 5 / 共 6 个文件')
   expect(Object.keys(store.getState().artifactSel)).toEqual([nginx, redis])
 })
 
@@ -289,7 +284,7 @@ it('读取失败不剪枝，只有完整清单确认删除才移除筛选外选�
   groups = groups.filter(group => !group.dir.includes('redis'))
   await store.refreshArtifacts()
   expect(Object.keys(store.getState().artifactSel)).toEqual([nginx])
-  expect(markup()).toContain('匹配 1 / 共 4 个文件')
+  expect(filePaths()).toEqual([nginx])
   expect(markup()).not.toContain('其中 1 项不在当前筛选结果')
   store.setArtifactKeyword('redis')
   expect(filePaths()).toEqual([])

@@ -58,30 +58,17 @@ function SessionRow({ run, on, open }) {
   )
 }
 
-function KeywordFilter({ id, label, placeholder, keyword, onChange }) {
-  const inputRef = useRef(null)
+function KeywordFilter({ id, label, keyword, onChange }) {
   return (
-    <>
-      <label className="va-keyword-filter-label" htmlFor={id}>{label}</label>
-      <div className="va-keyword-filter">
-        <input
-          id={id}
-          ref={inputRef}
-          type="search"
-          value={keyword}
-          placeholder={placeholder}
-          onChange={event => onChange(event.target.value)}
-        />
-        <button
-          aria-label={`清除${label}`}
-          disabled={!keyword}
-          onClick={() => {
-            onChange('')
-            inputRef.current?.focus()
-          }}
-        >清除</button>
-      </div>
-    </>
+    <input
+      className="va-keyword-filter"
+      id={id}
+      aria-label={label}
+      type="search"
+      value={keyword}
+      placeholder={`${label}…`}
+      onChange={event => onChange(event.target.value)}
+    />
   )
 }
 
@@ -94,11 +81,8 @@ function SessionPanel({ order, runs, controlId, openIds, keyword }) {
   ) : sessions
   return (
     <div className="va-side-panel">
-      <KeywordFilter id="va-session-keyword" label="会话关键词" placeholder="标题、首条指令或 ID"
+      <KeywordFilter id="va-session-keyword" label="搜索会话"
         keyword={keyword} onChange={store.setSessionKeyword} />
-      <div className="va-keyword-filter-count" role="status" aria-live="polite">
-        {`匹配 ${matches.length} / 共 ${sessions.length} 条`}
-      </div>
       {matches.map(run => (
         <SessionRow
           key={run.runId}
@@ -110,7 +94,7 @@ function SessionPanel({ order, runs, controlId, openIds, keyword }) {
       {sessions.length === 0 ? (
         <div className="va-side-empty">暂无会话——点标签栏「+ 新建」</div>
       ) : matches.length === 0 && (
-        <div className="va-side-empty">没有匹配的会话，试试其他关键词或清除筛选</div>
+        <div className="va-side-empty" role="status">未找到相关会话</div>
       )}
     </div>
   )
@@ -253,11 +237,8 @@ function ArtifactPanel({ openFiles, activeRel }) {
   const outsideCount = Object.keys(s.artifactSel).filter(path => !matchPaths.has(path)).length
   return (
     <div className="va-side-panel va-art-panel">
-      <KeywordFilter id="va-artifact-keyword" label="产物关键词" placeholder="文件名、软件或版本路径"
+      <KeywordFilter id="va-artifact-keyword" label="搜索产物"
         keyword={s.artifactKeyword} onChange={store.setArtifactKeyword} />
-      <div className="va-keyword-filter-count" role="status" aria-live="polite">
-        {`匹配 ${matchRels.length} / 共 ${fileCount} 个文件`}
-      </div>
       <div className="va-art-selection" role="status" aria-live="polite">
         {outsideCount > 0 ? `已选 ${selCount}，其中 ${outsideCount} 项不在当前筛选结果` : `已选 ${selCount}`}
       </div>
@@ -314,7 +295,7 @@ function ArtifactPanel({ openFiles, activeRel }) {
       {fileCount === 0 ? (
         <div className="va-side-empty">deploy/ · rpm/ 下暂无产物</div>
       ) : roots.length === 0 && (
-        <div className="va-side-empty">没有匹配的产物，试试其他关键词或清除筛选</div>
+        <div className="va-side-empty" role="status">未找到相关产物</div>
       )}
       {roots.map((r) => (
         <ArtDir key={r.path} node={r} toggles={toggles} filtering={!!query} defaultOpen={defaultOpen} openFiles={openFiles} activeRel={activeRel} />
