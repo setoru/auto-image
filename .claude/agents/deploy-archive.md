@@ -136,7 +136,7 @@ if pgrep -x hostguard >/dev/null 2>&1; then echo "hostguard 仍在运行"; else 
 
 在云 Agent 清理完成后执行，完成后再继续下方卸载 pip 与其余清理。
 
-**适用范围**：仅适配 `libpwquality` 提供的 `pam_pwquality.so`，已有模块复用，缺少时先装。目标原生仓库确认不提供对应包时（报无此包，非网络或源故障），记录实际安装命令、退出码和原因，将密码策略标为未执行，继续其余清理；不装替代组件、不改用其他密码机制。模块已可用时，配置命令失败按下方清理失败规则停止。
+**适用范围**：仅适配 `libpwquality` 提供的 `pam_pwquality.so`，已有模块复用，缺少时先装。目标原生仓库确认不提供对应包时（报无此包，非网络或源故障），记录实际安装命令、退出码和原因，将密码策略标为未执行，继续其余清理；不装替代组件、不改用其他密码机制。模块已可用时，配置命令或写入确认失败按下方清理失败规则停止。
 
 **落点与审核口径**：基线参数必须写在审核会读取的 PAM 文件的有效行内，只写 `pwquality.conf` 不算完成。
 
@@ -149,7 +149,7 @@ if pgrep -x hostguard >/dev/null 2>&1; then echo "hostguard 仍在运行"; else 
 
 1. **确认组件与管理方式**：核对 `pam_pwquality.so` 是否已安装；`system-auth`、`password-auth` 是否为指向 `/etc/authselect/` 的符号链接（authselect 接管），Debian 上 `common-password` 是否由 `pam-auth-update` 生成。缺模块时按目标系统原生包管理器安装：Debian/Ubuntu 常为 `libpam-pwquality`，RHEL 系常为 `libpwquality`；包名不作发行版门禁，按实际仓库命中执行。
 2. **把基线写进目标文件**：更新目标文件中有效的 `password … pam_pwquality.so` 行，只替换上述基线参数，保留控制标志、链顺序与其他选项；无该行时按原密码链在 `pam_unix.so` 前接入质量模块。未受管理或本地维护的文件原位更新，符号链接改其实际目标并保留链接。受管理的配置沿用原工具更新模块源配置或模板，再生成指定文件；authselect 已用自定义 profile 时复用其模板，使用默认 profile 时基于当前 profile 派生可编辑的 PAM 模板副本，并保留原 features 和本地定制后应用。Debian 的 `common-*` 已有本地定制时保留现有维护方式，只修改相关密码行；通过 `pam-auth-update` 生成时保留其他启用的 profiles 和本地修改，不默认使用 `--force` 重置配置。
-3. **记录执行结果**：按安装、配置命令的退出码记录执行结果，保存目标路径、所配置参数、命令及 stdout/stderr 摘要，不另设规则回读或改密测试。云商店门禁是否通过，以实际扫描结果为准。
+3. **确认写入并记录**：配置完成后，通过 ssh-skill 回读上方为本机指定的每个 PAM 文件中的有效 `password … pam_pwquality.so` 行，忽略注释行；每个目标文件都须有基线配置行，并按上述同一份密码基线在该行中逐项核对完整的 `参数名=值`，冲突值按不符处理，不要求整行文本或其他选项一致。文件无法读取、缺少有效基线行、基线参数缺失或值不符时，记录具体路径及原因，按配置失败处理。保存回读的有效行、核对结果、安装/配置/确认命令及退出码和 stdout/stderr 摘要；按适用范围未执行配置时，写入确认也记为未执行。不做改密、登录或密码链执行测试。云商店门禁是否通过，以实际扫描结果为准。
 
 ```bash
 # —— 安全基线：卸载 python3-pip ——
@@ -188,7 +188,7 @@ sync
 2. 「出错」不得折叠成通过——用不确定存在的选项（如 `pgrep -q`）报错时退出码与「未命中」同为非零、同走 if 假分支，判定命令只用确认全版本可用的写法（`pgrep <name> >/dev/null`）；
 3. 禁止 `&& { FAIL; }` 后接 `; echo $?` 的链尾哨兵——`$?` 取的是链上最后实际执行命令的退出码，不是块结果；需区分多态时用 `case` 显式分支（verify 契约模板的 `rc=$?; case` 即此模式）。
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项及上述密码策略适用范围的例外除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；实际执行的安全基线（密码策略安装与配置 / pip 卸载）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功（pip 卸载含块尾 `dpkg -l` 复验，输出「仍已安装」即失败），否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项及上述密码策略适用范围的例外除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；实际执行的安全基线（密码策略安装、配置与写入确认 / pip 卸载）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功（pip 卸载含块尾 `dpkg -l` 复验，输出「仍已安装」即失败），否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -274,11 +274,11 @@ python <ecs_skill_scripts>/ecs.py change-os \
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... <本次实际执行的密码策略安装与配置命令及目标文件> ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... <本次实际执行的密码策略安装、配置与写入确认命令及目标文件> ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：<本次真实值> | 状态：<本次结果>
 - 输出摘要：<本次真实输出；未执行则说明>
 - 清理范围：<实际清理对象、已知保留项与未检查范围；以命令及输出为据>
-- 密码策略：<指定 PAM 文件路径、所配置参数、组件及安装与配置命令执行结果；未执行时按适用范围说明原因>
+- 密码策略：<指定 PAM 文件路径、回读的有效规则行、写入确认结果、组件及安装与配置命令执行结果；未执行时按适用范围说明原因>
 
 ### 2. 制镜像（ims-skill）
 - 命令：ims.py create --instance-id <id> ...
@@ -334,7 +334,7 @@ python <ecs_skill_scripts>/ecs.py change-os \
 
 ## 打包结果
 - 清理：<实际结果、清理对象、已知保留项与未检查范围；未执行则说明原因>
-- 密码策略：<指定 PAM 文件路径、所配置参数、安装与配置命令执行结果；未执行时按适用范围说明原因>
+- 密码策略：<指定 PAM 文件路径、回读的有效规则行、写入确认结果及安装与配置命令执行结果；未执行时按适用范围说明原因>
 - 制镜像：<实际结果、耗时或未执行及原因>
 - 切换 OS：<实际结果、耗时或未执行及原因>
 - 软件验证范围：<沿用本次验证报告；切 OS 后仅确认 ECS 就绪时注明软件层未复验>
