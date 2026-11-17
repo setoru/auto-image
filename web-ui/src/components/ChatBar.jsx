@@ -26,11 +26,10 @@ function autoSize(el) {
 }
 
 function SubmissionFeedback({ runId, submission, onDismiss }) {
-  if (!submission) return null
+  if (!submission || submission.status === 'accepted') return null
   const { status, message, refresh } = submission
   const label = {
     sending: '正在发送指令…',
-    accepted: '指令已接收；这仅代表受理，不表示部署成功。',
     rejected: `未发送：${message}`,
     unknown: '发送结果未确认，指令可能已接收。请查看最新记录，避免重复发送。',
   }[status]
@@ -147,11 +146,9 @@ export default function ChatBar() {
   return (
     <div className="chat-composer">
       <SubmissionFeedback runId={runId} submission={submission} onDismiss={dismiss} />
-      <p className={`chat-draft-hint${s.draftStorageError ? ' unavailable' : ''}`} role={s.draftStorageError ? 'status' : undefined}>
-        {s.draftStorageError
-          ? '本机保存失败，刷新恢复不可用；当前仍可输入和发送，草稿与发送提示请在离开前自行保留。'
-          : '草稿和未确认发送提示仅在此浏览器保存，可在刷新后恢复。'}
-      </p>
+      {s.draftStorageError && <p className="chat-draft-hint" role="status">
+        本机保存失败，刷新恢复不可用；当前仍可输入和发送，草稿与发送提示请在离开前自行保留。
+      </p>}
       <div className={`chat-bar${collapsed ? ' collapsed' : ''}`}>
         {run && target(collapsed)}
         {forkBtn}
