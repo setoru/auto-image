@@ -1,6 +1,6 @@
 ---
 name: deploy-archive
-description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（按目标系统配置 libpwquality 密码规则 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 文件与目录 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，持续更新 archive-result.md（执行明细），结束时补齐 deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
+description: 在 deploy-verify 通过后执行打包流程：通过 ssh-skill 清理远程机器（按目标系统在 PAM 文件中配置 libpwquality 密码规则 / python3-pip 卸载 / bash_history / apt cache / /tmp / SSH 用户密钥 / SSH host key / UniAgent 文件与目录 / HostGuard / root 密码），通过 ims-skill 脚本制镜像拿 image_id，通过 ecs-skill change-os 脚本切换 OS 并确认就绪，持续更新 archive-result.md（执行明细），结束时补齐 deploy-list.md（交付清单）+ archive-issues.md（仅有问题时）。三步顺序执行、前序失败即停。当用户要求「打包 ECS」「制镜像并切换 OS」「归档部署」「出交付清单」时使用。触发词：打包、归档、archive、制镜像、切换 OS、交付清单、deploy-list、清理后制镜像、打包镜像。
 tools: Read, Write, Bash, Glob, Grep
 ---
 
@@ -107,7 +107,7 @@ python <ssh_skill_scripts>/ssh_execute.py <别名> "hostname && uname -a"
 
 ### 3. 机器清理（通过 ssh-skill）
 
-依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。UniAgent 保留客户端并按[官方制镜像方式一](https://support.huaweicloud.com/intl/zh-cn/bestpractice-aom2/aom_05_0007.html)清理指定文件与目录，HostGuard 卸载（两块均为**先杀进程再清理**——agent 带守护自拉起，进程不死会在删文件后重新落盘，故块尾 `pgrep` 复验，仍在运行即清理未完成）；安全基线两项各自消除一类交付缺陷——密码策略按下方步骤适配目标系统的实际改密机制，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
+依次在远程机器上执行（合并为一次 ssh_execute 调用或分步执行均可，每步记录命令/退出码/输出摘要）。清理分四类，**顺序不可调换**：**云 Agent（UniAgent + HostGuard）** → **安全基线（密码策略 + 卸载 pip）** → **运行痕迹** → **身份凭证 + cloud-init 重置**。UniAgent 保留客户端并按[官方制镜像方式一](https://support.huaweicloud.com/intl/zh-cn/bestpractice-aom2/aom_05_0007.html)清理指定文件与目录，HostGuard 卸载（两块均为**先杀进程再清理**——agent 带守护自拉起，进程不死会在删文件后重新落盘，故块尾 `pgrep` 复验，仍在运行即清理未完成）；安全基线两项各自消除一类交付缺陷——密码策略按下方步骤写进审核读取的 PAM 密码文件，卸载 `python3-pip` 消除「修复版本只在 Ubuntu Pro ESM 源、`dist-upgrade` 取不到」的漏洞扫描项；运行痕迹排在安全基线**之后**，因为 `apt-get install` 会重新下载 `.deb` 进 apt 缓存，`apt-get clean` 先跑会清理落空；身份凭证类的删除让镜像不含可识别或可登录的残留；`cloud-init clean` 重置 cloud-init 状态，使 change-os 重启时 cloud-init 全量重跑，重新生成 SSH host key 并注入密码解锁 root。
 
 ```bash
 # —— UniAgent 制镜像前清理（容错：未安装或已停止均不阻塞）——
@@ -136,15 +136,61 @@ if pgrep -x hostguard >/dev/null 2>&1; then echo "hostguard 仍在运行"; else 
 
 在云 Agent 清理完成后执行，完成后再继续下方卸载 pip 与其余清理。
 
-**适用范围**：仅适配 `libpwquality` 提供的 `pam_pwquality.so`，已有模块复用，缺少时先按下方步骤安装。当前系统无法安装对应组件时，记录实际安装命令、退出码和原因，将密码策略配置标为未执行，继续其余清理；不安装替代组件或适配其他密码机制。已有或安装成功的模块配置命令失败时，沿用本步骤的清理失败规则。
+**适用范围**：仅适配 `libpwquality` 提供的 `pam_pwquality.so`，已有模块复用，缺少时先装。目标原生仓库确认不提供对应包时（报无此包，非网络或源故障），记录实际安装命令、退出码和原因，将密码策略标为未执行，继续其余清理；不装替代组件、不改用其他密码机制。模块已可用时，配置或回读失败按下方清理失败规则停止。
 
-**密码基线**沿用现有强度：`retry=3 minlen=8 minclass=2 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1`。四个 `credit=-1` 实际要求小写、大写、数字、特殊字符四类都出现，用户名检查拒绝含用户名的密码。本次不新增 `enforce_for_root`。
+**落点与审核口径**：基线参数必须写在审核会读取的 PAM 文件的有效行内，只写 `pwquality.conf` 不算完成。
 
-1. **核对并安装组件**：通过 ssh-skill 核对目标 OS 与组件安装情况。缺少模块时，用目标系统的原生包管理方式安装提供 `pam_pwquality.so` 的包：Debian/Ubuntu 常为 `libpam-pwquality`（依赖 libpwquality 库），CentOS/RHEL/openEuler/HCE 等常为 `libpwquality`；其他系统查询其原生仓库及对应版本文档，包名不作为发行版门禁。无法安装时按上述适用范围记录并继续。
-2. **识别实际密码链**：从实际改密服务的 PAM 密码栈沿 `include/substack` 找到有效文件，核对链接及配置管理方式；`common-password`、`system-auth`、`password-auth` 只是常见入口，以实际调用链为准。
-3. **复用原生配置方式**：按当前系统的 PAM 管理方式启用或配置该模块。由 `authselect`、`authconfig`、`pam-auth-update`、`pam-config` 等工具管理的文件，通过原有工具/profile 修改，保持当前认证方式及已启用 features；未受管理的文件只修改相关策略，保留控制标志、链顺序和下游 `use_authtok` 等选项，复用已有 `pam_pwquality` 行。
-4. **配置有效参数**：优先使用该模块实际读取的 `pwquality.conf`；使用 `.conf.d` 前核对版本支持和读取顺序，PAM 行参数优先于配置文件，须处理对本次基线的覆盖。参数放在目标版本支持的位置，旧版 `retry` 可能仍须配置在 PAM 行；旧 `libpwquality` 没有 `usercheck` 开关但默认检查用户名时复用该语义，不以同名参数齐全为完成条件。未知能力先查目标版本的工具说明及官方文档。
-5. **记录执行结果**：密码部分按安装、配置命令的退出码判断执行结果，记录命令、stdout/stderr 摘要及所配置的文件和参数，不另设模块加载验证、规则回读或改密测试。
+- RHEL 系（openEuler / CentOS / RHEL / HCE 等）：`/etc/pam.d/system-auth` 与 `/etc/pam.d/password-auth`，存在的每个都要带全基线。
+- 其他系统（Debian / Ubuntu 等）：`/etc/pam.d/common-password`。
+- 上述文件都不存在时，以 `passwd` 实际使用的密码栈文件为准（兜底），并在报告中记录实际路径。
+
+**密码基线**：`retry=3 minlen=8 minclass=2 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1`。四个 `credit=-1` 实际要求小写、大写、数字、特殊字符四类都出现，用户名检查拒绝含用户名的密码。本次不新增 `enforce_for_root`；行内已有的该选项及其他非基线选项保留。旧版模块不认 `usercheck` 时只记一条日志、不影响其余检查，其默认仍校验用户名，语义不变。
+
+1. **确认组件与管理方式**：核对 `pam_pwquality.so` 是否已安装；`system-auth`、`password-auth` 是否为指向 `/etc/authselect/` 的符号链接（authselect 接管），Debian 上 `common-password` 是否由 `pam-auth-update` 生成。缺模块时按目标系统原生包管理器安装：Debian/Ubuntu 常为 `libpam-pwquality`，RHEL 系常为 `libpwquality`；包名不作发行版门禁，按实际仓库命中执行。
+2. **把基线写进目标文件**。未受管理（含历史 authconfig 生成的 `*-ac` 与 Debian 上的普通文件）：原位改写已有 `pam_pwquality.so` 行的参数，保留控制标志、链顺序与其他选项；无该行时在 `pam_unix.so` 前插入 `password requisite pam_pwquality.so <基线>`。受管理：走管理工具让渲染出的目标文件带基线——authselect 建自定义 profile、改其中的 `system-auth` / `password-auth` 后 `authselect select custom/<名> --force`；Debian 改 `/usr/share/pam-configs/pwquality` 的模块行后 `pam-auth-update --enable pwquality --force`（`--force` 会丢弃 `common-*` 的本地改动，旧文件存为 `.pam-old`）。不直接改被管理的渲染文件。
+3. **回读复验**：只读上述目标文件，确认每个有效 `pam_pwquality` 行都含全部基线参数——这是审核口径的复现，不改密、不做登录测试。
+
+未受管理的 RHEL 系（实测 HCE 形态）原位改写，幂等：先删基线参数再插回，其他选项不动（同一条 sed 也可用于上面的 profile 文件）。
+
+```bash
+# 基线参数；与下方复验块保持同一串（分次 ssh 调用不共享变量）
+BASE="retry=3 minlen=8 minclass=2 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1"
+for f in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+  if [ -e "$f" ]; then
+    # 解析 symlink（authconfig 的 *-ac）后改真实文件，避免 sed -i 把链接替换成普通文件
+    t=$(readlink -f "$f")
+    sed -i -E '/^[[:space:]]*[^#].*pam_pwquality\.so/ { s/(retry|minlen|minclass|dcredit|ucredit|lcredit|ocredit|usercheck)=[^[:space:]]*//g; s@(pam_pwquality\.so)[[:space:]]*@\1 '"$BASE"' @ }' "$t"
+  fi
+done
+```
+
+回读复验：目标文件里每个有效行都必须带全基线，缺项逐条输出并失败。
+
+```bash
+BASE="retry=3 minlen=8 minclass=2 dcredit=-1 ucredit=-1 lcredit=-1 ocredit=-1 usercheck=1"
+FILES=""
+for f in /etc/pam.d/system-auth /etc/pam.d/password-auth; do
+  if [ -e "$f" ]; then FILES="$FILES $f"; fi
+done
+if [ -z "$FILES" ] && [ -e /etc/pam.d/common-password ]; then FILES="/etc/pam.d/common-password"; fi
+if [ -z "$FILES" ]; then
+  echo "SKIP: 未找到 system-auth/password-auth/common-password，改按 passwd 实际密码栈文件复验并记录路径"
+else
+  bad=0
+  for f in $FILES; do
+    awk -v f="$f" -v base="$BASE" '
+      /^[[:space:]]*#/ { next }
+      /pam_pwquality\.so/ {
+        n++
+        split(base, req, " ")
+        for (i in req) if (index(" " $0 " ", " " req[i] " ") == 0) { print "FAIL: " f " 缺 " req[i]; bad = 1 }
+      }
+      END { if (!n) { print "FAIL: " f " 无有效 pam_pwquality 行"; bad = 1 }; exit bad }
+    ' "$f" || bad=1
+  done
+  if [ "$bad" -ne 0 ]; then echo "密码策略复验失败"; exit 1; else echo "密码策略复验通过：$FILES"; fi
+fi
+```
 
 ```bash
 # —— 安全基线：卸载 python3-pip ——
@@ -183,7 +229,7 @@ sync
 2. 「出错」不得折叠成通过——用不确定存在的选项（如 `pgrep -q`）报错时退出码与「未命中」同为非零、同走 if 假分支，判定命令只用确认全版本可用的写法（`pgrep <name> >/dev/null`）；
 3. 禁止 `&& { FAIL; }` 后接 `; echo $?` 的链尾哨兵——`$?` 取的是链上最后实际执行命令的退出码，不是块结果；需区分多态时用 `case` 显式分支（verify 契约模板的 `rc=$?; case` 即此模式）。
 
-每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项及上述密码策略适用范围的例外除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；实际执行的安全基线（密码策略安装与配置 / pip 卸载）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功（pip 卸载含块尾 `dpkg -l` 复验，输出「仍已安装」即失败），否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
+每步记录：命令、`exit_code`、stdout/stderr 摘要。**任一步失败（`exit_code != 0`，`|| true` 容错项及上述密码策略适用范围的例外除外）→ 停止，不进入制镜像**。UniAgent 块与 HostGuard 块（含 stop / pkill / dpkg -P）均带 `|| true`（未安装不阻塞），但块尾 `pgrep` 复验输出「仍在运行」时属清理未完成——带活的管控 agent 入镜像是脏数据，同失败处理：停止，不进入制镜像；实际执行的安全基线（密码策略安装、配置与回读 / pip 卸载）与身份凭证类（`rm -rf .ssh/*` / `rm -f ssh_host_*` / `passwd`）不带容错——必须成功（密码策略以回读输出「复验通过」为准；pip 卸载含块尾 `dpkg -l` 复验，输出「仍已安装」即失败），否则镜像缺安全基线、残留已知漏洞包或含残留凭证。停止时写 archive-result.md（标记失败）+ archive-issues.md，退出。
 
 ### 4. 制镜像（通过 ims-skill）
 
@@ -269,11 +315,11 @@ python <ecs_skill_scripts>/ecs.py change-os \
 ## 执行明细
 
 ### 1. 机器清理
-- 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... <本次实际执行的密码策略安装与配置命令> ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
+- 命令：systemctl/service stop uniagentd + pkill -9 + <本次实际执行的 UniAgent 文件与目录清理命令> + pgrep 复验 ... /etc/init.d/hostguard stop + dpkg -P hostguard + rm 残留 + pkill -9 + 复验 ... <本次实际执行的密码策略安装与配置命令及目标文件> ... apt-get purge python3-pip ... apt-get clean ... rm -rf .ssh/* ... rm -f ssh_host_* ... passwd -d/l root ... sync
 - 退出码：<本次真实值> | 状态：<本次结果>
 - 输出摘要：<本次真实输出；未执行则说明>
 - 清理范围：<实际清理对象、已知保留项与未检查范围；以命令及输出为据>
-- 密码策略：<本次使用的组件、配置文件和参数、安装与配置命令执行结果；未执行时按适用范围说明原因>
+- 密码策略：<目标文件路径与有效行内容、组件、安装与配置命令执行结果、回读结论；未执行时按适用范围说明原因>
 
 ### 2. 制镜像（ims-skill）
 - 命令：ims.py create --instance-id <id> ...
@@ -329,7 +375,7 @@ python <ecs_skill_scripts>/ecs.py change-os \
 
 ## 打包结果
 - 清理：<实际结果、清理对象、已知保留项与未检查范围；未执行则说明原因>
-- 密码策略：<本次 libpwquality 安装与配置命令执行结果、配置参数；未执行时按适用范围说明原因>
+- 密码策略：<目标文件路径与有效行内容、安装与配置命令执行结果、回读结论；未执行时按适用范围说明原因>
 - 制镜像：<实际结果、耗时或未执行及原因>
 - 切换 OS：<实际结果、耗时或未执行及原因>
 - 软件验证范围：<沿用本次验证报告；切 OS 后仅确认 ECS 就绪时注明软件层未复验>
