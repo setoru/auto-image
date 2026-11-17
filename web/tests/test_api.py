@@ -1128,8 +1128,18 @@ async def test_summary_tracks_last_event_at():
 
 async def test_pipeline_turn_creates_image_task():
     """流水线回合 → /api/tasks：deploy-guide 派发建镜像任务，回合 success
-    收尾（DEFAULT_SCRIPT；软件/版本来自指令文本启发式）。"""
-    app = make_app()
+    收尾；标题和软件采用模型信息，实际版本不从用户指令推断。"""
+    info = {"title": "部署 nginx", "software": "nginx", "actual_version": None,
+            "output_dir": None, "install_meta_file": None}
+    script = [
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "toolu_guide", "name": "Task",
+             "input": {"subagent_type": "deploy-guide",
+                       "prompt": f"<task_info>{json.dumps(info)}</task_info>\n生成部署与验证指南"}},
+        ]}},
+        {"type": "result", "subtype": "success", "result": "指南完成"},
+    ]
+    app = make_app(script=script)
     async with async_client(app) as client:
         run_id = (await client.post("/api/runs", json={})).json()["run_id"]
         await client.post(f"/api/runs/{run_id}/messages", json={"text": "部署 nginx 1.25 到 server-a"})
@@ -1143,8 +1153,8 @@ async def test_pipeline_turn_creates_image_task():
         assert t["type"] == "image"
         assert t["status"] == "DONE" and t["outcome"] == "success"
         assert t["task_id"].startswith("task-"), t
-        assert t["software"] == "nginx" and t["version"] == "1.25", t
-        assert "镜像 nginx 1.25 (" in t["name"], t["name"]
+        assert t["software"] == "nginx" and t["version"] is None, t
+        assert t["name"].startswith("部署 nginx ("), t["name"]
         assert [s["stage"] for s in t["stages"]] == ["GUIDE"], t["stages"]
         assert t["stages"][0]["started_at"] is not None
         assert t["stages"][0]["ended_at"] is not None  # 回合收尾关上末阶段
@@ -1258,11 +1268,22 @@ async def test_manual_task_run_lifecycle():
         assert r.status_code == 404, r.text
 
 
-async def test_fixed_version_metadata_binds_task_without_additional_identity():
-    """HTTP 与 SDK 保留既有会话形态，任务从明确版本目录读取机器信息。"""
+async def test_explicit_task_information_binds_machine_without_changing_http_or_sdk_shape():
+    """HTTP 与 SDK 保留既有会话形态，任务只读取已明确核对的机器记录。"""
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        fake = FakeSessionFactory()
+        info = {"title": "部署 nginx", "software": "nginx", "actual_version": "1.3.0",
+                "output_dir": "deploy/nginx/1.3.0",
+                "install_meta_file": "deploy/nginx/1.3.0/nginx-install-meta.json"}
+        script = [
+            {"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "toolu_install", "name": "Agent",
+                 "input": {"subagent_type": "deploy-install",
+                           "prompt": f"<task_info>{json.dumps(info)}</task_info>\n继续已核对的安装"}},
+            ]}},
+            {"type": "result", "subtype": "success", "result": "安装完成"},
+        ]
+        fake = FakeSessionFactory(script=script)
 
         def factory(start):
             directory = root / "deploy/nginx/1.3.0"

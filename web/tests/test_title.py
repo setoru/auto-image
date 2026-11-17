@@ -21,6 +21,7 @@ from web import sdk as sdk_mod  # noqa: E402
 from web import title as title_mod  # noqa: E402
 from web.fake import DEFAULT_SCRIPT, FakeSession, FakeSessionFactory  # noqa: E402
 from web.runs import RunManager  # noqa: E402
+from web.task_info import TASK_INFO_INSTRUCTIONS  # noqa: E402
 from web.tests.support import async_client, make_test_app  # noqa: E402
 from web.tests.test_api import collect_sse, open_stream, wait_status  # noqa: E402
 
@@ -32,6 +33,14 @@ def test_prompt_shape():
     assert prompt.endswith("User prompt:\n部署 nginx 1.25")
     long = "x" * 2000
     assert len(title_mod.title_prompt(long)) <= len(title_mod.TITLE_INSTRUCTIONS) + 20 + 960
+
+
+def test_task_info_rules_reach_fresh_and_resumed_execution():
+    for start in (None, sdk_mod.SessionStart.resume("existing-session")):
+        options = sdk_mod.default_options(start)
+        assert TASK_INFO_INSTRUCTIONS in options.system_prompt["append"]
+    # 会话标题继续使用原来的一次性纯标题提示词。
+    assert TASK_INFO_INSTRUCTIONS not in title_mod.title_prompt("部署 nginx")
 
 
 def test_clean_title_variants():

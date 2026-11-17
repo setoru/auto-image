@@ -14,7 +14,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
-from web.tasks import TaskStore, build_task_prompt, parse_software_version  # noqa: E402
+from web.tasks import TaskStore, build_task_prompt  # noqa: E402
 
 
 def ev(run_id, etype, payload, ts):
@@ -25,8 +25,16 @@ def make_store(task_dir, roots=None):
     return TaskStore(Path(task_dir), roots or {})
 
 
-def stage_event(run_id, stage, subagent, ts):
-    return ev(run_id, "stage.changed", {"stage": stage, "status": "running", "subagent": subagent}, ts)
+def task_info(title, software=None, version=None, output_dir=None, meta=None):
+    return {"title": title, "software": software, "actual_version": version,
+            "output_dir": output_dir, "install_meta_file": meta}
+
+
+def stage_event(run_id, stage, subagent, ts, info=None):
+    payload = {"stage": stage, "status": "running", "subagent": subagent}
+    if info is not None:
+        payload["task_info"] = info
+    return ev(run_id, "stage.changed", payload, ts)
 
 
 def test_create_image_task_from_deploy_guide():
@@ -34,28 +42,27 @@ def test_create_image_task_from_deploy_guide():
         store = make_store(td)
         t0, t1 = 1_700_000_000.0, 1_700_000_030.0
         store.handle_event(ev("r1", "user.message", {"text": "一键部署 nginx，版本 1.25.3"}, t0))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", t1))
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", t1,
+                                      task_info("部署 nginx 镜像", "nginx")))
         (task,) = store.list()
-        assert task["type"] == "image"
+        assert task["type"] == "image" and task["origin"] == "auto"
         assert task["status"] == "RUNNING"
-        assert task["software"] == "nginx" and task["version"] == "1.25.3", task
-        assert task["name"].startswith("镜像 nginx 1.25.3 ("), task["name"]
+        assert task["software"] == "nginx" and task["version"] is None, task
+        assert task["name"].startswith("部署 nginx 镜像 ("), task["name"]
         assert task["stages"] == [{"stage": "GUIDE", "started_at": t1, "ended_at": None}]
         assert task["current_stage"] == "GUIDE"
-        # 落盘了（task/ 目录一个 JSON）
         files = list(Path(td).glob("task-*.json"))
         assert len(files) == 1 and json.loads(files[0].read_text())["task_id"] == task["task_id"]
-
 
 def test_create_rpm_task_from_rpm_build():
     with tempfile.TemporaryDirectory() as td:
         store = make_store(td)
         store.handle_event(ev("r1", "user.message", {"text": "制作 redis 7.2 的 RPM 包"}, 1.0))
-        store.handle_event(stage_event("r1", "BUILD", "rpm-build", 2.0))
+        store.handle_event(stage_event("r1", "BUILD", "rpm-build", 2.0,
+                                      task_info("制作 redis RPM 包", "redis", "7.2")))
         (task,) = store.list()
-        assert task["type"] == "rpm"
+        assert task["type"] == "rpm" and task["software"] == "redis"
         assert task["stages"][0]["stage"] == "BUILD"
-
 
 def test_stage_progression_and_dedupe():
     with tempfile.TemporaryDirectory() as td:
@@ -129,49 +136,47 @@ def test_plain_and_second_turn_tasks():
     with tempfile.TemporaryDirectory() as td:
         store = make_store(td)
         base = 1_700_000_000.0
-        # 无 stage 事件的回合：不建任务
         store.handle_event(ev("r1", "user.message", {"text": "你好"}, base))
         store.handle_event(ev("r1", "turn.completed", {"result": "ok"}, base + 1))
         assert store.list() == []
-        # 同会话第二回合开流水线：建任务
         store.handle_event(ev("r1", "user.message", {"text": "部署 nginx 1.25"}, base + 10))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 11))
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 11,
+                                      task_info("部署 nginx 镜像", "nginx")))
         store.handle_event(ev("r1", "turn.completed", {"result": "ok"}, base + 20))
-        # 第三回合再开一条：第二个任务
         store.handle_event(ev("r1", "user.message", {"text": "部署 redis 7.2"}, base + 30))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 31))
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 31,
+                                      task_info("部署 redis 镜像", "redis")))
         store.handle_event(ev("r1", "turn.completed", {"result": "ok"}, base + 40))
         tasks = store.list()
         assert len(tasks) == 2
-        assert tasks[0]["software"] == "redis" and tasks[1]["software"] == "nginx"  # 新→旧
+        assert tasks[0]["software"] == "redis" and tasks[1]["software"] == "nginx"
 
-
-def test_artifact_confirm_and_install_meta():
+def test_explicit_historical_meta_path_supplies_machine():
     with tempfile.TemporaryDirectory() as td:
-        roots_dir = Path(td) / "roots"
-        deploy = roots_dir / "deploy"
-        sw_ver = deploy / "nginx" / "1.25.3"
-        sw_ver.mkdir(parents=True)
-        (sw_ver / "nginx-install.md").write_text("guide", encoding="utf-8")
-        (sw_ver / "nginx-install-meta.json").write_text(json.dumps({
+        deploy = Path(td) / "roots/deploy"
+        directory = deploy / "nginx/1.25.3"
+        directory.mkdir(parents=True)
+        (directory / "old-alias-install-meta.json").write_text(json.dumps({
             "path": "create", "server_alias": "nginx-2026091414",
             "instance_id": "i-123", "auth_method": "password",
-        }), encoding="utf-8")
-        store = make_store(Path(td) / "task", {"deploy": deploy, "rpm": roots_dir / "rpm"})
-        base = time.time() - 5  # 产物 mtime（当下）晚于任务创建 → 候选
+        }))
+        store = make_store(Path(td) / "task", {"deploy": deploy})
+        base = time.time()
         store.handle_event(ev("r1", "user.message", {"text": "部署 nginx"}, base))
-        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", base + 1))
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", base + 1,
+                                      task_info("部署 nginx 1.25.3", "nginx", "1.25.3",
+                                                "deploy/nginx/1.25.3",
+                                                "deploy/nginx/1.25.3/old-alias-install-meta.json")))
         task = store.list()[0]
         assert task["confirmed"] is True
         assert task["software"] == "nginx" and task["version"] == "1.25.3"
         assert task["instance_id"] == "i-123" and task["server_alias"] == "nginx-2026091414"
         assert "nginx 1.25.3" in task["name"]
 
-
-def test_fixed_version_machine_survives_unrelated_newer_outputs():
+def test_explicit_machine_survives_unrelated_newer_outputs():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        selected = root / "deploy" / "nginx" / "1.3.0"
+        selected = root / "deploy/nginx/1.3.0"
         selected.mkdir(parents=True)
         (selected / "nginx-install-meta.json").write_text(json.dumps({
             "instance_id": "i-selected", "server_alias": "selected",
@@ -179,23 +184,28 @@ def test_fixed_version_machine_survives_unrelated_newer_outputs():
         store = make_store(root / "task", {"deploy": root / "deploy"})
         now = time.time()
         store.handle_event(ev("r1", "user.message", {"text": "部署 nginx 1.3.0"}, now))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", now + 1))
-        # 同软件新版本和其他软件都在本任务中途写产物，且时间比本任务新。
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", now,
+                                      task_info("部署 nginx 镜像", "nginx")))
+        task = store.list()[0]
+        name = task["name"]
+        assert task["instance_id"] is None
         for software, version in (("nginx", "1.4.0"), ("redis", "7.2")):
             other = root / "deploy" / software / version
             other.mkdir(parents=True)
             (other / f"{software}-install-meta.json").write_text(json.dumps({"instance_id": "i-wrong"}))
-            (other / f"{software}-summary.md").write_text("新总结")
-            (other / f"{software}-state.json").write_text("{}")
-        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 2))
+            (other / f"{software}-install.md").write_text("new output")
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 2,
+                                      task_info("阶段标题不替换整体标题", "nginx", "1.3.0",
+                                                "deploy/nginx/1.3.0",
+                                                "deploy/nginx/1.3.0/nginx-install-meta.json")))
         task = store.list()[0]
         assert (task["software"], task["version"], task["instance_id"], task["server_alias"]) == (
             "nginx", "1.3.0", "i-selected", "selected"), task
+        assert task["name"] == name and task["created_at"] == now
         saved = json.loads((root / "task" / f"{task['task_id']}.json").read_text())
-        assert saved["run_id"] == "r1" and "production_id" not in saved and "call_id" not in saved
+        assert saved["run_id"] == "r1" and saved["title"] == "部署 nginx 镜像"
 
-
-def test_missing_fixed_version_does_not_switch_to_other_directory():
+def test_missing_explicit_meta_does_not_switch_to_other_directory():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         for software, version in (("nginx", "1.4.0"), ("redis", "7.2")):
@@ -205,13 +215,15 @@ def test_missing_fixed_version_does_not_switch_to_other_directory():
         store = make_store(root / "task", {"deploy": root / "deploy"})
         now = time.time()
         store.handle_event(ev("r1", "user.message", {"text": "部署 nginx 1.3.0"}, now))
-        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1))
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1,
+                                      task_info("部署 nginx 镜像", "nginx",
+                                                output_dir="deploy/nginx/1.3.0",
+                                                meta="deploy/nginx/1.3.0/nginx-install-meta.json")))
         task = store.list()[0]
-        assert (task["software"], task["version"]) == ("nginx", "1.3.0"), task
+        assert (task["software"], task["version"]) == ("nginx", None), task
         assert task["instance_id"] is None and not task["confirmed"], task
 
-
-def test_summary_state_attachments_and_temporary_files_do_not_confirm_task_identity():
+def test_missing_metadata_does_not_guess_from_any_outputs():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         now = time.time()
@@ -226,13 +238,12 @@ def test_summary_state_attachments_and_temporary_files_do_not_confirm_task_ident
             os.utime(old_guide, (now - 1000, now - 1000))
         store = make_store(root / "task", {"deploy": root / "deploy"})
         store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", now))
-        task = store.list()[0]
-        assert task["software"] is None and task["version"] is None and not task["confirmed"], task
+        assert store.list()[0]["software"] is None
         current = root / "deploy/nginx/1.3.0/nginx-verify.md"
         current.write_text("current stage output")
         store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1))
-        assert (task["software"], task["version"]) == ("nginx", "1.3.0"), task
-
+        task = store.list()[0]
+        assert task["software"] is None and task["version"] is None and not task["confirmed"], task
 
 def test_ambiguous_stage_outputs_are_not_selected_by_mtime():
     with tempfile.TemporaryDirectory() as td:
@@ -247,44 +258,50 @@ def test_ambiguous_stage_outputs_are_not_selected_by_mtime():
         assert task["software"] is None and task["version"] is None and not task["confirmed"], task
 
 
-def test_unique_stage_directory_replaces_alias_and_requested_version_placeholders():
+def test_explicit_identity_ignores_requested_and_directory_versions():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
-        directory = root / "deploy/nodejs/20.18.1"
+        directory = root / "deploy/nodejs/latest"
         directory.mkdir(parents=True)
-        (directory / "nodejs-install.md").write_text("current stage output")
         (directory / "nodejs-install-meta.json").write_text(json.dumps({"instance_id": "i-node"}))
         store = make_store(root / "task", {"deploy": root / "deploy"})
         now = time.time()
         store.handle_event(ev("r1", "user.message", {"text": "部署 Node.js 20"}, now))
-        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1))
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1,
+                                      task_info("部署 Node.js 镜像", "nodejs", "20.18.1",
+                                                "deploy/nodejs/latest",
+                                                "deploy/nodejs/latest/nodejs-install-meta.json")))
         task = store.list()[0]
         assert task["confirmed"] and (task["software"], task["version"]) == ("nodejs", "20.18.1"), task
         assert task["instance_id"] == "i-node", task
 
-
-def test_guessed_environment_cannot_supply_machine_before_directory_confirmation():
+def test_environment_and_old_meta_cannot_supply_machine_at_guide():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         now = time.time()
         old_directory = root / "deploy/Ubuntu/22.04"
         old_directory.mkdir(parents=True)
-        old_meta = old_directory / "Ubuntu-install-meta.json"
-        old_meta.write_text(json.dumps({"instance_id": "i-unrelated", "server_alias": "unrelated"}))
-        os.utime(old_meta, (now - 1000, now - 1000))
+        (old_directory / "Ubuntu-install-meta.json").write_text(json.dumps({
+            "instance_id": "i-unrelated", "server_alias": "unrelated",
+        }))
         directory = root / "deploy/nginx/1.25.3"
         directory.mkdir(parents=True)
-        (directory / "nginx-install.md").write_text("current stage output")
         (directory / "nginx-install-meta.json").write_text(json.dumps({
             "instance_id": "i-nginx", "server_alias": "nginx-target",
         }))
         store = make_store(root / "task", {"deploy": root / "deploy"})
         store.handle_event(ev("r1", "user.message", {"text": "在 Ubuntu 22.04 上部署 nginx 1.25.3"}, now))
-        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 1))
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", now + 1,
+                                      task_info("部署 nginx 镜像", "nginx")))
         task = store.list()[0]
+        assert task["software"] == "nginx" and task["version"] is None
+        assert task["instance_id"] is None
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", now + 2,
+                                      task_info("部署 nginx 镜像", "nginx", "1.25.3",
+                                                "deploy/nginx/1.25.3",
+                                                "deploy/nginx/1.25.3/nginx-install-meta.json")))
         assert (task["software"], task["version"], task["instance_id"], task["server_alias"]) == (
             "nginx", "1.25.3", "i-nginx", "nginx-target"), task
-
 
 def test_ambiguous_stage_directories_do_not_use_raw_input_to_pick_a_machine():
     with tempfile.TemporaryDirectory() as td:
@@ -304,28 +321,30 @@ def test_ambiguous_stage_directories_do_not_use_raw_input_to_pick_a_machine():
         assert task["status"] == "DONE" and task["outcome"] == "success", task
 
 
-def test_task_type_does_not_fall_back_to_other_artifact_root():
+def test_image_task_does_not_read_rpm_meta():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         rpm = root / "rpm/nginx/1.3.0"
         rpm.mkdir(parents=True)
-        (rpm / "nginx-rpm-result.md").write_text("RPM build output")
+        (rpm / "nginx-install-meta.json").write_text(json.dumps({"instance_id": "i-rpm"}))
         store = make_store(root / "task", {"deploy": root / "deploy", "rpm": root / "rpm"})
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", time.time()))
-        assert store.list()[0]["software"] is None, store.list()
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", time.time(),
+                                      task_info("部署 nginx 镜像", "nginx", "1.3.0",
+                                                "rpm/nginx/1.3.0",
+                                                "rpm/nginx/1.3.0/nginx-install-meta.json")))
+        assert store.list()[0]["instance_id"] is None, store.list()
 
-
-def test_rpm_nested_stage_outputs_still_confirm_task():
+def test_rpm_identity_comes_from_metadata_with_nested_outputs():
     with tempfile.TemporaryDirectory() as td:
         root = Path(td)
         packages = root / "rpm/nginx/1.3.0/rpms/binary"
         packages.mkdir(parents=True)
         (packages / "nginx-1.3.0.aarch64.rpm").write_bytes(b"package")
         store = make_store(root / "task", {"rpm": root / "rpm"})
-        store.handle_event(stage_event("r1", "BUILD", "rpm-build", time.time()))
+        store.handle_event(stage_event("r1", "BUILD", "rpm-build", time.time(),
+                                      task_info("制作 nginx RPM 包", "nginx", "1.3.0", "rpm/nginx/1.3.0")))
         task = store.list()[0]
         assert task["type"] == "rpm" and (task["software"], task["version"]) == ("nginx", "1.3.0"), task
-
 
 def test_summary_turn_does_not_create_task():
     with tempfile.TemporaryDirectory() as td:
@@ -392,14 +411,22 @@ def test_recover_interrupts_running_and_no_dup():
         assert tasks[finished_id]["outcome"] == "success"
 
 
-def test_parse_software_version_cases():
-    assert parse_software_version("一键部署 nginx，版本 1.25.3 到机器") == ("nginx", "1.25.3")
-    assert parse_software_version("redis 7.2 打包") == ("redis", "7.2")
-    assert parse_software_version("制作 postgresql v16.1 的 RPM") == ("postgresql", "16.1")
-    assert parse_software_version("openEuler 22.03 LTS 下验证") == ("openEuler", "22.03")
-    assert parse_software_version("聊聊今天天气") == (None, None)
-    assert parse_software_version("") == (None, None)
-
+def test_missing_title_is_filled_once_without_changing_created_at():
+    with tempfile.TemporaryDirectory() as td:
+        store = make_store(td)
+        base = 1_700_000_000.0
+        store.handle_event(ev("r1", "user.message", {"text": "帮我安装docker"}, base))
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 1))
+        task = store.list()[0]
+        assert task["title"] is None and task["name"].startswith("镜像任务 (")
+        store.handle_event(stage_event("r1", "INSTALL", "deploy-install", base + 2,
+                                      task_info("部署 Docker 镜像", "docker")))
+        named = task["name"]
+        assert named.startswith("部署 Docker 镜像 (")
+        store.handle_event(stage_event("r1", "VERIFY", "deploy-verify", base + 3,
+                                      task_info("只读验证 Docker", "docker", "29.9.3")))
+        assert task["name"] == named and task["created_at"] == base + 1
+        assert task["version"] == "29.9.3"
 
 def test_create_manual_init_task():
     with tempfile.TemporaryDirectory() as td:

@@ -35,6 +35,8 @@ from claude_agent_sdk import (
     rename_session,
 )
 
+from .task_info import TASK_INFO_INSTRUCTIONS
+
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 # 方案第 9 节「固定上限」的取值：一个完整部署回合的 turns 预算；
@@ -51,7 +53,7 @@ SYSTEM_PROMPT = """你是 auto-image 部署流水线的 Web 会话执行者，�
 - 用户手动调用 deploy-summary（.claude/skills/deploy-summary/SKILL.md）时只阅读材料并保存总结和必要附件，不修改阶段报告、安装 meta、机器或任务状态，不派发部署阶段、不执行远程或云操作，也不新建部署任务。
 - 不向输出暴露凭据：API Key、密码、SSH 私钥等不在消息、思维链与工具摘要中出现。
 - 未经用户明确确认，验证未通过不得归档；用户显式要求跳过门禁时，先复述风险、取得用户确认后再执行。
-- 已提交的云操作（创建 ECS、制镜像等）不可撤销；用户要求停止或调整时，如实告知这一边界。"""
+- 已提交的云操作（创建 ECS、制镜像等）不可撤销；用户要求停止或调整时，如实告知这一边界。""" + "\n\n" + TASK_INFO_INSTRUCTIONS
 
 # guide 阶段联网链路：SDK 会话内内置 WebFetch 被域名安全校验拦截、
 # WebSearch 被权限层拒（实测记录见 web/README.md），显式接入既有

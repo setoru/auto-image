@@ -7,8 +7,10 @@ dataclass 消息（经 to_dict 适配成同一形状）。映射规则只此一�
 
 运行：python web/tests/test_normalize.py
 """
+import json
 import os
 import sys
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", ".."))
 from claude_agent_sdk import (  # noqa: E402
@@ -22,7 +24,7 @@ from claude_agent_sdk import (  # noqa: E402
     ToolUseBlock,
     UserMessage,
 )
-from web.normalize import TOOL_DETAIL_LIMIT, is_final_result, normalize_message  # noqa: E402
+from web.normalize import STAGE_BY_SUBAGENT, TOOL_DETAIL_LIMIT, is_final_result, normalize_message  # noqa: E402
 from web.sdk import to_dict  # noqa: E402
 
 
@@ -190,6 +192,95 @@ def test_stage_derivation_from_task_subagent_type():
         ]},
     }, {})
     assert [e[0] for e in events] == ["agent.tool_started"]
+
+
+def test_sdk_pipeline_prompts_carry_task_info_into_stage_events():
+    info = {
+        "title": "部署 Spark",
+        "software": "spark",
+        "actual_version": "4.1.0",
+        "output_dir": "deploy/spark/latest",
+        "install_meta_file": "deploy/spark/latest/spark-install-meta.json",
+    }
+    prompt = f"<task_info>{json.dumps(info, ensure_ascii=False)}</task_info>\n执行本次阶段。"
+    for tool in ("Agent", "Task"):
+        for subagent, stage in STAGE_BY_SUBAGENT.items():
+            msg = AssistantMessage(
+                content=[ToolUseBlock(id="pipeline-info", name=tool, input={
+                    "subagent_type": subagent, "description": "执行流水线", "prompt": prompt,
+                })],
+                model="claude-x",
+            )
+            events = normalize_message(to_dict(msg), {})
+            assert events[0] == ("stage.changed", {
+                "stage": stage, "status": "running", "subagent": subagent, "task_info": info,
+            }), (tool, subagent)
+            assert events[1][0] == "agent.tool_started"
+            assert events[1][1]["summary"] == "执行流水线"
+
+
+def test_task_info_event_fields_redact_known_values_after_json_decode():
+    secret = 'test-credential"with\\escaping'
+    info = {
+        "title": "部署 HBase",
+        "software": secret,
+        "actual_version": f"v-{secret}",
+        "output_dir": f"deploy/{secret}/latest",
+        "install_meta_file": f"deploy/{secret}/latest/meta.json",
+    }
+    prompt = f"<task_info>{json.dumps(info, ensure_ascii=False)}</task_info>"
+    msg = AssistantMessage(
+        content=[ToolUseBlock(id="redacted-task-info", name="Agent", input={
+            "subagent_type": "deploy-install", "prompt": prompt,
+        })], model="claude-x",
+    )
+    with patch("web.redact.KNOWN_SECRETS", [secret]):
+        stage = normalize_message(to_dict(msg), {})[0][1]
+    assert stage["task_info"] == {
+        "title": "部署 HBase", "software": "***", "actual_version": "v-***",
+        "output_dir": "deploy/***/latest", "install_meta_file": "deploy/***/latest/meta.json",
+    }
+
+
+def test_invalid_task_info_does_not_interrupt_stage_or_tool_events():
+    for prompt in (None, {}, "干活", "<task_info>{broken}</task_info>",
+                   "<task_info>[]</task_info>", "<task_info>{\"title\":\"安装 Docker\"}</task_info>"):
+        msg = {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "invalid-info", "name": "Agent",
+                "input": {"subagent_type": "deploy-install", "prompt": prompt},
+            }]},
+        }
+        events = normalize_message(msg, {})
+        assert events[0] == ("stage.changed", {
+            "stage": "INSTALL", "status": "running", "subagent": "deploy-install",
+        }), prompt
+        assert events[1][0] == "agent.tool_started"
+
+
+def test_only_registered_pipeline_tool_prompts_supply_task_info():
+    info = {
+        "title": "安装 Docker", "software": "docker", "actual_version": None,
+        "output_dir": None, "install_meta_file": None,
+    }
+    prompt = f"<task_info>{json.dumps(info, ensure_ascii=False)}</task_info>"
+    for tool, subagent in (("Bash", "deploy-install"), ("Agent", "general-purpose"),
+                           ("Agent", "hce-rpm-check-archive")):
+        msg = {
+            "type": "assistant",
+            "message": {"content": [{
+                "type": "tool_use", "id": "other-tool", "name": tool,
+                "input": {"subagent_type": subagent, "prompt": prompt},
+            }]},
+        }
+        assert [event[0] for event in normalize_message(msg, {})] == ["agent.tool_started"]
+    # 工具顶层的同名字段不代替 prompt 中的约定块。
+    msg["message"]["content"][0] = {
+        "type": "tool_use", "id": "wrong-field", "name": "Agent",
+        "input": {"subagent_type": "deploy-install", "prompt": "干活", "task_info": info},
+    }
+    assert "task_info" not in normalize_message(msg, {})[0][1]
 
 
 def test_result_message_is_final_and_untouched_types_yield_nothing():

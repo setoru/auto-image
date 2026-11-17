@@ -14,18 +14,17 @@ import asyncio
 import logging
 
 from . import sdk as sdk_mod
-from .redact import redact_text
 from .runs import ENDED, RUNNING
+from .task_info import TITLE_MAX_CHARS, clean_title
 
 logger = logging.getLogger("web")
 
-TITLE_MAX_CHARS = 24
 TITLE_TIMEOUT_SECONDS = 60.0
 # 输入字节预算：防长指令把标题会话撑大，不切 UTF-8（Codex 同款取值）
 TITLE_PROMPT_MAX_BYTES = 960
 
 TITLE_INSTRUCTIONS = (
-    "Generate a concise, single-line task title of at most 24 characters and under "
+    f"Generate a concise, single-line task title of at most {TITLE_MAX_CHARS} characters and under "
     "five words where possible. Start with an imperative verb. Preserve ticket "
     "references exactly. Write in the user's language. Do not use quotes, markdown, "
     "or trailing punctuation. Do not answer the request. Output only the title text."
@@ -36,22 +35,6 @@ def title_prompt(user_text):
     """首条指令 → 标题会话输入：指令 + 字节预算截断的用户消息。"""
     text = user_text[:TITLE_PROMPT_MAX_BYTES]
     return f"{TITLE_INSTRUCTIONS}\n\nUser prompt:\n{text}"
-
-
-def clean_title(raw):
-    """模型输出 → 可用标题；形状不合返回 None（维持临时标题）。
-
-    外部输出兜底处理：strip 引号（含弯引号）与空白、去句尾标点、
-    脱敏、硬截 24 字符；清洗后为空视为失败。
-    """
-    if not isinstance(raw, str):
-        return None
-    text = raw.strip().strip("\"'“”‘’「」『』").strip()
-    text = " ".join(text.split()).rstrip(".?!。！？…")
-    if not text:
-        return None
-    text = redact_text(text)
-    return text[:TITLE_MAX_CHARS]
 
 
 async def generate_title(user_text, session_factory):

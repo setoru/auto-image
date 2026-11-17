@@ -11,6 +11,7 @@ tool_use 与 tool_result 仅以 id 关联，工具名映射由调用方逐回合
 import json
 
 from .redact import redact_text
+from .task_info import parse_task_info
 
 # 流水线阶段的唯一字面值来源（阶段名枚举只写一处）：事件推导与产物
 # 徽标（artifacts.CONFIG_KEY_STAGES）都取这些值，加阶段改这里 + config 键
@@ -202,9 +203,13 @@ def normalize_message(message, tool_names):
                 stage = STAGE_BY_SUBAGENT.get(subagent)
                 if stage:
                     # subagent 随行：任务跟踪按它分流镜像/RPM 流水线
+                    payload = {"stage": stage, "status": "running", "subagent": subagent}
+                    task_info = parse_task_info((block.get("input") or {}).get("prompt"))
+                    if task_info is not None:
+                        payload["task_info"] = task_info
                     events.append((
                         "stage.changed",
-                        {"stage": stage, "status": "running", "subagent": subagent},
+                        payload,
                     ))
                 events.append((
                     "agent.tool_started",

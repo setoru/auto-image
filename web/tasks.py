@@ -6,9 +6,9 @@ RPM：guide→build→verify→archive）。识别信号是 stage.changed 事件
 rpm-check / hce-rpm-check 是 skill 不是子 agent，天然不产生任务。
 
 数据来源与局限（如实）：
-- 软件名/版本：回合指令文本启发式提供占位，任务表单和确认后的目录
-  提供已知字段。未确认时仅用同类型下唯一的近期阶段产物目录修正，
-  不要求目录名与原始输入相等；总结、附件和临时文件不参与确认。
+- 自动任务标题、软件、实际版本及路径：执行模型随阶段派发提供 task_info。
+  未核实值保持空；明确的安装元数据文件提供机器身份，不扫描产物猜归属。
+  手动任务沿用表单字段及原有产物确认行为。
 - token：回合收尾事件的 usage（CLI 的 Result 累计值；resume 会话可能
   为全程累计而非本回合增量，按键取 max 幂等合并）。进行中任务为
   null（前端显示 —）。
@@ -25,7 +25,6 @@ import json
 import logging
 import math
 import os
-import re
 import secrets
 import tempfile
 import time
@@ -34,7 +33,7 @@ from pathlib import Path
 
 import yaml
 
-from .artifacts import CONFIG_KEY_STAGES, RPM_FILE_STAGES
+from .artifacts import CONFIG_KEY_STAGES, RPM_FILE_STAGES, resolve
 from .normalize import ARCHIVE, BUILD, GUIDE, INSTALL, VERIFY
 
 ALL_STAGES = (GUIDE, INSTALL, BUILD, VERIFY, ARCHIVE)
@@ -65,35 +64,13 @@ ECS_PARAM_LABELS = (
     ("bandwidth", "带宽Mbit/s"),
 )
 
-# 软件名+版本启发式：ASCII 词 + 少量标点/中文衔接（含「版本/version/v」）
-# + 版本号。启发式只做任务创建初期的占位，产物目录确认后覆盖。
-_SOFTWARE_RE = re.compile(
-    r"([A-Za-z][A-Za-z0-9_+.\-]{0,30})"
-    r"[\s,，:：（()、/]{0,8}"
-    r"(?:版本|version|v)?\s*"
-    r"(\d+(?:\.\d+){0,3}[A-Za-z0-9]*)"
-)
-
-
-def parse_software_version(text):
-    """指令文本 → (software, version) 启发式解析；无命中返回 (None, None)。
-
-    取首个「软件词 + 版本号」对；软件词吞掉的尾部 -v/+v/_v 剥掉。
-    中文指令里「部署 nginx，版本 1.25.3」「redis 7.2」等常态可解析。
-    """
-    m = _SOFTWARE_RE.search(str(text or ""))
-    if not m:
-        return None, None
-    software = re.sub(r"[-_+/]?v$", "", m.group(1))
-    version = m.group(2)
-    if not software:
-        return None, version or None
-    return software, version or None
-
-
 def _task_name(task):
-    """任务名 = 类型 + 软件 + 版本 + (YYYYMMDDHHMM)。未知字段如实占位。"""
+    """自动任务用模型标题；手动任务用表单字段，时间始终取原创建时刻。"""
     label = TYPE_LABELS.get(task["type"], task["type"])
+    stamp = datetime.fromtimestamp(task["created_at"]).strftime("%Y%m%d%H%M")
+    if task.get("origin") != "manual":
+        title = task.get("title") or f"{label}任务"
+        return f"{title} ({stamp})"
     parts = [label]
     if task["software"]:
         parts.append(task["software"])
@@ -101,7 +78,6 @@ def _task_name(task):
             parts.append(task["version"])
     else:
         parts.append("未知")
-    stamp = datetime.fromtimestamp(task["created_at"]).strftime("%Y%m%d%H%M")
     return f"{' '.join(parts)} ({stamp})"
 
 
@@ -198,7 +174,7 @@ class TaskStore:
         self._meta_pattern = config["install_meta_file"]
         self._tasks = {}            # task_id → 任务记录
         self._active = {}           # run_id → 进行中 task_id（一个 run 同时至多一个）
-        self._turn_text = {}        # run_id → 本回合指令文本（启发式解析源）
+        self._turn_text = {}        # run_id → 本回合原始指令（执行记录）
 
     # ---- 手动任务（面板「+ 新建任务」→ INIT → 「▶ 运行」起会话）----
 
@@ -301,6 +277,7 @@ class TaskStore:
                 task["updated_at"] = ts
         else:
             task = self._create(run_id, payload.get("subagent"), stage, ts)
+        self._apply_task_info(task, payload.get("task_info"))
         self._maybe_confirm(task)
         self._save(task)
 
@@ -326,19 +303,22 @@ class TaskStore:
 
     def _create(self, run_id, subagent, stage, ts):
         ttype = "rpm" if str(subagent or "").startswith("rpm-") else "image"
-        software, version = parse_software_version(self._turn_text.get(run_id, ""))
         task_id = ("task-"
                    + datetime.fromtimestamp(ts).strftime("%Y%m%d%H%M%S")
                    + "-" + secrets.token_hex(2))
         task = {
             "task_id": task_id,
             "run_id": run_id,
+            "origin": "auto",
             "type": ttype,
             "status": "RUNNING",
             "outcome": None,
-            "name": "",  # _rename 填
-            "software": software,
-            "version": version,
+            "name": "",
+            "title": None,
+            "software": None,
+            "version": None,
+            "output_dir": None,
+            "install_meta_file": None,
             "confirmed": False,
             "stages": [{"stage": stage, "started_at": ts, "ended_at": None}],
             "current_stage": stage,
@@ -355,10 +335,31 @@ class TaskStore:
         self._active[run_id] = task_id
         return task
 
+    def _apply_task_info(self, task, info):
+        """采用 normalize 已解析的模型信息，首个有效标题保持稳定。"""
+        if task.get("origin") == "manual" or info is None:
+            return
+        if task.get("title") is None:
+            task["title"] = info["title"]
+            task["name"] = _task_name(task)
+        for source, target in (
+            ("software", "software"),
+            ("actual_version", "version"),
+            ("output_dir", "output_dir"),
+            ("install_meta_file", "install_meta_file"),
+        ):
+            if info[source] is not None:
+                task[target] = info[source]
+        task["confirmed"] = bool(task["software"] and task["version"])
+
     # ---- 产物确认（软件/版本/机器）----
 
     def _maybe_confirm(self, task):
-        """先确认产物目录，再读机器快照；原始指令中的占位不作为机器身份。"""
+        """自动任务读明确机器记录；手动任务沿用原产物确认规则。"""
+        if task.get("origin") != "manual":
+            if task["type"] == "image" and task.get("install_meta_file"):
+                self._read_install_meta(task)
+            return
         if task["confirmed"] and task["software"] and task["version"]:
             if task["type"] == "image":
                 self._read_install_meta(task)
@@ -374,7 +375,7 @@ class TaskStore:
             self._read_install_meta(task)
 
     def _scan_candidate(self, task):
-        """只扫描同类型根下真实阶段产物；多个近期目录时保留未确认状态。"""
+        """手动任务只扫描同类型真实阶段产物；多个近期目录时不选择。"""
         root_name = "rpm" if task["type"] == "rpm" else "deploy"
         root = self._roots.get(root_name)
         if root is None or not root.is_dir():
@@ -396,7 +397,7 @@ class TaskStore:
         return candidates[0] if len(candidates) == 1 else None
 
     def _read_install_meta(self, task):
-        """镜像任务：明确 deploy/<软件>/<版本> 的配置元数据文件 → 机器标识。
+        """镜像任务：自动任务明确文件、手动任务配置路径 → 机器标识。
 
         create 路径有 instance_id；已有别名路径只有 server_alias（名字兜底
         join 靠它）。解析失败静默跳过（下次阶段推进再试）。
@@ -404,14 +405,20 @@ class TaskStore:
         base = self._roots.get("deploy")
         if base is None:
             return
-        software, version = str(task["software"]), str(task["version"])
-        if any(Path(part).name != part or part in (".", "..") for part in (software, version)):
-            return
-        filename = self._meta_pattern.replace("{{software}}", software).replace("{{version}}", version)
-        meta_file = base / software / version / filename
-        if not meta_file.resolve().is_relative_to(base.resolve()):
-            return
         try:
+            if task.get("origin") == "manual":
+                software, version = str(task["software"]), str(task["version"])
+                if any(Path(part).name != part or part in (".", "..") for part in (software, version)):
+                    return
+                filename = self._meta_pattern.replace("{{software}}", software).replace("{{version}}", version)
+                meta_file = base / software / version / filename
+                if not meta_file.resolve().is_relative_to(base.resolve()):
+                    return
+            else:
+                found = resolve({"deploy": base}, (), task.get("install_meta_file"))
+                if found is None:
+                    return
+                _entry, meta_file = found
             data = json.loads(meta_file.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return

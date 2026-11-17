@@ -77,6 +77,14 @@ OBS 配置修改先审计后执行；OBS 全局配置（凭据/桶/endpoint）�
 不自动覆盖或重提。手动创建或编辑落盘失败返回 `503 task_save_failed`，
 原任务内容保留；事件观察者的持久化错误仍不会阻断部署回合。
 
+在会话中派发部署或 RPM 阶段时，Web 自动创建流水线任务。执行模型结合
+本回合目标和会话上下文，在子 agent 的原有 `prompt` 中提供 `task_info`；
+字段和输出示例以 [task_info.py](task_info.py) 为准，不另外调用命名模型。
+任务显示名采用首次有效的整体标题和原创建分钟，后续阶段补齐已核实身份与
+路径。版本未知时保持空值，批量任务用整体标题，不能用其中一个包代表整批。
+信息缺失或格式错误时显示临时任务名，阶段跟踪仍照常进行；后续有效信息可
+补齐标题。已存任务按原 `name` 恢复，刷新和重启不会重新命名历史任务。
+
 ## 角色与用户清单升级
 
 升级前停止 Web 服务，备份实际使用的用户清单（`WEB_USERS_PATH`，缺省项目根
@@ -260,9 +268,10 @@ Ubuntu deploy 按已确认官方项目统一名称与路径，优先用
 旧状态文件和此前已有的嵌套目录仍可浏览和导出，不要求迁移。
 
 Web 保留现有会话 `run_id` 和任务 `task_id`，不再生成额外调用或制作身份。
-任务按确认的目录读取安装 meta；仅同类型下唯一的近期阶段产物目录参与
-输入占位的修正，别名或请求版本与目录不同不会被硬过滤，多个候选时保持
-未确认。总结、附件、临时文件及旧状态的修改时间不会改变任务归属。
+自动任务的应用身份与实际版本来自模型随阶段提供的已核实信息，目录单独
+记录。机器身份只从本次安装或已明确续作的精确 meta 文件读取；新部署的
+GUIDE 阶段不读取同目录旧机器记录。自动任务不解析原指令中的软件版本，
+不通过整个产物根目录的修改时间猜测归属；手动任务沿用原有表单确认规则。
 手动 `deploy-summary` 只阅读材料、保存总结和必要附件，不产生部署阶段、
 任务、专用接口或云操作。完整部署继续按原四阶段执行，参考总结缺失或
 查找失败不影响原流程；总结存在也不证明本次安装或验证完成。
@@ -316,6 +325,8 @@ python web/tests/test_sdk.py        # options 契约（身份、Fork、系统提
 python web/tests/test_recovery.py # 安全恢复（版本化簿记/legacy 迁移/受限恢复/落盘门/人工转移）
 python web/tests/test_state.py      # 身份映射、墓碑与 Fork 来源簿记
 python web/tests/test_tasks.py      # 任务面板与手动建任务端点
+python web/tests/test_task_info.py  # 模型任务信息约定、解析与共用标题清理
+python web/tests/test_auto_task_info_api.py # 原始 SDK 消息经任务 API/SSE 的隔离集成
 python web/tests/test_task_editing.py  # 共享编辑、预览、启动冲突与保存失败
 python web/tests/test_title.py      # 标题生成（prompt/清洗/一次性会话/幂等/写回）
 python web/tests/test_transcript_times.py # transcript 时刻读取
@@ -335,6 +346,8 @@ cd web-ui && npm test && npm run build    # 前端完整测试与生产构建
 | `events.py` | 进程内事件存储：seq 递增、快照重放、全局订阅唤醒 |
 | `session.py` | 回合执行（send 起回合级 asyncio.Task，SDK 连接只包住一个回合；停止意图覆盖连接建立前与 query 前的启动窗口） |
 | `normalize.py` | SDK 消息 → 内部事件映射、阶段推导 |
+| `task_info.py` | 执行模型的任务信息约定、JSON 解析及共用标题清理 |
+| `tasks.py` | 流水线任务事件观察者、自动任务模型标题与明确身份、手动任务表单及 task/ 持久化 |
 | `artifacts.py` | 多根产物浏览（隐藏内部文件与 market-doc 文件/素材；目录分组 + 最新落盘排序，约定文件带阶段徽标）、内容读取、单文件下载与批量 zip、路径约束 |
 | `redact.py` | 事件出口脱敏（运行时已知值清单 + AK/SK、密码字段、私钥块形状正则） |
 | `rebuild.py` | 服务重启后的恢复（单一流程）：全量 transcript 按 session 粒度重放 + state 簿记叠加——身份映射命中的沿用原 run_id 并恢复 owner 归属，墓碑会话标 ENDED；其余重放会话 READY 可续聊，未收尾回合（transcript 推导 turn_open）补 `turn.interrupted` 不伪造完成 |
@@ -413,7 +426,7 @@ cd web-ui && npm test && npm run build    # 前端完整测试与生产构建
    包装）或块列表（tool_result 回填），无 Result 消息——回合边界由「下一
    条真实用户输入」推导、回合汇总取该回合最后一条 agent 文本；重放的
    run 状态 READY（可续聊可 Fork），流无终态收尾事件、快照重放完即断
-   等待续聊。`list_sessions(directory=项目根)` 的 first_prompt 即任务名来源。
+   等待续聊。`list_sessions(directory=项目根)` 的 first_prompt 是会话临时标题来源。
 14. **服务重启的恢复**（state 簿记 + 真 SDK 实测）：簿记只存墓碑（用户
    ENDED 的 session_id）、身份映射（run_id ↔ session_id）与 Fork 来源镜像
    （session_id → 来源 run_id），每次状态变更即全量原子写。首回合一经接受
