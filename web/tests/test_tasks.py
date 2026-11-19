@@ -126,13 +126,13 @@ def test_session_ended_mid_task_interrupts():
         store.handle_event(ev("r1", "session.ended", {}, base + 5))
         task = store.list()[0]
         assert task["status"] == "DONE" and task["outcome"] == "interrupted"
-        # 收尾后同 run 再无活动任务：下一条流水线指令可开新任务
-        store.handle_event(ev("r1", "user.message", {"text": "再来一次 postgres 16.1"}, base + 10))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 20))
-        assert len(store.list()) == 2
+        # 重复结束会话不改写已收尾任务。
+        ended = json.loads(json.dumps(task))
+        store.handle_event(ev("r1", "session.ended", {}, base + 10))
+        assert store.list() == [ended]
 
 
-def test_plain_and_second_turn_tasks():
+def test_plain_and_continuation_turns_reuse_task():
     with tempfile.TemporaryDirectory() as td:
         store = make_store(td)
         base = 1_700_000_000.0
@@ -142,14 +142,71 @@ def test_plain_and_second_turn_tasks():
         store.handle_event(ev("r1", "user.message", {"text": "部署 nginx 1.25"}, base + 10))
         store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 11,
                                       task_info("部署 nginx 镜像", "nginx")))
-        store.handle_event(ev("r1", "turn.completed", {"result": "ok"}, base + 20))
-        store.handle_event(ev("r1", "user.message", {"text": "部署 redis 7.2"}, base + 30))
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 31,
-                                      task_info("部署 redis 镜像", "redis")))
-        store.handle_event(ev("r1", "turn.completed", {"result": "ok"}, base + 40))
+        store.handle_event(ev("r1", "turn.completed", {"usage": {"input_tokens": 100,
+                                                                "output_tokens": 50}}, base + 20))
+        (task,) = store.list()
+        first = json.loads(json.dumps(task))
+        # 普通问答不重开任务，也不覆盖上轮流水线结果。
+        store.handle_event(ev("r1", "user.message", {"text": "解释一下结果"}, base + 21))
+        store.handle_event(ev("r1", "turn.failed", {"usage": {"input_tokens": 200}}, base + 22))
+        assert store.list() == [first]
+        store.handle_event(ev("r1", "user.message", {"text": "继续归档"}, base + 30))
+        store.handle_event(stage_event("r1", "ARCHIVE", "deploy-archive", base + 31,
+                                      task_info("继续归档 nginx", "nginx", "1.25")))
+        assert len(store.list()) == 1
+        assert task["task_id"] == first["task_id"]
+        assert task["status"] == "RUNNING" and task["outcome"] is None and task["ended_at"] is None
+        assert task["current_stage"] == "ARCHIVE"
+        for key in ("name", "title", "created_at", "turn_text", "type"):
+            assert task[key] == first[key], key
+        assert task["version"] == "1.25"
+        assert task["usage"] == first["usage"]
+        store.handle_event(ev("r1", "turn.completed", {"usage": {"input_tokens": 250,
+                                                                "output_tokens": 40}}, base + 40))
+        assert task["status"] == "DONE" and task["outcome"] == "success"
+        assert task["ended_at"] == base + 40 and task["current_stage"] is None
+        assert task["stages"] == [
+            {"stage": "GUIDE", "started_at": base + 11, "ended_at": base + 20},
+            {"stage": "ARCHIVE", "started_at": base + 31, "ended_at": base + 40},
+        ]
+        assert task["usage"]["input_tokens"] == 250 and task["usage"]["output_tokens"] == 50
+        completed = json.loads(json.dumps(task))
+        store.handle_event(ev("r1", "turn.completed", {"usage": {"input_tokens": 999}}, base + 41))
+        assert store.list() == [completed]
+        files = list(Path(td).glob("task-*.json"))
+        assert len(files) == 1 and json.loads(files[0].read_text()) == task
+
+
+def test_failed_and_stopped_turns_reuse_task():
+    for ending in ("turn.failed", "turn.stopped"):
+        with tempfile.TemporaryDirectory() as td:
+            store = make_store(td)
+            base = 1_700_000_000.0
+            store.handle_event(stage_event("r1", "VERIFY", "deploy-verify", base,
+                                          task_info("验证 nginx 镜像", "nginx")))
+            (task,) = store.list()
+            task_id, name = task["task_id"], task["name"]
+            store.handle_event(ev("r1", ending, {}, base + 1))
+            store.handle_event(ev("r1", "user.message", {"text": "修正后重新验证"}, base + 10))
+            store.handle_event(stage_event("r1", "VERIFY", "deploy-verify", base + 11,
+                                          task_info("重新验证 nginx", "nginx", "1.25")))
+            assert len(store.list()) == 1 and task["task_id"] == task_id and task["name"] == name
+            assert task["status"] == "RUNNING" and task["outcome"] is None and task["ended_at"] is None
+            # 上一回合的 VERIFY 已结束，因此这次重试追加阶段记录。
+            assert len(task["stages"]) == 2
+            store.handle_event(ev("r1", "turn.completed", {}, base + 12))
+            assert task["outcome"] == "success" and task["stages"][-1]["ended_at"] == base + 12
+
+
+def test_new_session_creates_distinct_task():
+    with tempfile.TemporaryDirectory() as td:
+        store = make_store(td)
+        for offset, run_id in enumerate(("r1", "forked-r2")):
+            store.handle_event(stage_event(run_id, "GUIDE", "deploy-guide", 100.0 + offset,
+                                          task_info("部署 nginx 镜像", "nginx")))
         tasks = store.list()
-        assert len(tasks) == 2
-        assert tasks[0]["software"] == "redis" and tasks[1]["software"] == "nginx"
+        assert len(tasks) == 2 and len({task["task_id"] for task in tasks}) == 2
+        assert {task["run_id"] for task in tasks} == {"r1", "forked-r2"}
 
 def test_explicit_historical_meta_path_supplies_machine():
     with tempfile.TemporaryDirectory() as td:
@@ -394,7 +451,7 @@ def test_recover_interrupts_running_and_no_dup():
         store.handle_event(stage_event("r1", "INSTALL", "deploy-install", base))
         store.handle_event(ev("r1", "turn.completed", {"result": "done"}, base + 60))
         finished_id = store.list()[0]["task_id"]  # 已收尾：success
-        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base + 100))
+        store.handle_event(stage_event("r2", "GUIDE", "deploy-guide", base + 100))
         running_id = store.list()[0]["task_id"]   # 进行中：重启后被 interrupted 定格
         assert running_id != finished_id
 
@@ -409,6 +466,41 @@ def test_recover_interrupts_running_and_no_dup():
         assert tasks[running_id]["outcome"] == "interrupted"
         assert tasks[running_id]["stages"][-1]["ended_at"] is not None
         assert tasks[finished_id]["outcome"] == "success"
+        recovered.handle_event(ev("r2", "user.message", {"text": "继续安装"}, base + 200))
+        recovered.handle_event(stage_event("r2", "INSTALL", "deploy-install", base + 201))
+        assert len(recovered.list()) == 2
+        assert tasks[running_id]["status"] == "RUNNING" and tasks[running_id]["outcome"] is None
+        recovered.handle_event(ev("r2", "turn.completed", {}, base + 210))
+        recovered.handle_event(stage_event("r1", "ARCHIVE", "deploy-archive", base + 211))
+        assert len(recovered.list()) == 2 and tasks[finished_id]["status"] == "RUNNING"
+        assert tasks[finished_id]["created_at"] == base
+
+
+def test_recover_old_multiple_tasks_keeps_files_and_reuses_first():
+    with tempfile.TemporaryDirectory() as td:
+        store = make_store(td)
+        base = 1_700_000_000.0
+        store.handle_event(stage_event("r1", "GUIDE", "deploy-guide", base,
+                                      task_info("部署 nginx 镜像", "nginx")))
+        store.handle_event(ev("r1", "turn.completed", {}, base + 1))
+        (first,) = store.list()
+        later = json.loads(json.dumps(first))
+        later.update(task_id="task-legacy-later", created_at=base + 10,
+                     title="继续归档 nginx", name="继续归档 nginx (202311142213)")
+        later_path = Path(td) / f"{later['task_id']}.json"
+        later_path.write_text(json.dumps(later), encoding="utf-8")
+        before = {path.name: path.read_bytes() for path in Path(td).glob("task-*.json")}
+        recovered = make_store(td)
+        recovered.recover()
+        assert len(recovered.list()) == 2
+        assert {path.name: path.read_bytes() for path in Path(td).glob("task-*.json")} == before
+        recovered.handle_event(stage_event("r1", "ARCHIVE", "deploy-archive", base + 20,
+                                          task_info("再次归档 nginx", "nginx", "1.25")))
+        assert len(recovered.list()) == 2
+        original = recovered.get(first["task_id"])
+        assert original["status"] == "RUNNING" and original["name"] == first["name"]
+        assert original["created_at"] == base and original["current_stage"] == "ARCHIVE"
+        assert recovered.get(later["task_id"]) == later and later_path.read_bytes() == before[later_path.name]
 
 
 def test_missing_title_is_filled_once_without_changing_created_at():
@@ -474,6 +566,30 @@ def test_mark_running_rejects_non_init():
         assert store.mark_running(task["task_id"], "r1", "x") is not None
         assert store.mark_running(task["task_id"], "r2", "x") is None  # 非 INIT 拒绝
         assert store.mark_running("task-nope", "r1", "x") is None
+
+
+def test_manual_continuation_and_recovery_reuse_task():
+    with tempfile.TemporaryDirectory() as td:
+        store = make_store(td)
+        task = store.create_manual({"software": "redis", "version": "7.2", "task_type": "rpm"})
+        original = {key: task[key] for key in ("task_id", "name", "created_at", "type")}
+        prompt = "制作 redis 7.2 的 RPM 包"
+        store.mark_running(task["task_id"], "r1", prompt)
+        store.handle_event(stage_event("r1", "BUILD", "rpm-build", 100.0))
+        store.handle_event(ev("r1", "turn.completed", {}, 101.0))
+        store.handle_event(ev("r1", "user.message", {"text": "继续验证"}, 110.0))
+        store.handle_event(stage_event("r1", "VERIFY", "rpm-verify", 111.0,
+                                      task_info("验证 redis RPM", "other", "1")))
+        assert len(store.list()) == 1 and task["status"] == "RUNNING"
+        assert task["origin"] == "manual" and (task["software"], task["version"]) == ("redis", "7.2")
+        store.handle_event(ev("r1", "turn.completed", {}, 112.0))
+        recovered = make_store(td)
+        recovered.recover()
+        recovered.handle_event(stage_event("r1", "ARCHIVE", "rpm-archive", 120.0))
+        (continued,) = recovered.list()
+        assert {key: continued[key] for key in original} == original
+        assert continued["turn_text"] == prompt and continued["status"] == "RUNNING"
+        assert [item["stage"] for item in continued["stages"]] == ["BUILD", "VERIFY", "ARCHIVE"]
 
 
 def test_build_task_prompt_cases():

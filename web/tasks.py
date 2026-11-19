@@ -1,7 +1,7 @@
 """流水线任务跟踪：rpm-*/deploy-* 子 agent 派发即建任务，落 task/ 目录。
 
-任务 = 一个回合内的完整流水线（镜像：guide→install→verify→archive；
-RPM：guide→build→verify→archive）。识别信号是 stage.changed 事件
+任务 = 一个会话的流水线跟踪单元（镜像：guide→install→verify→archive；
+RPM：guide→build→verify→archive），跨回合续作复用。识别信号是 stage.changed 事件
 （normalize.STAGE_BY_SUBAGENT，payload 带 subagent 用于分流类型）；
 rpm-check / hce-rpm-check 是 skill 不是子 agent，天然不产生任务。
 
@@ -10,8 +10,8 @@ rpm-check / hce-rpm-check 是 skill 不是子 agent，天然不产生任务。
   未核实值保持空；明确的安装元数据文件提供机器身份，不扫描产物猜归属。
   手动任务沿用表单字段及原有产物确认行为。
 - token：回合收尾事件的 usage（CLI 的 Result 累计值；resume 会话可能
-  为全程累计而非本回合增量，按键取 max 幂等合并）。进行中任务为
-  null（前端显示 —）。
+  为全程累计而非本回合增量，按键取 max 幂等合并）。尚无收尾 usage
+  的任务为 null（前端显示 —），续作保留此前累计值。
 - 机器：镜像任务的 install-meta.json（instance_id/server_alias）；
   RPM 流水线不落 meta，instance_id 恒 null。
 
@@ -173,7 +173,7 @@ class TaskStore:
         self._deploy_patterns = tuple(config[key] for key in CONFIG_KEY_STAGES)
         self._meta_pattern = config["install_meta_file"]
         self._tasks = {}            # task_id → 任务记录
-        self._active = {}           # run_id → 进行中 task_id（一个 run 同时至多一个）
+        self._by_run = {}           # run_id → 首个 task_id（跨回合保留）
         self._turn_text = {}        # run_id → 本回合原始指令（执行记录）
 
     # ---- 手动任务（面板「+ 新建任务」→ INIT → 「▶ 运行」起会话）----
@@ -231,7 +231,7 @@ class TaskStore:
         task["run_id"] = run_id
         task["turn_text"] = prompt
         task["updated_at"] = time.time()
-        self._active[run_id] = task_id
+        self._by_run[run_id] = task_id
         self._turn_text[run_id] = prompt
         self._save(task)
         return task
@@ -262,9 +262,12 @@ class TaskStore:
         stage = payload.get("stage")
         if stage not in ALL_STAGES:
             return
-        task_id = self._active.get(run_id)
+        task_id = self._by_run.get(run_id)
         if task_id:
             task = self._tasks[task_id]
+            task["status"] = "RUNNING"
+            task["outcome"] = None
+            task["ended_at"] = None
             stages = task["stages"]
             # 相邻同阶段重复派发（guide 重试）：不新增条目
             if stages and stages[-1]["stage"] == stage and stages[-1]["ended_at"] is None:
@@ -282,11 +285,14 @@ class TaskStore:
         self._save(task)
 
     def _on_turn_end(self, run_id, outcome, payload, ts):
-        task_id = self._active.pop(run_id, None)
+        task_id = self._by_run.get(run_id)
         self._turn_text.pop(run_id, None)
         if not task_id:
             return
         task = self._tasks[task_id]
+        # 普通聊天没有重开流水线；重复收尾也不覆盖已有结果。
+        if task["status"] != "RUNNING":
+            return
         stages = task["stages"]
         if stages and stages[-1]["ended_at"] is None:
             stages[-1]["ended_at"] = ts
@@ -332,7 +338,7 @@ class TaskStore:
         }
         task["name"] = _task_name(task)
         self._tasks[task_id] = task
-        self._active[run_id] = task_id
+        self._by_run[run_id] = task_id
         return task
 
     def _apply_task_info(self, task, info):
@@ -477,7 +483,7 @@ class TaskStore:
         一致）。损坏文件跳过不阻断启动。
         """
         self._tasks = {}
-        self._active = {}
+        self._by_run = {}
         self._turn_text = {}
         if not self._dir.is_dir():
             return
@@ -502,6 +508,10 @@ class TaskStore:
                 task["current_stage"] = None
                 task["ended_at"] = task.get("updated_at") or now
             self._tasks[task["task_id"]] = task
+        # 旧会话可能已有多条按回合创建的记录；保留文件，续作绑定首次任务。
+        for task in sorted(self._tasks.values(), key=lambda item: item.get("created_at") or 0):
+            if task.get("run_id"):
+                self._by_run.setdefault(task["run_id"], task["task_id"])
 
     def list(self):
         """全部任务（新→旧）；run_id 映射供前端会话互跳。"""

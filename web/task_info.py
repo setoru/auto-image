@@ -20,7 +20,7 @@ _CLOSE_TAG = "</task_info>"
 
 TASK_INFO_INSTRUCTIONS = f"""流水线任务信息：
 - 每次派发流水线子 agent（包括续作）时，在现有 Agent/Task 的 prompt 字符串开头写下方 JSON 块，再写本次执行要求；派发时用本回合信息替换示例，并填写全部字段。
-- title 由你结合本回合目标与会话上下文拟定，使用用户语言，单行且不超过 {TITLE_MAX_CHARS} 字符；同一回合后续派发沿用首次整体标题。批量 RPM 或多软件任务概括整个批次，单一身份字段不适用时填 null。
+- title 由你结合会话整体目标与上下文拟定，使用用户语言，单行且不超过 {TITLE_MAX_CHARS} 字符；后续阶段与续聊沿用首次整体标题。批量 RPM 或多软件任务概括整个批次，单一身份字段不适用时填 null。
 - software、actual_version、output_dir 只填写本次已核实的目标软件身份、实际版本、完整项目相对产物目录；未知填 null。实际版本与目录分别记录，目标系统版本、参考版本、目录名和 latest 均不代替实际版本。
 - install_meta_file 是完整项目相对文件路径，仅填写你已核对属于本次安装或明确续作的机器记录；新部署 GUIDE 阶段填 null，明确续作核对原机器记录后再提供。
 

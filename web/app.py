@@ -423,6 +423,11 @@ def create_app(session_factory=None, heartbeat_interval=15.0, static_dir=None,
         Path(task_dir) if task_dir is not None else DEFAULT_TASK_DIR, artifact_roots,
         deploy_config=deploy_config or DEFAULT_DEPLOY_CONFIG)
     task_store.recover()
+    # 转录未找回的会话仍在任务中占号，新会话不能认领其历史任务。
+    task_run_ids = [task["run_id"] for task in task_store.list()
+                    if task.get("run_id") and manager.get(task["run_id"]) is None]
+    if task_run_ids:
+        manager.adopt_ids(task_run_ids)
     store.add_observer(task_store.handle_event)
     app.state.task_store = task_store
 
